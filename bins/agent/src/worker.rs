@@ -1184,6 +1184,11 @@ fn supported_process_spec(execution_spec_json: &[u8]) -> Result<ProcessSpec, Str
             spec.version
         ));
     }
+    if spec.image.is_some() {
+        // Containment is a version-5 property; a version-1 payload that asks
+        // for it must never run directly on the host instead.
+        return Err("a version-1 execution spec cannot carry an image".to_owned());
+    }
     let mut steps = spec.steps;
     if steps.len() != 1 {
         return Err(format!(
@@ -1700,7 +1705,14 @@ async fn run_assignment(
                     fence,
                     session_epoch,
                     ordinal,
-                    step_container.as_deref(),
+                    step_container
+                        .as_deref()
+                        .zip(container_runtime.as_ref())
+                        .map(|(name, (runtime, _))| {
+                            (name, crate::container::runtime_context(runtime))
+                        })
+                        .as_ref()
+                        .map(|(name, context)| (*name, context.as_str())),
                 )?;
             }
             let request = ExecutionRequest {
@@ -3712,6 +3724,23 @@ mod tests {
         );
     }
 
+    /// A version-1 payload may not ask for containment: the image is a
+    /// version-5 property, and running such a payload directly on the host
+    /// would silently drop the containment it requested.
+    #[test]
+    fn a_version_one_spec_with_an_image_is_refused() {
+        let spec = serde_json::to_vec(&json!({"version": 1, "steps": [
+            {"kind": "process", "program": "/bin/true"}
+        ], "image": "docker.io/library/alpine@sha256:c64c687cbea9300178b30c95835354e34c4e4febc4badfe27102879de0483b5e"}))
+        .unwrap();
+        let refusal = unsupported(validate_assignment(&config(), 4, assignment(&spec)).unwrap());
+        assert!(
+            refusal.detail.contains("cannot carry an image"),
+            "{}",
+            refusal.detail
+        );
+    }
+
     /// A single process step keeps the version-1 shape and the single-step
     /// path exactly as before; version 5 never changes what an old spec means.
     #[test]
@@ -4915,6 +4944,7 @@ mod tests {
             process_birth_identity: None,
             current_step: None,
             container_name: None,
+            container_context: None,
             logs: Vec::new(),
             result: Some(result),
         };

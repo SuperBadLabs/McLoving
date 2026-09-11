@@ -45,6 +45,57 @@ pub(crate) fn container_name(attempt_id: &str, ordinal: u32) -> String {
     format!("mcloving-{attempt_id}-{ordinal}")
 }
 
+/// Identity of the runtime and storage context a container is launched in:
+/// the pinned podman path plus the environment rootless podman keys its
+/// storage on. Recovery under a different context can only see a different
+/// store, so it must not claim anything about the original container.
+pub(crate) fn runtime_context(runtime: &Path) -> String {
+    let variable = |key: &str| {
+        std::env::var_os(key)
+            .map(|value| value.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    };
+    format!(
+        "{}|HOME={}|XDG_RUNTIME_DIR={}",
+        runtime.display(),
+        variable("HOME"),
+        variable("XDG_RUNTIME_DIR")
+    )
+}
+
+/// Whether a recovered attempt's container is proven gone: trivially so
+/// when it launched none; otherwise only when the current runtime context
+/// equals the journaled one and the reap's absence proof succeeds.
+pub(crate) fn recovered_container_gone(
+    config: &AgentConfig,
+    attempt: &mcloving_agent_runtime::ReconciliationAttempt,
+) -> bool {
+    let Some(name) = &attempt.container_name else {
+        return true;
+    };
+    let Some(runtime) = &config.podman_path else {
+        eprintln!(
+            "recovered attempt {}/{} fence {}: container {} cannot be reaped without a configured runtime",
+            attempt.organization_id, attempt.attempt_id, attempt.fence_token, name
+        );
+        return false;
+    };
+    let context = runtime_context(runtime);
+    if attempt.container_context.as_deref() != Some(context.as_str()) {
+        eprintln!(
+            "recovered attempt {}/{} fence {}: container {} was launched under runtime context {:?}, \
+             not the current {context:?}; absence cannot be proven here",
+            attempt.organization_id,
+            attempt.attempt_id,
+            attempt.fence_token,
+            name,
+            attempt.container_context.as_deref().unwrap_or("?")
+        );
+        return false;
+    }
+    reap_recovered_container(runtime, name)
+}
+
 /// Removes a recovered attempt's container and proves it gone (PAR-011).
 ///
 /// Restart recovery terminates the journaled process group, which is only

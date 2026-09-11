@@ -838,6 +838,26 @@ async fn send_reconciliation(
                     return Err(AgentError::StaleSession);
                 }
                 let phase = recovered_cancellation_phase(outcome, receipt.disposition)?;
+                // A discharge or retirement receipt retires the fenced
+                // authority, not a container that may still be running with
+                // the workspace mounted: the row stays parked, and its reap
+                // is retried on every session, until absence is proven in
+                // the launching runtime context (PAR-011).
+                let phase = if phase == AttemptPhase::Aborted
+                    && !container::recovered_container_gone(config, attempt)
+                {
+                    eprintln!(
+                        "recovered attempt {}/{} fence {}: kept reconciliation-required past \
+                         its controller receipt because container {} is not proven gone",
+                        attempt.organization_id,
+                        attempt.attempt_id,
+                        attempt.fence_token,
+                        attempt.container_name.as_deref().unwrap_or("?")
+                    );
+                    AttemptPhase::ReconciliationRequired
+                } else {
+                    phase
+                };
                 if [
                     CancellationDisposition::RetireStale as i32,
                     CancellationDisposition::DischargeRecovered as i32,
@@ -908,18 +928,16 @@ async fn quiesce_recovered_executions(config: &AgentConfig) -> Result<(), AgentE
         // row unnoticed; the row itself stays parked until the controller
         // discharges it.
         if attempt.phase == AttemptPhase::ReconciliationRequired
-            && let Some(name) = &attempt.container_name
+            && attempt.container_name.is_some()
+            && !container::recovered_container_gone(config, attempt)
         {
-            let gone = config
-                .podman_path
-                .as_deref()
-                .is_some_and(|runtime| container::reap_recovered_container(runtime, name));
-            if !gone {
-                eprintln!(
-                    "parked attempt {}/{} fence {}: container {} still cannot be proven gone",
-                    attempt.organization_id, attempt.attempt_id, attempt.fence_token, name
-                );
-            }
+            eprintln!(
+                "parked attempt {}/{} fence {}: container {} still cannot be proven gone",
+                attempt.organization_id,
+                attempt.attempt_id,
+                attempt.fence_token,
+                attempt.container_name.as_deref().unwrap_or("?")
+            );
         }
         if !matches!(
             attempt.phase,
@@ -934,11 +952,7 @@ async fn quiesce_recovered_executions(config: &AgentConfig) -> Result<(), AgentE
         // Reap it by its derived name and require proof it is gone, or park
         // the attempt exactly as an unverifiable process group would.
         if outcome != RecoveredCancellation::ReconciliationRequired
-            && let Some(name) = &attempt.container_name
-            && !config
-                .podman_path
-                .as_deref()
-                .is_some_and(|runtime| container::reap_recovered_container(runtime, name))
+            && !container::recovered_container_gone(config, attempt)
         {
             journal.transition(
                 &attempt.organization_id,
@@ -1881,6 +1895,7 @@ mod tests {
             process_birth_identity: None,
             current_step: None,
             container_name: None,
+            container_context: None,
             logs: Vec::new(),
             result: None,
         };
@@ -2082,6 +2097,7 @@ mod tests {
                 process_birth_identity: Some("linux-proc-v1:boot:42".to_owned()),
                 current_step: None,
                 container_name: None,
+                container_context: None,
                 logs: vec![mcloving_agent_runtime::SpoolEntry {
                     sequence: 7,
                     relative_path: PathBuf::from("spool/stdout.log"),
@@ -2125,6 +2141,7 @@ mod tests {
             process_birth_identity: None,
             current_step: None,
             container_name: None,
+            container_context: None,
             logs: Vec::new(),
             result: None,
         };

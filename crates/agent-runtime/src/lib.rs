@@ -139,6 +139,9 @@ pub struct ReconciliationAttempt {
     /// before its spawn; `None` for host steps, so recovery reaps only
     /// attempts that actually ran a container.
     pub container_name: Option<String>,
+    /// Runtime and storage context the container was launched in; recovery
+    /// in a different context cannot prove anything about the original.
+    pub container_context: Option<String>,
     pub logs: Vec<SpoolEntry>,
     pub result: Option<SpoolEntry>,
 }
@@ -326,6 +329,7 @@ impl Journal {
                 process_birth_identity TEXT,
                 current_step INTEGER,
                 container_name TEXT,
+                container_context TEXT,
                 accepted_at_unix_ms INTEGER NOT NULL,
                 updated_at_unix_ms INTEGER NOT NULL,
                 PRIMARY KEY (organization_id, attempt_id, fence_token)
@@ -396,6 +400,8 @@ impl Journal {
                         .execute("ALTER TABLE attempts ADD COLUMN current_step INTEGER", [])?;
                 }
                 transaction.execute("ALTER TABLE attempts ADD COLUMN container_name TEXT", [])?;
+                transaction
+                    .execute("ALTER TABLE attempts ADD COLUMN container_context TEXT", [])?;
                 transaction.execute(
                     "UPDATE journal_metadata SET schema_version = ?1 WHERE singleton = 1",
                     [SCHEMA_VERSION],
@@ -604,14 +610,19 @@ impl Journal {
         fence_token: u64,
         session_epoch: u64,
         ordinal: u32,
-        container_name: Option<&str>,
+        container: Option<(&str, &str)>,
     ) -> Result<(), JournalError> {
         let fence_token = to_sql_integer(fence_token)?;
         let session_epoch = to_sql_integer(session_epoch)?;
+        let (container_name, container_context) = match container {
+            Some((name, context)) => (Some(name), Some(context)),
+            None => (None, None),
+        };
         let changed = self.connection.execute(
             "
             UPDATE attempts
-            SET current_step = ?5, container_name = ?6, updated_at_unix_ms = ?7
+            SET current_step = ?5, container_name = ?6, container_context = ?7,
+                updated_at_unix_ms = ?8
             WHERE organization_id = ?1
               AND attempt_id = ?2
               AND fence_token = ?3
@@ -625,6 +636,7 @@ impl Journal {
                 session_epoch,
                 i64::from(ordinal),
                 container_name,
+                container_context,
                 unix_time_ms()?
             ],
         )?;
@@ -1062,7 +1074,8 @@ impl Journal {
             "
             SELECT organization_id, attempt_id, fence_token, session_epoch,
                    payload_digest, phase, workspace, process_group_id,
-                   process_birth_identity, current_step, container_name
+                   process_birth_identity, current_step, container_name,
+                   container_context
             FROM attempts
             WHERE phase NOT IN ('succeeded', 'failed', 'aborted')
             ORDER BY organization_id, attempt_id, fence_token
@@ -1081,6 +1094,7 @@ impl Journal {
                 row.get::<_, Option<String>>(8)?,
                 row.get::<_, Option<i64>>(9)?,
                 row.get::<_, Option<String>>(10)?,
+                row.get::<_, Option<String>>(11)?,
             ))
         })?;
 
@@ -1098,6 +1112,7 @@ impl Journal {
                 process_birth_identity,
                 current_step,
                 container_name,
+                container_context,
             ) = row?;
             attempts.push(ReconciliationAttempt {
                 logs: self.log_entries(&organization_id, &attempt_id, fence_token)?,
@@ -1117,6 +1132,7 @@ impl Journal {
                     .map(|value| u32::try_from(value).map_err(|_| JournalError::AuthorityOverflow))
                     .transpose()?,
                 container_name,
+                container_context,
             });
         }
         Ok(ReconciliationReport { attempts })
@@ -1193,6 +1209,7 @@ impl Journal {
                 process_birth_identity,
                 current_step: None,
                 container_name: None,
+                container_context: None,
             });
         }
         Ok(ReconciliationReport { attempts })
