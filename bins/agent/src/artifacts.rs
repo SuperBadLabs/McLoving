@@ -62,6 +62,10 @@ pub enum CollectionRefusal {
     TooDeep(String),
     /// More directory entries than the walk visits.
     TooManyEntries(usize),
+    /// A workspace entry the walk could not stat, open or read: the step
+    /// left it unreadable, which is the step's failure to name, not the
+    /// agent's session to end.
+    Unreadable(String, String),
 }
 
 impl fmt::Display for CollectionRefusal {
@@ -79,6 +83,9 @@ impl fmt::Display for CollectionRefusal {
             Self::TooDeep(path) => write!(f, "artifact_refused:too_deep:{path}"),
             Self::TooManyEntries(count) => {
                 write!(f, "artifact_refused:too_many_entries:{count}")
+            }
+            Self::Unreadable(path, cause) => {
+                write!(f, "artifact_refused:unreadable:{path}:{cause}")
             }
         }
     }
@@ -172,8 +179,14 @@ fn walk_directory(
     depth: usize,
 ) -> Result<(), CollectionError> {
     let mut reader = Dir::from_fd(directory.try_clone()?)?;
+    let unreadable = |path: &str, error: nix::Error| {
+        CollectionError::Refused(CollectionRefusal::Unreadable(
+            path.to_owned(),
+            error.desc().to_owned(),
+        ))
+    };
     for entry in reader.iter() {
-        let entry = entry?;
+        let entry = entry.map_err(|error| unreadable(prefix, error))?;
         let raw_name = entry.file_name();
         if raw_name.to_bytes() == b"." || raw_name.to_bytes() == b".." {
             continue;
@@ -207,7 +220,8 @@ fn walk_directory(
             }
             continue;
         }
-        let stat = fstatat(directory, raw_name, AtFlags::AT_SYMLINK_NOFOLLOW)?;
+        let stat = fstatat(directory, raw_name, AtFlags::AT_SYMLINK_NOFOLLOW)
+            .map_err(|error| unreadable(&path, error))?;
         if is_link(&stat) {
             if collects || descends {
                 return Err(CollectionRefusal::Link(path).into());
@@ -226,8 +240,9 @@ fn walk_directory(
                 raw_name,
                 OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
                 nix::sys::stat::Mode::empty(),
-            )?;
-            let child_stat = fstat(&child)?;
+            )
+            .map_err(|error| unreadable(&path, error))?;
+            let child_stat = fstat(&child).map_err(|error| unreadable(&path, error))?;
             if !same_identity(&stat, &child_stat) {
                 return Err(CollectionRefusal::IdentityChanged(path).into());
             }
@@ -240,8 +255,8 @@ fn walk_directory(
         if !is_regular(&stat) {
             return Err(CollectionRefusal::NotRegular(path).into());
         }
-        let opened = open_regular(directory, raw_name)?;
-        let opened_stat = fstat(&opened)?;
+        let opened = open_regular(directory, raw_name).map_err(|error| unreadable(&path, error))?;
+        let opened_stat = fstat(&opened).map_err(|error| unreadable(&path, error))?;
         if !same_identity(&stat, &opened_stat) || !is_regular(&opened_stat) {
             return Err(CollectionRefusal::IdentityChanged(path).into());
         }
@@ -271,8 +286,9 @@ fn walk_directory(
                 return Err(CollectionRefusal::TooManyBytes(walk.bytes).into());
             }
             let file = if walk.files.iter().any(|file| file.relative_path == path) {
-                let again = open_regular(directory, raw_name)?;
-                let again_stat = fstat(&again)?;
+                let again =
+                    open_regular(directory, raw_name).map_err(|error| unreadable(&path, error))?;
+                let again_stat = fstat(&again).map_err(|error| unreadable(&path, error))?;
                 if !same_identity(&stat, &again_stat) || !is_regular(&again_stat) {
                     return Err(CollectionRefusal::IdentityChanged(path).into());
                 }
@@ -343,13 +359,13 @@ fn open_filesystem_root() -> Result<OwnedFd, CollectionError> {
         .into())
 }
 
-fn open_regular(directory: &OwnedFd, name: &CStr) -> Result<OwnedFd, CollectionError> {
-    Ok(openat(
+fn open_regular(directory: &OwnedFd, name: &CStr) -> Result<OwnedFd, nix::Error> {
+    openat(
         directory,
         name,
         OFlag::O_RDONLY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC | OFlag::O_NONBLOCK,
         nix::sys::stat::Mode::empty(),
-    )?)
+    )
 }
 
 fn file_type(stat: &FileStat) -> nix::libc::mode_t {
@@ -532,6 +548,31 @@ mod tests {
             error,
             CollectionError::Refused(CollectionRefusal::UnnameableEntry(path)) if path == "other/bad\nname.xml"
         ));
+    }
+
+    #[test]
+    fn an_unreadable_declared_file_is_a_named_refusal_not_a_session_error() {
+        if nix::unistd::geteuid().is_root() {
+            eprintln!("skipped: root reads everything");
+            return;
+        }
+        let directory = workspace();
+        let root = directory.path().join(WORKSPACE);
+        std::fs::write(root.join("other/secret.xml"), b"x").unwrap();
+        std::fs::set_permissions(
+            root.join("other/secret.xml"),
+            std::os::unix::fs::PermissionsExt::from_mode(0o000),
+        )
+        .unwrap();
+        let error = collect_in(&directory, &[spec("reports", &["other/*"])]).unwrap_err();
+        assert!(
+            matches!(
+                &error,
+                CollectionError::Refused(CollectionRefusal::Unreadable(path, cause))
+                    if path == "other/secret.xml" && cause.contains("denied")
+            ),
+            "{error:?}"
+        );
     }
 
     #[test]

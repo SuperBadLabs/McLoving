@@ -426,8 +426,10 @@ discharge a parked reconciliation).
   of many `**` segments costs their product. A link that a declaration
   would collect or descend into refuses the whole set by name
   (`artifact_refused:link:<path>`), as does a matching entry that is not a
-  regular file, a name that would exceed the store's 512-byte object name,
-  or a bound; a refusal fails an attempt whose steps succeeded and is its
+  regular file, an entry the walk cannot stat, open or read (a step that
+  left its file mode 000 gets `artifact_refused:unreadable:<path>:<cause>`,
+  not a broken session), a name that would exceed the store's 512-byte
+  object name, or a bound; a refusal fails an attempt whose steps succeeded and is its
   recorded reason, and nothing of a refused set is uploaded. Each collected
   file is one object per declaration that matches it (declarations may
   overlap), named `<artifact name>/<workspace path>`, read at most to the
@@ -439,8 +441,13 @@ discharge a parked reconciliation).
   MiB and ended by a lost lease, a stop, or the attempt's cancellation (a
   cancellation that lands after the last step collects nothing more); the controller stages it into the same object store the public
   upload routes use, with the declared length reserved against the store
-  quota before the first byte and bounds the whole receive phase by the
-  declared length (thirty seconds plus one second per MiB, at most fifteen
+  quota before the first byte, charges the declared length against the
+  attempt's quota in an in-process ledger of streams still in flight before
+  staging (so concurrent streams for one attempt cannot each pass the
+  committed figure; an exact retry of an object the attempt already holds
+  is neither pre-checked nor charged), and bounds the header and the whole
+  receive phase by the declared length (thirty seconds for the header,
+  thirty seconds plus one second per MiB for the data, at most fifteen
   minutes; a stalled stream releases its reservation), registers it through
   the same
   `register_artifact` predicate (lease owner, fence, restore epoch, build

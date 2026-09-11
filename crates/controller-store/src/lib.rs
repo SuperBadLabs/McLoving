@@ -5246,6 +5246,46 @@ impl Store {
         Ok(used)
     }
 
+    /// Whether exactly this artifact (name, digest and length) is already
+    /// registered under the attempt and fence: a retry of an upload whose
+    /// receipt was lost, which the registration admits idempotently and no
+    /// quota check should count twice.
+    pub async fn artifact_registered(
+        &self,
+        organization_id: Uuid,
+        attempt_id: Uuid,
+        fence: i64,
+        name: &str,
+        digest: [u8; 32],
+        bytes: i64,
+    ) -> Result<bool, StoreError> {
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        let registered = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (
+                 SELECT 1
+                 FROM attempt_objects
+                 WHERE organization_id = $1
+                   AND attempt_id = $2
+                   AND fence = $3
+                   AND kind = 'artifact'
+                   AND name = $4
+                   AND object_digest = $5
+                   AND bytes = $6
+                   AND status IN ('pending', 'available')
+             )",
+        )
+        .bind(organization_id)
+        .bind(attempt_id)
+        .bind(fence)
+        .bind(name)
+        .bind(digest.as_slice())
+        .bind(bytes)
+        .fetch_one(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(registered)
+    }
+
     /// [`Self::register_artifact`] for an agent's own upload (PAR-014): the
     /// registration is fenced by the agent's current session epoch inside
     /// the same transaction, so a session superseded while a long stream was

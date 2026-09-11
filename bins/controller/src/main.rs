@@ -715,6 +715,12 @@ struct ControllerAgentService {
     /// Where an agent's declared artifacts land (PAR-014): the same store
     /// the public upload routes stage into and commit from.
     object_store: FilesystemObjectStore,
+    /// Declared bytes of the artifact streams this process is receiving,
+    /// per attempt and fence (PAR-014): the per-attempt quota is charged
+    /// here before a stream stages anything, so concurrent streams for one
+    /// attempt cannot each pass the committed figure and together reserve
+    /// the whole store.
+    artifact_reservations: ArtifactLedger,
     identities: Arc<AgentIdentityBindings>,
     session_churn: Arc<SessionEpochChurn>,
     work_wakeups: broadcast::Sender<Uuid>,
@@ -1491,7 +1497,17 @@ impl AgentControl for ControllerAgentService {
         };
         let identity = self.identities.authenticate(&request)?.clone();
         let mut frames = request.into_inner();
-        let header = match frames.message().await?.and_then(|frame| frame.frame) {
+        // The header is due within the base budget: a stream opened and
+        // never written cannot hold this task or its HTTP/2 stream.
+        let first = tokio::time::timeout(
+            std::time::Duration::from_secs(
+                mcloving_domain::artifacts::ARTIFACT_UPLOAD_BASE_SECONDS,
+            ),
+            frames.message(),
+        )
+        .await
+        .map_err(|_| Status::deadline_exceeded("artifact upload sent no header in time"))??;
+        let header = match first.and_then(|frame| frame.frame) {
             Some(ArtifactFrame::Header(header)) => header,
             _ => {
                 return Err(Status::invalid_argument(
@@ -1545,20 +1561,45 @@ impl AgentControl for ControllerAgentService {
         else {
             return Err(Status::failed_precondition("attempt is not known"));
         };
-        let used = self
-            .store
-            .attempt_artifact_bytes(context.organization_id, context.attempt_id, context.fence)
-            .await
-            .map_err(internal_store_error)?;
         let declared = i64::try_from(header.bytes)
             .map_err(|_| Status::invalid_argument("artifact byte count is out of range"))?;
-        if used.saturating_add(declared)
-            > i64::try_from(MAX_ATTEMPT_ARTIFACT_BYTES).unwrap_or(i64::MAX)
-        {
-            return Err(Status::resource_exhausted(
-                "artifact exceeds the per-attempt artifact quota",
-            ));
-        }
+        let mut digest = [0_u8; 32];
+        digest.copy_from_slice(&header.sha256);
+        // A retry of an upload whose receipt was lost names an object the
+        // attempt already holds: the registration admits it idempotently,
+        // so the quota is neither pre-checked nor charged for it again.
+        let exact_retry = self
+            .store
+            .artifact_registered(
+                context.organization_id,
+                context.attempt_id,
+                context.fence,
+                &header.name,
+                digest,
+                declared,
+            )
+            .await
+            .map_err(internal_store_error)?;
+        let _reservation = if exact_retry {
+            None
+        } else {
+            let used = self
+                .store
+                .attempt_artifact_bytes(context.organization_id, context.attempt_id, context.fence)
+                .await
+                .map_err(internal_store_error)?;
+            // The committed figure plus every stream this process is still
+            // receiving for the attempt, charged before staging so
+            // concurrent streams cannot each fit and together reserve the
+            // store; released when this stream ends however it ends.
+            Some(ArtifactReservation::take(
+                &self.artifact_reservations,
+                (context.organization_id, context.attempt_id, context.fence),
+                used,
+                declared,
+                i64::try_from(MAX_ATTEMPT_ARTIFACT_BYTES).unwrap_or(i64::MAX),
+            )?)
+        };
         let mut writer = self
             .object_store
             .begin_artifact(&context.organization_id.to_string(), header.bytes)
@@ -2204,6 +2245,60 @@ fn internal_store_error(error: mcloving_controller_store::StoreError) -> Status 
     Status::internal(format!("controller store failed: {error}"))
 }
 
+/// In-flight declared artifact bytes per (organization, attempt, fence).
+type ArtifactLedger = Arc<Mutex<BTreeMap<(Uuid, Uuid, i64), i64>>>;
+
+/// Declared bytes of one in-flight artifact stream, charged against the
+/// attempt's quota alongside the committed figure and released on drop.
+struct ArtifactReservation {
+    ledger: ArtifactLedger,
+    key: (Uuid, Uuid, i64),
+    bytes: i64,
+}
+
+impl ArtifactReservation {
+    fn take(
+        ledger: &ArtifactLedger,
+        key: (Uuid, Uuid, i64),
+        committed: i64,
+        bytes: i64,
+        quota: i64,
+    ) -> Result<Self, Status> {
+        let mut in_flight = ledger
+            .lock()
+            .map_err(|_| Status::internal("artifact reservation ledger is poisoned"))?;
+        let pending = in_flight.get(&key).copied().unwrap_or(0);
+        if committed.saturating_add(pending).saturating_add(bytes) > quota {
+            return Err(Status::resource_exhausted(
+                "artifact exceeds the per-attempt artifact quota",
+            ));
+        }
+        in_flight.insert(key, pending.saturating_add(bytes));
+        Ok(Self {
+            ledger: Arc::clone(ledger),
+            key,
+            bytes,
+        })
+    }
+}
+
+impl Drop for ArtifactReservation {
+    fn drop(&mut self) {
+        if let Ok(mut in_flight) = self.ledger.lock() {
+            let remaining = in_flight
+                .get(&self.key)
+                .copied()
+                .unwrap_or(0)
+                .saturating_sub(self.bytes);
+            if remaining <= 0 {
+                in_flight.remove(&self.key);
+            } else {
+                in_flight.insert(self.key, remaining);
+            }
+        }
+    }
+}
+
 fn object_store_status(error: mcloving_object_store::ObjectStoreError) -> Status {
     use mcloving_object_store::ObjectStoreError;
     match error {
@@ -2354,6 +2449,7 @@ async fn run_agent_control_server(
     let service = ControllerAgentService {
         store,
         object_store,
+        artifact_reservations: Arc::new(Mutex::new(BTreeMap::new())),
         identities: Arc::new(environment.identities),
         session_churn: Arc::new(SessionEpochChurn::default()),
         work_wakeups,

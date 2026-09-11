@@ -992,9 +992,12 @@ collect or descend, so a step that plants a link to a service-account file
 gets a named refusal and no upload; a Windows agent has no collector and is not
 routed such work); TM-006 (durable evidence: the controller stages each
 object into the same content-addressed store the public upload routes use,
-with the declared length reserved against the store quota before the first
-byte, the receive phase bounded by that length so a stalled stream releases
-the reservation, and a short or mismatching upload discarded, registers it through the
+with the declared length charged against the attempt's quota in an
+in-process ledger of streams in flight and then reserved against the store
+quota before the first byte (an exact retry of a held object is neither
+pre-checked nor charged), the header and the receive phase bounded so a
+stream opened and never written or stalled mid-way releases the reservation,
+and a short or mismatching upload discarded, registers it through the
 same fenced `register_artifact` predicate under an attempt-scoped
 artifact lock shared by every name (so concurrent uploads cannot each fit
 the quota and together exceed it) and then the per-name lock, and commits
@@ -1024,7 +1027,10 @@ envelope and required capabilities, the collector's refusals by name (a
 link the declarations would collect or enter, a non-regular entry, an
 object name past the bound), and two shipped-binary gates: a step's files
 listed under the declared name and downloaded with a matching digest, and
-a planted link refusing the set with nothing uploaded. Closure requires the
+a planted link refusing the set with nothing uploaded. Residual: the
+in-flight ledger is per controller process, so replicas of an HA deployment
+each admit streams against the committed figure alone until registration,
+where the quota is authoritative. Closure requires the
 reviewed merge, exact-main Foundation and native Windows runs, and a
 receipt in `docs/evidence/PAR-014_SECURITY_REVIEW.md`.
 
