@@ -17,6 +17,7 @@ use mcloving_agent_protocol::wire::{
     CredentialRequest, InlineLogChunk, WorkAssignment, WorkAuthority, WorkCompletion,
     WorkLeaseRenewal, WorkLogChunk, WorkOutcome, WorkPoll, WorkReceipt,
 };
+use mcloving_agent_runtime::executor::OutputFloors;
 use mcloving_agent_runtime::executor::{
     ExecutionError, ExecutionMode, ExecutionRequest, Termination,
     execute_with_spawn_hook_and_redactions, is_link_or_reparse_point, sync_boundaries,
@@ -25,8 +26,8 @@ use mcloving_agent_runtime::executor::{
     flush_terminal_cleanup, remove_terminal_relative_path as remove_runtime_terminal_path,
 };
 use mcloving_agent_runtime::{
-    Acceptance, AttemptPhase, Finalization, Journal, MAX_ATTEMPT_OUTPUT_BYTES, ProcessIdentity,
-    SpoolEntry,
+    Acceptance, AttemptPhase, Finalization, Journal, LogReservation, MAX_ATTEMPT_OUTPUT_BYTES,
+    ProcessIdentity, SpoolEntry,
 };
 use mcloving_domain::ConnectorIntentSpec;
 use mcloving_domain::cache_intent::{CacheIntentSpec, CacheWorkContext, cache_assignment_digest};
@@ -48,6 +49,13 @@ const MAX_LOG_CHUNK_BYTES: usize = 1_048_576;
 // 64 full chunks of the 64 MiB quota plus one partial chunk per stream of a
 // sixteen-step attempt (PAR-010); the controller enforces the same count.
 const MAX_LOG_CHUNKS_PER_ATTEMPT: u64 = 96;
+/// How often the live tail looks at a running step's spools (PAR-013).
+const LIVE_TAIL_INTERVAL: Duration = Duration::from_millis(250);
+/// A stream with fewer than this many unpublished bytes waits for more,
+/// unless this long has passed since its last chunk: output shows within
+/// about a second without a chunk per line.
+const LIVE_CHUNK_TARGET_BYTES: u64 = 64 * 1024;
+const LIVE_FLUSH_INTERVAL: Duration = Duration::from_secs(1);
 const MAX_RESULT_SPOOL_BYTES: u64 = 65_536;
 const MAX_EXECUTION_TIMEOUT_SECONDS: u64 = 7 * 24 * 60 * 60;
 const WORK_POLL_RPC_WINDOW: Duration = Duration::from_secs(25);
@@ -451,6 +459,7 @@ pub(super) async fn recover_finalizations(
     config: &AgentConfig,
     client: &mut AgentControlClient<Channel>,
     session_epoch: u64,
+    live_log_stream: bool,
     stop: &CancellationToken,
 ) -> Result<(), AgentError> {
     reclaim_terminal_spools(config).await?;
@@ -460,6 +469,23 @@ pub(super) async fn recover_finalizations(
             attempt.phase,
             AttemptPhase::Finalizing | AttemptPhase::Cancelling
         ) {
+            continue;
+        }
+        // An attempt a live tail streamed under a session that negotiated
+        // `live-log-stream-v1` (journaled as such before its first chunk was
+        // reserved) can be replayed only by a controller that negotiates it
+        // too: its reservations, and the chunks its spool remainder still
+        // needs, may number past the terminal-only bound an older replica
+        // admitted during a rolling upgrade enforces, and failing here would
+        // end this session and every other attempt's recovery with it. Leave
+        // such an attempt in the journal for a session with a compatible
+        // peer; its lease is not renewed meanwhile.
+        if attempt.live_log_stream && !live_log_stream {
+            eprintln!(
+                "deferring recovery of attempt {}: a live tail streamed its output and this \
+                 session's controller does not negotiate live-log-stream-v1",
+                attempt.attempt_id
+            );
             continue;
         }
         let authority = WorkAuthority {
@@ -509,6 +535,7 @@ pub(super) async fn recover_finalizations(
             config,
             client,
             session_epoch,
+            live_log_stream,
             &attempt,
             authority,
             AuthorityRpcControl {
@@ -576,30 +603,23 @@ async fn replay_finalization(
     config: &AgentConfig,
     client: &mut AgentControlClient<Channel>,
     session_epoch: u64,
+    live_log_stream: bool,
     attempt: &mcloving_agent_runtime::ReconciliationAttempt,
     authority: WorkAuthority,
     control: AuthorityRpcControl<'_>,
 ) -> Result<AttemptPhase, AgentError> {
     validate_log_spool_quota(&attempt.logs)?;
-    let mut sequence = 0;
     let mut publication = PublicationContext {
         client,
         authority: &authority,
         session_epoch,
         control,
     };
-    for entry in &attempt.logs {
-        let (stream, step_ordinal) = spool_stream(entry)?;
-        sequence = publish_spool(
-            &mut publication,
-            stream,
-            step_ordinal,
-            &config.workspace_root,
-            entry,
-            sequence,
-        )
-        .await?;
-    }
+    // Replay numbers every chunk from the journal's reservations: what was
+    // sent before the crash keeps its sequence and is sent again only when
+    // no receipt was recorded, and the rest continues from the next unused
+    // sequence, so the replayed ledger is exactly the one a crash-free run
+    // would have produced.
     let result_entry = attempt.result.as_ref().ok_or_else(|| {
         AgentError::InvalidAssignment(
             "finalizing journal attempt has no durable result spool".to_owned(),
@@ -608,6 +628,152 @@ async fn replay_finalization(
     let result_content =
         verified_spool_content(&config.workspace_root, result_entry, "result").await?;
     let result: PersistedResult = serde_json::from_slice(&result_content)?;
+    let mut journal = Journal::open(&config.journal_path)?;
+    let mut spools = SpoolPublisher {
+        journal: &mut journal,
+        organization_id: &attempt.organization_id,
+        attempt_id: &attempt.attempt_id,
+        fence_token: attempt.fence_token,
+        session_epoch: attempt.session_epoch,
+        chunk_bound: log_chunk_bound(live_log_stream),
+    };
+    let mut journaled = std::collections::BTreeSet::new();
+    for entry in &attempt.logs {
+        let (stream, step_ordinal) = spool_stream(entry)?;
+        journaled.insert((step_ordinal, stream));
+        spools
+            .publish(
+                &mut publication,
+                stream,
+                step_ordinal,
+                &config.workspace_root,
+                entry,
+                None,
+            )
+            .await?;
+    }
+    // A step the crashed session was still running has no journaled spool
+    // descriptor: its output sits in the live spool the executor was writing
+    // and, when the tail was streaming, partly in reservations. Under the
+    // renewed lease, publish what the ledger lacks from that spool (the
+    // unreceipted ranges and the unstreamed tail) before the cancellation
+    // completes, so the interrupted step's output is not stranded.
+    let interrupted_ordinal = attempt.current_step.unwrap_or(0);
+    // A multi-step crash can also fall between the finished step's spool
+    // relocation and its journaling: the files then sit under the
+    // deterministic relocated step directory with `current_step` still set,
+    // so both places are probed, the live one first.
+    let mut candidates = vec![match attempt.current_step {
+        Some(step) => attempt.workspace.join("spool").join(format!("step-{step}")),
+        None => attempt.workspace.join("spool"),
+    }];
+    if let Some(step) = attempt.current_step {
+        candidates.push(step_spool_area(&attempt.workspace).join(format!("step-{step}")));
+    }
+    let mut interrupted: Vec<(&str, PathBuf, PathBuf, std::fs::File)> = Vec::new();
+    for stream in ["stdout", "stderr"] {
+        if journaled.contains(&(interrupted_ordinal, stream)) {
+            continue;
+        }
+        for directory in &candidates {
+            let relative_path = directory.join(format!("{stream}.log"));
+            // The workload may have revoked the agent's own access to its
+            // spool before the crash; the executor restores that at exit on
+            // the crash-free path, so recovery restores it here. Only a
+            // confirmed absence moves on to the next candidate: a permission
+            // or I/O failure is an error, never an empty stream.
+            if let Some(file) =
+                open_interrupted_spool(&config.workspace_root, &relative_path).await?
+            {
+                let path = config.workspace_root.join(&relative_path);
+                interrupted.push((stream, relative_path, path, file));
+                break;
+            }
+        }
+    }
+    // The interrupted step's reservations, as floors the cut below keeps and
+    // as the reason an empty spool still goes through the publisher.
+    let floors = OutputFloors::default();
+    if !interrupted.is_empty() {
+        // The crashed session never reached the executor's quota cut, and an
+        // orphaned process may have kept writing until the quiesce. Apply the
+        // same aggregate cut now, with the journaled reservations as floors,
+        // so what is published is exactly what the executor would have
+        // retained and never more than the ledger admits; the budget is what
+        // the finished steps of this attempt left.
+        let journaled_bytes: u64 = attempt.logs.iter().map(|entry| entry.bytes).sum();
+        let budget = MAX_ATTEMPT_OUTPUT_BYTES.saturating_sub(journaled_bytes);
+        {
+            let mut held = floors.lock();
+            for reservation in spools.journal.log_reservations(
+                spools.organization_id,
+                spools.attempt_id,
+                spools.fence_token,
+            )? {
+                if reservation.step_ordinal != interrupted_ordinal {
+                    continue;
+                }
+                let end = reservation.offset.saturating_add(reservation.bytes);
+                match reservation.stream.as_str() {
+                    "stdout" => held.0 = held.0.max(end),
+                    _ => held.1 = held.1.max(end),
+                }
+            }
+        }
+        let stdout = interrupted
+            .iter()
+            .find(|(stream, ..)| *stream == "stdout")
+            .map(|(.., file)| file);
+        let stderr = interrupted
+            .iter()
+            .find(|(stream, ..)| *stream == "stderr")
+            .map(|(.., file)| file);
+        mcloving_agent_runtime::executor::cut_spool_pair_to_limit(
+            stdout,
+            stderr,
+            budget,
+            Some(&floors),
+        )?;
+    }
+    let (reserved_stdout, reserved_stderr) = floors.load();
+    for (stream, relative_path, path, file) in &interrupted {
+        let bytes = file.metadata()?.len();
+        // An empty stream with nothing reserved has nothing to publish. One
+        // with a reservation outstanding goes through the publisher, whose
+        // coverage check then fails the same way a spool truncated short of
+        // its reservations does, so a workload that emptied its spool after
+        // a chunk was reserved cannot make the reserved sequence vanish
+        // silently (its custody is AGENT-011).
+        let reserved = if *stream == "stdout" {
+            reserved_stdout
+        } else {
+            reserved_stderr
+        };
+        if bytes == 0 && reserved == 0 {
+            continue;
+        }
+        let entry = SpoolEntry {
+            sequence: u64::from(interrupted_ordinal) * 2 + u64::from(*stream == "stderr"),
+            relative_path: relative_path.clone(),
+            digest: file_digest(path).await?,
+            bytes,
+        };
+        // Not best effort: a transient publication failure must not let the
+        // cancellation complete and reclaim the spool with output the ledger
+        // lacks. The error propagates like a journaled spool's would; the
+        // attempt stays cancelling and the next session replays it, and a
+        // definitively lost authority retires it the same way.
+        spools
+            .publish(
+                &mut publication,
+                stream,
+                interrupted_ordinal,
+                &config.workspace_root,
+                &entry,
+                None,
+            )
+            .await?;
+    }
     let outcome = persisted_outcome(&result.outcome)?;
     if (attempt.phase == AttemptPhase::Finalizing && outcome == WorkOutcome::Aborted)
         || (attempt.phase == AttemptPhase::Cancelling && outcome != WorkOutcome::Aborted)
@@ -1833,6 +1999,7 @@ async fn run_assignment(
         let mut logs: Vec<SpoolEntry> = Vec::with_capacity(steps.len() * 2);
         let mut output_budget = MAX_ATTEMPT_OUTPUT_BYTES;
         let mut last_outcome: Option<mcloving_agent_runtime::executor::ExecutionOutcome> = None;
+        let step_count = u32::try_from(steps.len()).unwrap_or(u32::MAX);
         for (index, process) in steps.into_iter().enumerate() {
             let ordinal = u32::try_from(index).expect("step count is bounded");
             let step_credentials = credentials
@@ -1900,6 +2067,9 @@ async fn run_assignment(
                 });
                 break;
             }
+            // Where the executor's quota cut learns what the live tail has
+            // already published of this step (PAR-013).
+            let output_floors = Arc::new(OutputFloors::default());
             let request = ExecutionRequest {
                 workspace_seed: if index == 0 {
                     assignment
@@ -1934,10 +2104,53 @@ async fn run_assignment(
                 // The per-attempt output quota is shared by every step, so a
                 // later step may only spend what earlier steps left.
                 output_limit_bytes: Some(step_output_limit),
+                retained_output_floors: Some(output_floors.clone()),
                 timeout: Duration::from_secs(process.timeout_seconds.unwrap_or(3_600)),
                 termination_grace: config.termination_grace,
             };
+            // Live streaming (PAR-013): the spawn hook opens the step's spool
+            // files by their live path the moment the step exists, and a tail
+            // publishes their growth while the step runs. Helper steps keep
+            // their private IO out of it; a credential-bearing step's output
+            // is captured and redacted only after the step exits, so nothing
+            // reaches its spool to tail and nothing unredacted may leave the
+            // agent early; a peer without the feature gets the terminal pass
+            // alone.
+            let live_spool = Arc::new(std::sync::Mutex::new(None::<LiveSpool>));
+            let live_spool_path =
+                (features.live_log_stream && helper.is_none() && attempt_redactions.is_empty())
+                    .then(|| {
+                        let attempt_spool = config
+                            .workspace_root
+                            .join(&assignment.workspace)
+                            .join("spool");
+                        if multi_step {
+                            attempt_spool.join(format!("step-{ordinal}"))
+                        } else {
+                            attempt_spool
+                        }
+                    });
+            if live_spool_path.is_some() {
+                // Durable before the first reservation: recovery under a peer
+                // without the feature must know this attempt's sequences may
+                // pass the terminal-only bound and leave it for a session
+                // that can replay them.
+                journal.mark_live_log_stream(&organization, &attempt, fence, session_epoch)?;
+            }
             let on_spawn = |process_id| {
+                if let Some(spool) = &live_spool_path {
+                    match LiveSpool::open(spool) {
+                        Ok(opened) => {
+                            *live_spool.lock().expect("live spool slot") = Some(opened);
+                        }
+                        Err(error) => {
+                            // Streaming is an optimization of when output is
+                            // visible, never of whether: the terminal pass
+                            // publishes the whole spool regardless.
+                            eprintln!("live log tail unavailable for step {ordinal}: {error}");
+                        }
+                    }
+                }
                 let process_birth_identity = process_birth_identity_for(process_id)
                     .map_err(|error| ExecutionError::SpawnHook(error.to_string()))?;
                 match process_birth_identity {
@@ -1980,8 +2193,44 @@ async fn run_assignment(
                 &attempt_redactions,
                 helper,
                 on_spawn,
-            )
-            .await;
+            );
+            let execution = match live_spool_path.is_some() {
+                true => {
+                    let tail = LiveTail::open(
+                        config,
+                        LiveTailScope {
+                            organization_id: &organization,
+                            attempt_id: &attempt,
+                            fence_token: fence,
+                            session_epoch,
+                            step_ordinal: ordinal,
+                            output_limit: step_output_limit,
+                            deadline: step_deadline,
+                            floors: output_floors.clone(),
+                            steps_remaining: step_count.saturating_sub(ordinal).max(1),
+                        },
+                        live_spool.clone(),
+                    )?;
+                    // The tail is its own task: a slow or blocked PublishLog
+                    // must never suspend the executor's timeout, cancellation
+                    // and output-limit polling. Once the step is over the task
+                    // is aborted; an abort mid-send leaves at most a
+                    // reservation without a receipt, which the terminal pass
+                    // sends.
+                    let tail_task = tail.spawn(
+                        client.clone(),
+                        assignment.authority.clone(),
+                        authority_lost.clone(),
+                        stop.clone(),
+                        lease_window,
+                    );
+                    let outcome = execution.await;
+                    tail_task.abort();
+                    let _ = tail_task.await;
+                    outcome
+                }
+                false => execution.await,
+            };
             let mut outcome = match execution {
                 Ok(outcome) => outcome,
                 Err(error) => {
@@ -2334,19 +2583,26 @@ async fn run_assignment(
         // Inline delivery carries at most one chunk per stream name, which a
         // multi-step attempt has several of; those always stream.
         let mut inline_chunks = (features.inline_terminal_logs && !multi_step).then(Vec::new);
-        let mut next_sequence = 0;
+        let mut spools = SpoolPublisher {
+            journal: &mut journal,
+            organization_id: &organization,
+            attempt_id: &attempt,
+            fence_token: fence,
+            session_epoch,
+            chunk_bound: log_chunk_bound(features.live_log_stream),
+        };
         for entry in &logs {
             let (stream, step_ordinal) = spool_stream(entry)?;
-            next_sequence = publish_or_inline_spool(
-                &mut publication,
-                stream,
-                step_ordinal,
-                &config.workspace_root,
-                entry,
-                next_sequence,
-                inline_chunks.as_mut(),
-            )
-            .await?;
+            spools
+                .publish(
+                    &mut publication,
+                    stream,
+                    step_ordinal,
+                    &config.workspace_root,
+                    entry,
+                    inline_chunks.as_mut(),
+                )
+                .await?;
         }
         let result_content =
             verified_spool_content(&config.workspace_root, &result, "result").await?;
@@ -2920,150 +3176,688 @@ async fn authority_rpc<T>(
     }
 }
 
-/// Publishes one spooled log stream, riding the terminal publication when it
-/// can: a stream that fits a single chunk is verified exactly like the
-/// streamed form and then carried in `WorkCompletion.inline_log_chunks`
-/// (`inline` is `Some` only when inline-terminal-logs-v1 was negotiated),
-/// sparing its `PublishLog` round trip. Anything larger — or any stream when
-/// the peer never negotiated the feature — goes through `publish_spool`
-/// unchanged. Returns the next unused sequence either way, so mixed streams
-/// number identically to the fully streamed form.
-async fn publish_or_inline_spool(
-    publication: &mut PublicationContext<'_>,
-    stream: &str,
-    step_ordinal: u32,
-    workspace_root: &Path,
-    entry: &SpoolEntry,
-    first_sequence: u64,
-    inline: Option<&mut Vec<InlineLogChunk>>,
-) -> Result<u64, AgentError> {
-    let single_chunk = entry.bytes <= MAX_LOG_CHUNK_BYTES as u64;
-    let Some(chunks) = inline.filter(|_| single_chunk) else {
-        return publish_spool(
-            publication,
-            stream,
-            step_ordinal,
-            workspace_root,
-            entry,
-            first_sequence,
-        )
-        .await;
-    };
-    if entry.bytes > MAX_ATTEMPT_OUTPUT_BYTES {
-        return Err(AgentError::InvalidAssignment(
-            "durable log spool exceeds the per-attempt quota".to_owned(),
-        ));
+/// The per-attempt chunk bound the session negotiated: the terminal bound,
+/// or the live bound when chunks are published while steps run.
+fn log_chunk_bound(live_log_stream: bool) -> u64 {
+    if live_log_stream {
+        u64::try_from(mcloving_domain::live_logs::MAX_LIVE_ATTEMPT_LOG_CHUNKS)
+            .unwrap_or(MAX_LOG_CHUNKS_PER_ATTEMPT)
+    } else {
+        MAX_LOG_CHUNKS_PER_ATTEMPT
     }
-    // One pass reads, sizes, and digests the stream: the bytes that ride the
-    // completion are exactly the bytes that were hashed against the journaled
-    // descriptor, so a separate verification read would re-check the same
-    // buffer.
-    let path = workspace_root.join(&entry.relative_path);
-    let mut file = fs::File::open(path).await?;
-    let expected = usize::try_from(entry.bytes).map_err(|_| {
-        AgentError::InvalidAssignment("log length exceeds platform bounds".to_owned())
-    })?;
-    let mut content = Vec::with_capacity(expected.saturating_add(1));
-    // Bounded to one byte past the journaled size: enough to detect growth,
-    // never enough to let an oversized on-disk file dictate the allocation.
-    (&mut file)
-        .take(entry.bytes.saturating_add(1))
-        .read_to_end(&mut content)
-        .await?;
-    if content.len() != expected || <[u8; 32]>::from(Sha256::digest(&content)) != entry.digest {
-        return Err(AgentError::InvalidAssignment(
-            "durable log spool metadata does not match its content".to_owned(),
-        ));
-    }
-    // An empty stream carries no evidence and must consume neither a log row
-    // nor a sequence number. It is still authenticated by the bounded read
-    // above before the terminal publication references its descriptor.
-    if content.is_empty() {
-        return Ok(first_sequence);
-    }
-    if first_sequence >= MAX_LOG_CHUNKS_PER_ATTEMPT {
-        return Err(AgentError::InvalidAssignment(
-            "log chunk count exceeds the per-attempt quota".to_owned(),
-        ));
-    }
-    chunks.push(InlineLogChunk {
-        sequence: first_sequence,
-        stream: stream.to_owned(),
-        content,
-        step_ordinal,
-    });
-    first_sequence
-        .checked_add(1)
-        .ok_or_else(|| AgentError::InvalidAssignment("log sequence exceeds wire bounds".to_owned()))
 }
 
-async fn publish_spool(
+/// The first sequence the live tail will not reserve: the live bound less
+/// the headroom the terminal pass needs for every stream's remainder.
+fn live_tail_sequence_ceiling() -> u64 {
+    log_chunk_bound(true).saturating_sub(
+        u64::try_from(mcloving_domain::live_logs::LIVE_TAIL_SEQUENCE_HEADROOM).unwrap_or(0),
+    )
+}
+
+/// Publishes one `PublishLog` chunk and records its receipt.
+async fn publish_reserved_chunk(
     publication: &mut PublicationContext<'_>,
-    stream: &str,
-    step_ordinal: u32,
+    journal: &mut Journal,
+    organization_id: &str,
+    attempt_id: &str,
+    fence_token: u64,
+    reservation: &LogReservation,
+    content: Vec<u8>,
+) -> Result<(), AgentError> {
+    require_work_receipt(
+        authority_rpc(
+            publication.control,
+            publication.client.publish_log(WorkLogChunk {
+                authority: Some(publication.authority.clone()),
+                sequence: reservation.sequence,
+                stream: reservation.stream.clone(),
+                content,
+                step_ordinal: reservation.step_ordinal,
+            }),
+        )
+        .await?,
+        publication.session_epoch,
+    )?;
+    journal.acknowledge_log_chunk(
+        organization_id,
+        attempt_id,
+        fence_token,
+        reservation.sequence,
+    )?;
+    crash_after_log_chunks_for_test();
+    Ok(())
+}
+
+/// Locates an interrupted step's spool for recovery, restoring the agent's
+/// own access along the way: every directory under the workspace root on the
+/// way to it gets owner traversal back and the file itself owner read and
+/// write, as the executor does at exit on the crash-free path. `Ok(None)` is
+/// a confirmed absence (some component does not exist); a link or a
+/// non-directory in the chain, a non-regular spool, and every other failure
+/// are errors.
+async fn open_interrupted_spool(
     workspace_root: &Path,
-    entry: &SpoolEntry,
-    first_sequence: u64,
-) -> Result<u64, AgentError> {
-    if entry.bytes > MAX_ATTEMPT_OUTPUT_BYTES {
+    relative_path: &Path,
+) -> Result<Option<std::fs::File>, AgentError> {
+    let Some(relative_directory) = relative_path.parent() else {
         return Err(AgentError::InvalidAssignment(
-            "durable log spool exceeds the per-attempt quota".to_owned(),
+            "interrupted spool path has no parent".to_owned(),
+        ));
+    };
+    let mut directory = workspace_root.to_owned();
+    for component in relative_directory.components() {
+        let Component::Normal(component) = component else {
+            return Err(AgentError::InvalidAssignment(
+                "interrupted spool path must be normalized and relative".to_owned(),
+            ));
+        };
+        directory.push(component);
+        let metadata = match fs::symlink_metadata(&directory).await {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        if !metadata.is_dir() || is_link_or_reparse_point(&metadata) {
+            return Err(AgentError::InvalidAssignment(
+                "interrupted spool path contains a non-directory, symlink, or reparse point"
+                    .to_owned(),
+            ));
+        }
+        restore_directory_access(&directory, &metadata).await?;
+    }
+    let path = workspace_root.join(relative_path);
+    let metadata = match fs::symlink_metadata(&path).await {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    if !metadata.is_file() || is_link_or_reparse_point(&metadata) {
+        return Err(AgentError::InvalidAssignment(
+            "interrupted spool is not a regular file".to_owned(),
         ));
     }
-    let path = workspace_root.join(&entry.relative_path);
-    verify_spool_file(&path, entry, "log").await?;
+    #[cfg(unix)]
+    {
+        let mut permissions = metadata.permissions();
+        permissions.set_mode(permissions.mode() | 0o600);
+        fs::set_permissions(&path, permissions).await?;
+    }
+    Ok(Some(open_spool_for_cut(&path)?))
+}
+
+/// Opens an interrupted step's spool for the recovery cut: a regular file
+/// by its path, never through a link, readable and writable so it can be
+/// truncated to the quota.
+fn open_spool_for_cut(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK | nix::libc::O_CLOEXEC);
+    }
+    let file = options.open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(std::io::Error::other(format!(
+            "{} is not a regular file",
+            path.display()
+        )));
+    }
+    Ok(file)
+}
+
+/// The SHA-256 of a whole file, streamed.
+async fn file_digest(path: &Path) -> Result<[u8; 32], AgentError> {
     let mut file = fs::File::open(path).await?;
-    let mut buffer = vec![0_u8; MAX_LOG_CHUNK_BYTES];
-    let mut sequence = first_sequence;
-    let mut remaining = entry.bytes;
-    while remaining > 0 {
-        let read_limit =
-            usize::try_from(remaining.min(MAX_LOG_CHUNK_BYTES as u64)).map_err(|_| {
-                AgentError::InvalidAssignment("log length exceeds platform bounds".to_owned())
-            })?;
-        let bytes = file.read(&mut buffer[..read_limit]).await?;
-        if bytes == 0 {
+    let mut buffer = vec![0_u8; 64 * 1024];
+    let mut digest = Sha256::new();
+    loop {
+        let read = file.read(&mut buffer).await?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+    }
+    Ok(digest.finalize().into())
+}
+
+/// Reads exactly `bytes` bytes of `file` starting at `offset`.
+async fn read_spool_range(
+    file: &mut fs::File,
+    offset: u64,
+    bytes: u64,
+) -> Result<Vec<u8>, AgentError> {
+    use tokio::io::AsyncSeekExt as _;
+    let expected = usize::try_from(bytes).map_err(|_| {
+        AgentError::InvalidAssignment("log length exceeds platform bounds".to_owned())
+    })?;
+    file.seek(std::io::SeekFrom::Start(offset)).await?;
+    let mut content = Vec::with_capacity(expected);
+    file.take(bytes).read_to_end(&mut content).await?;
+    if content.len() != expected {
+        return Err(AgentError::InvalidAssignment(
+            "durable log spool became shorter after verification".to_owned(),
+        ));
+    }
+    Ok(content)
+}
+
+/// Publishes finished log spools from the journal's reservations (PAR-013).
+/// Every chunk sent while the step ran is checked against the durable spool
+/// (a range whose bytes no longer hash to what was sent is a rewritten spool,
+/// refused by name) and sent again only when no receipt was recorded; the
+/// remainder of the stream is reserved and sent from the next unused
+/// sequence. A stream nothing was streamed from that fits one chunk may ride
+/// the terminal publication inline, under a reservation like any other.
+struct SpoolPublisher<'a> {
+    journal: &'a mut Journal,
+    organization_id: &'a str,
+    attempt_id: &'a str,
+    fence_token: u64,
+    session_epoch: u64,
+    chunk_bound: u64,
+}
+
+impl SpoolPublisher<'_> {
+    async fn publish(
+        &mut self,
+        publication: &mut PublicationContext<'_>,
+        stream: &str,
+        step_ordinal: u32,
+        workspace_root: &Path,
+        entry: &SpoolEntry,
+        inline: Option<&mut Vec<InlineLogChunk>>,
+    ) -> Result<(), AgentError> {
+        if entry.bytes > MAX_ATTEMPT_OUTPUT_BYTES {
             return Err(AgentError::InvalidAssignment(
-                "durable log spool became shorter after verification".to_owned(),
+                "durable log spool exceeds the per-attempt quota".to_owned(),
             ));
         }
-        if sequence >= MAX_LOG_CHUNKS_PER_ATTEMPT {
-            return Err(AgentError::InvalidAssignment(
-                "log chunk count exceeds the per-attempt quota".to_owned(),
-            ));
+        let path = workspace_root.join(&entry.relative_path);
+        verify_spool_file(&path, entry, "log").await?;
+        let mut file = fs::File::open(&path).await?;
+        let reservations: Vec<LogReservation> = self
+            .journal
+            .log_reservations(self.organization_id, self.attempt_id, self.fence_token)?
+            .into_iter()
+            .filter(|reservation| {
+                reservation.stream == stream && reservation.step_ordinal == step_ordinal
+            })
+            .collect();
+        let mut covered = 0_u64;
+        for reservation in &reservations {
+            // The executor's quota cut keeps every streamed byte (the tail
+            // publishes its floors), so a reservation past the durable spool
+            // is a rewritten or replaced spool, never a cut.
+            if reservation.offset != covered
+                || reservation
+                    .offset
+                    .checked_add(reservation.bytes)
+                    .is_none_or(|end| end > entry.bytes)
+            {
+                return Err(AgentError::InvalidAssignment(
+                    "streamed log reservations do not cover the durable spool".to_owned(),
+                ));
+            }
+            let content =
+                read_spool_range(&mut file, reservation.offset, reservation.bytes).await?;
+            if <[u8; 32]>::from(Sha256::digest(&content)) != reservation.digest {
+                return Err(AgentError::InvalidAssignment(
+                    "durable log spool was rewritten after its chunk was streamed".to_owned(),
+                ));
+            }
+            if !reservation.acknowledged {
+                publish_reserved_chunk(
+                    publication,
+                    self.journal,
+                    self.organization_id,
+                    self.attempt_id,
+                    self.fence_token,
+                    reservation,
+                    content,
+                )
+                .await?;
+            }
+            covered = reservation.offset + reservation.bytes;
         }
-        require_work_receipt(
-            authority_rpc(
-                publication.control,
-                publication.client.publish_log(WorkLogChunk {
-                    authority: Some(publication.authority.clone()),
+        // An empty remainder carries no evidence and consumes no sequence.
+        let mut inline = inline;
+        while covered < entry.bytes {
+            let remaining = entry.bytes - covered;
+            let bytes = remaining.min(MAX_LOG_CHUNK_BYTES as u64);
+            let content = read_spool_range(&mut file, covered, bytes).await?;
+            let sequence = self.journal.next_log_sequence(
+                self.organization_id,
+                self.attempt_id,
+                self.fence_token,
+            )?;
+            if sequence >= self.chunk_bound {
+                return Err(AgentError::InvalidAssignment(
+                    "log chunk count exceeds the per-attempt quota".to_owned(),
+                ));
+            }
+            let reservation = LogReservation {
+                sequence,
+                step_ordinal,
+                stream: stream.to_owned(),
+                offset: covered,
+                bytes,
+                digest: Sha256::digest(&content).into(),
+                acknowledged: false,
+            };
+            self.journal.reserve_log_chunk(
+                self.organization_id,
+                self.attempt_id,
+                self.fence_token,
+                self.session_epoch,
+                &reservation,
+            )?;
+            let rides_inline = reservations.is_empty() && covered == 0 && bytes == remaining;
+            match inline.as_deref_mut().filter(|_| rides_inline) {
+                Some(chunks) => chunks.push(InlineLogChunk {
                     sequence,
                     stream: stream.to_owned(),
-                    content: buffer[..bytes].to_vec(),
+                    content,
                     step_ordinal,
                 }),
+                None => {
+                    publish_reserved_chunk(
+                        publication,
+                        self.journal,
+                        self.organization_id,
+                        self.attempt_id,
+                        self.fence_token,
+                        &reservation,
+                        content,
+                    )
+                    .await?;
+                }
+            }
+            covered += bytes;
+        }
+        let mut growth_probe = [0_u8; 1];
+        if file.read(&mut growth_probe).await? != 0 {
+            return Err(AgentError::InvalidAssignment(
+                "durable log spool grew after verification".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// The two spool files of a running step, opened by their live path the
+/// moment the step exists. Reads go through these handles, so a workload
+/// that later renames or unlinks its visible spool paths cannot redirect the
+/// tail; the terminal pass still verifies every streamed range against the
+/// executor's own durable spool before the attempt completes.
+struct LiveSpool {
+    stdout: std::fs::File,
+    stderr: std::fs::File,
+}
+
+impl LiveSpool {
+    fn open(spool: &Path) -> Result<Self, std::io::Error> {
+        let open = |name: &str| -> Result<std::fs::File, std::io::Error> {
+            let path = spool.join(name);
+            // No pathname pre-check: the open itself refuses a link, does not
+            // block on a FIFO, and the descriptor is then judged, so nothing
+            // the workload swaps in between can be read as the spool.
+            let mut options = std::fs::OpenOptions::new();
+            options.read(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt as _;
+                options.custom_flags(
+                    nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK | nix::libc::O_CLOEXEC,
+                );
+            }
+            let file = options.open(&path)?;
+            if !file.metadata()?.is_file() {
+                return Err(std::io::Error::other(format!(
+                    "{} is not a regular file",
+                    path.display()
+                )));
+            }
+            Ok(file)
+        };
+        Ok(Self {
+            stdout: open("stdout.log")?,
+            stderr: open("stderr.log")?,
+        })
+    }
+}
+
+/// Reads exactly `bytes` bytes at `offset` without moving the descriptor's
+/// own position, synchronously: it runs under the floors lock, which the
+/// executor's quota cut also takes from synchronous code.
+fn read_range_sync(file: &std::fs::File, offset: u64, bytes: u64) -> std::io::Result<Vec<u8>> {
+    let expected = usize::try_from(bytes)
+        .map_err(|_| std::io::Error::other("log length exceeds platform bounds"))?;
+    let mut content = vec![0_u8; expected];
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileExt as _;
+        file.read_exact_at(&mut content, offset)?;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::FileExt as _;
+        let mut filled = 0_usize;
+        while filled < expected {
+            let read = file.seek_read(&mut content[filled..], offset + filled as u64)?;
+            if read == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "spool shorter than its measured length",
+                ));
+            }
+            filled += read;
+        }
+    }
+    Ok(content)
+}
+
+/// What one live tail publishes for: the attempt's authority, the step and
+/// the step's aggregate output limit.
+struct LiveTailScope<'a> {
+    organization_id: &'a str,
+    attempt_id: &'a str,
+    fence_token: u64,
+    session_epoch: u64,
+    step_ordinal: u32,
+    output_limit: u64,
+    /// The step's deadline: the sequence budget is paced to last until it.
+    deadline: tokio::time::Instant,
+    /// Where the executor's quota cut learns what was already published.
+    floors: Arc<OutputFloors>,
+    /// This step and the steps after it: the attempt-wide live sequence
+    /// budget is shared out so a long early step cannot spend what the later
+    /// steps need to stay visible.
+    steps_remaining: u32,
+}
+
+struct LiveStream {
+    stream: &'static str,
+    offset: u64,
+    last_flush: tokio::time::Instant,
+}
+
+/// Publishes a running step's output as it grows (PAR-013). Each chunk's
+/// sequence and byte range are journaled before the chunk is sent; a chunk
+/// whose send fails stays reserved and is sent again on the next tick or by
+/// the terminal pass, so a crash at any point leaves at most a reserved,
+/// unsent chunk that replay sends under the same number.
+struct LiveTail {
+    journal: Journal,
+    organization_id: String,
+    attempt_id: String,
+    fence_token: u64,
+    session_epoch: u64,
+    step_ordinal: u32,
+    slot: Arc<std::sync::Mutex<Option<LiveSpool>>>,
+    spool: Option<LiveSpool>,
+    streams: [LiveStream; 2],
+    pending: Option<(LogReservation, Vec<u8>)>,
+    stopped: bool,
+    /// The step's aggregate output limit: the tail never streams past it in
+    /// total, since the executor retains nothing beyond it.
+    output_limit: u64,
+    deadline: tokio::time::Instant,
+    floors: Arc<OutputFloors>,
+    /// First sequence this step's tail will not reserve: its share of the
+    /// attempt-wide live budget, taken at the step's start.
+    step_ceiling: u64,
+}
+
+impl LiveTail {
+    fn open(
+        config: &AgentConfig,
+        scope: LiveTailScope<'_>,
+        slot: Arc<std::sync::Mutex<Option<LiveSpool>>>,
+    ) -> Result<Self, AgentError> {
+        let now = tokio::time::Instant::now();
+        let LiveTailScope {
+            organization_id,
+            attempt_id,
+            fence_token,
+            session_epoch,
+            step_ordinal,
+            output_limit,
+            deadline,
+            floors,
+            steps_remaining,
+        } = scope;
+        let journal = Journal::open(&config.journal_path)?;
+        // Share the remaining live budget across this and the later steps.
+        let next = journal.next_log_sequence(organization_id, attempt_id, fence_token)?;
+        let ceiling = live_tail_sequence_ceiling();
+        let share = ceiling.saturating_sub(next) / u64::from(steps_remaining.max(1));
+        let step_ceiling = next.saturating_add(share).min(ceiling);
+        Ok(Self {
+            journal,
+            organization_id: organization_id.to_owned(),
+            attempt_id: attempt_id.to_owned(),
+            fence_token,
+            session_epoch,
+            step_ordinal,
+            slot,
+            spool: None,
+            streams: [
+                LiveStream {
+                    stream: "stdout",
+                    offset: 0,
+                    last_flush: now,
+                },
+                LiveStream {
+                    stream: "stderr",
+                    offset: 0,
+                    last_flush: now,
+                },
+            ],
+            pending: None,
+            stopped: false,
+            output_limit,
+            deadline,
+            floors,
+            step_ceiling,
+        })
+    }
+
+    /// How long a stream with a small amount of unpublished output waits
+    /// before it is flushed: one second, stretched as far as needed so that
+    /// this step's share of the sequence budget (two streams) lasts until the
+    /// step's deadline.
+    fn flush_interval(&self, next_sequence: u64) -> Duration {
+        let remaining = self.step_ceiling.saturating_sub(next_sequence).max(1);
+        let left = self
+            .deadline
+            .saturating_duration_since(tokio::time::Instant::now());
+        let paced = left
+            .checked_div(u32::try_from(remaining / 2).unwrap_or(u32::MAX).max(1))
+            .unwrap_or(LIVE_FLUSH_INTERVAL);
+        // No upper clamp: the interval is whatever the share and the deadline
+        // require, so the budget lasts the whole step rather than running out
+        // before it under a cap.
+        paced.max(LIVE_FLUSH_INTERVAL)
+    }
+
+    /// Runs the tail as its own task until it is aborted or stops itself:
+    /// publication never suspends the executor's polling, and an abort in
+    /// the middle of a send only leaves a reservation without a receipt for
+    /// the terminal pass to send.
+    fn spawn(
+        mut self,
+        mut client: AgentControlClient<Channel>,
+        authority: WorkAuthority,
+        authority_lost: CancellationToken,
+        stop: CancellationToken,
+        lease_window: Duration,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(LIVE_TAIL_INTERVAL);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            while !self.stopped {
+                interval.tick().await;
+                let mut publication = PublicationContext {
+                    client: &mut client,
+                    authority: &authority,
+                    session_epoch: self.session_epoch,
+                    control: AuthorityRpcControl {
+                        authority_lost: &authority_lost,
+                        stop: &stop,
+                        lease_window,
+                    },
+                };
+                if let Err(error) = self.tick(&mut publication).await {
+                    // The step is unaffected; the terminal pass publishes
+                    // whatever the tail did not.
+                    eprintln!(
+                        "live log tail stopped for step {}: {error}",
+                        self.step_ordinal
+                    );
+                    self.stopped = true;
+                }
+            }
+        })
+    }
+
+    async fn tick(&mut self, publication: &mut PublicationContext<'_>) -> Result<(), AgentError> {
+        if self.spool.is_none() {
+            self.spool = self.slot.lock().expect("live spool slot").take();
+        }
+        if let Some((reservation, content)) = self.pending.take() {
+            match publish_reserved_chunk(
+                publication,
+                &mut self.journal,
+                &self.organization_id,
+                &self.attempt_id,
+                self.fence_token,
+                &reservation,
+                content.clone(),
             )
-            .await?,
-            publication.session_epoch,
-        )?;
-        remaining = remaining
-            .checked_sub(u64::try_from(bytes).map_err(|_| {
-                AgentError::InvalidAssignment("log length exceeds wire bounds".to_owned())
-            })?)
-            .ok_or_else(|| {
-                AgentError::InvalidAssignment("log length exceeds wire bounds".to_owned())
-            })?;
-        sequence = sequence.checked_add(1).ok_or_else(|| {
-            AgentError::InvalidAssignment("log sequence exceeds wire bounds".to_owned())
-        })?;
+            .await
+            {
+                Ok(()) => {}
+                Err(AgentError::StaleAuthority) => return Err(AgentError::StaleAuthority),
+                Err(error) => {
+                    // Transport trouble: keep the reservation and retry.
+                    eprintln!(
+                        "live log chunk {} not yet accepted: {error}",
+                        reservation.sequence
+                    );
+                    self.pending = Some((reservation, content));
+                    return Ok(());
+                }
+            }
+        }
+        let flush_interval = self.flush_interval(self.journal.next_log_sequence(
+            &self.organization_id,
+            &self.attempt_id,
+            self.fence_token,
+        )?);
+        let Some(spool) = self.spool.as_mut() else {
+            return Ok(());
+        };
+        for index in 0..2 {
+            let file = if index == 0 {
+                &spool.stdout
+            } else {
+                &spool.stderr
+            };
+            // Never past the aggregate limit: the executor retains at most
+            // that many bytes across both streams, and the terminal pass can
+            // only vouch for what it retained.
+            let streamed = self.streams[0].offset + self.streams[1].offset;
+            let headroom = self.output_limit.saturating_sub(streamed);
+            let stream = &mut self.streams[index];
+            // Under the floors lock, so the length seen, the bytes read and
+            // the floor raised are one step the executor's quota cut cannot
+            // interleave with: it either cuts before this (and the length
+            // seen is the cut length) or after it (and keeps the floor).
+            let (bytes, content) = {
+                let mut floors = self.floors.lock();
+                let length = file.metadata()?.len();
+                let available = length.saturating_sub(stream.offset);
+                if available == 0
+                    || (available < LIVE_CHUNK_TARGET_BYTES
+                        && stream.last_flush.elapsed() < flush_interval)
+                {
+                    continue;
+                }
+                if headroom == 0 {
+                    self.stopped = true;
+                    return Ok(());
+                }
+                let bytes = available.min(MAX_LOG_CHUNK_BYTES as u64).min(headroom);
+                let content = read_range_sync(file, stream.offset, bytes)?;
+                if index == 0 {
+                    floors.0 = stream.offset + bytes;
+                } else {
+                    floors.1 = stream.offset + bytes;
+                }
+                (bytes, content)
+            };
+            let sequence = self.journal.next_log_sequence(
+                &self.organization_id,
+                &self.attempt_id,
+                self.fence_token,
+            )?;
+            // Leave the terminal pass room to publish every stream's
+            // remainder, and the later steps their share: stop reserving at
+            // this step's ceiling rather than spend the budget on heartbeats.
+            if sequence >= self.step_ceiling {
+                eprintln!(
+                    "live log tail paused for step {}: sequence {sequence} reaches the live \
+                     ceiling; the remainder publishes after the step",
+                    self.step_ordinal
+                );
+                self.stopped = true;
+                return Ok(());
+            }
+            let reservation = LogReservation {
+                sequence,
+                step_ordinal: self.step_ordinal,
+                stream: stream.stream.to_owned(),
+                offset: stream.offset,
+                bytes,
+                digest: Sha256::digest(&content).into(),
+                acknowledged: false,
+            };
+            self.journal.reserve_log_chunk(
+                &self.organization_id,
+                &self.attempt_id,
+                self.fence_token,
+                self.session_epoch,
+                &reservation,
+            )?;
+            stream.offset += bytes;
+            stream.last_flush = tokio::time::Instant::now();
+            match publish_reserved_chunk(
+                publication,
+                &mut self.journal,
+                &self.organization_id,
+                &self.attempt_id,
+                self.fence_token,
+                &reservation,
+                content.clone(),
+            )
+            .await
+            {
+                Ok(()) => {}
+                Err(AgentError::StaleAuthority) => return Err(AgentError::StaleAuthority),
+                Err(error) => {
+                    eprintln!(
+                        "live log chunk {} not yet accepted: {error}",
+                        reservation.sequence
+                    );
+                    self.pending = Some((reservation, content));
+                    return Ok(());
+                }
+            }
+        }
+        Ok(())
     }
-    let mut growth_probe = [0_u8; 1];
-    if file.read(&mut growth_probe).await? != 0 {
-        return Err(AgentError::InvalidAssignment(
-            "durable log spool grew after verification".to_owned(),
-        ));
-    }
-    Ok(sequence)
 }
 
 async fn verified_spool_content(
@@ -3778,6 +4572,27 @@ fn crash_after_terminal_commit_for_test() {
 
 #[cfg(not(debug_assertions))]
 fn crash_after_terminal_commit_for_test() {}
+
+/// Test-only: exits the process once this many log chunks of the current
+/// process have been acknowledged (live or terminal), to prove that a restart
+/// replays the remaining chunks under the journaled sequences.
+#[cfg(debug_assertions)]
+fn crash_after_log_chunks_for_test() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static ACKNOWLEDGED: AtomicU64 = AtomicU64::new(0);
+    let Some(limit) = std::env::var("MCLOVING_TEST_CRASH_AFTER_LOG_CHUNKS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+    else {
+        return;
+    };
+    if ACKNOWLEDGED.fetch_add(1, Ordering::SeqCst) + 1 >= limit {
+        std::process::exit(89);
+    }
+}
+
+#[cfg(not(debug_assertions))]
+fn crash_after_log_chunks_for_test() {}
 
 fn outcome_name(outcome: WorkOutcome) -> &'static str {
     match outcome {
@@ -5250,6 +6065,7 @@ mod tests {
             container_name: None,
             container_context: None,
             acquisition_directory: None,
+            live_log_stream: false,
             logs: Vec::new(),
             result: Some(result),
         };

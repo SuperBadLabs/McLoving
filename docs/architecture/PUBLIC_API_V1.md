@@ -117,7 +117,32 @@ cursor. Continuation requires the complete
 saved cursor remains exact across attempt re-fencing. Every item exposes exact
 `content_hex`; `text` is present only when the
 whole chunk is valid UTF-8, so clients can always reproduce the digest without
-lossy replacement. Errors have stable `code` and `message` fields.
+lossy replacement. Every item also carries its `cursor`, its position in the
+build's commit order (one-based, dense, assigned at commit, stable across
+re-fencing, and build-scoped: the store's table-wide identity behind the
+order is never exposed, so no tenant can measure another's activity from
+gaps), and the same
+route follows a running build (PAR-013): `after_cursor` (zero from the
+start, exclusive with the attempt tuple) returns chunks after that position
+in commit order, `wait_ms` (at most 30 000) holds the request, re-reading at a
+short interval, until a chunk is committed or the build is terminal (a
+build parked in `reconciliation_required` is not, so a follower stays
+attached through reconciliation and retry; the chunks are read once more
+after a terminal status is observed, so an empty page with `live: false` is
+the drained end of the log), and the page
+answers `next_cursor` to continue from and `live` so a follower stops after
+the terminal drain. An agent that negotiated
+`live-log-stream-v1` publishes a step's output while the step runs, so a
+follower sees a line within about a second of the step writing it (a step
+with a multi-day timeout is paced to a few seconds so its sequence budget
+lasts); `mcloving
+logs --follow` writes the exact bytes of each chunk as it commits (a code point
+the live tail split across chunks is reproduced, not annotated) and exits
+when the build is terminal; it
+is a human-output command (a single JSON document would have to hold the
+whole build log, so JSON callers page with the cursor instead), and it
+refuses a controller that does not answer the follow fields.
+Errors have stable `code` and `message` fields.
 
 External read-side migration uses only this API. The CLI exposes `pipelines`
 with the stable slug cursor and `builds` with the paired creation-microsecond

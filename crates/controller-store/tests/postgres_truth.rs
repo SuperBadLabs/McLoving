@@ -1567,6 +1567,56 @@ async fn work_mutations_are_fenced_inside_the_current_session_transaction() {
             .await
             .expect("commit current log")
     );
+    // The follower's read (PAR-013): chunks after a global cursor in commit
+    // order, and the terminal chunk bound stands for a session that never
+    // negotiated live streaming.
+    let second = NewLogChunk {
+        sequence: 1,
+        content: b"second",
+        ..chunk
+    };
+    assert!(
+        store
+            .append_log_in_session(&second, 11)
+            .await
+            .expect("commit the second chunk")
+    );
+    let followed = store
+        .build_logs_after_cursor(organization_id, project_id, claim.build_id, 0, 10)
+        .await
+        .expect("follow from the start");
+    assert_eq!(
+        followed
+            .iter()
+            .map(|entry| entry.sequence)
+            .collect::<Vec<_>>(),
+        vec![0, 1]
+    );
+    assert!(followed[0].cursor < followed[1].cursor);
+    let resumed = store
+        .build_logs_after_cursor(
+            organization_id,
+            project_id,
+            claim.build_id,
+            followed[0].cursor,
+            10,
+        )
+        .await
+        .expect("resume after the first cursor");
+    assert_eq!(resumed.len(), 1);
+    assert_eq!(resumed[0].sequence, 1);
+    assert_eq!(resumed[0].content, b"second");
+    let beyond_terminal_bound = NewLogChunk {
+        sequence: 96,
+        content: b"beyond",
+        ..chunk
+    };
+    assert!(
+        !store
+            .append_log_in_session(&beyond_terminal_bound, 11)
+            .await
+            .expect("refuse the 97th chunk without live streaming")
+    );
     assert!(
         !store
             .finalize_attempt_in_session(
@@ -12323,5 +12373,289 @@ async fn product_catalogs_are_versioned_immutable_paginated_and_tenant_scoped() 
             .await
             .expect("cross-tenant read is safely empty")
             .is_none()
+    );
+}
+
+/// ADR 0012: a pre-v39 controller admitted during the rolling-upgrade window
+/// inserts chunks with the old column list; the migration's compatibility
+/// trigger derives the build and the next position under the build lock, so
+/// the legacy chunk lands in the build's commit order rather than failing.
+#[tokio::test]
+async fn a_pre_v39_writer_still_commits_log_chunks_in_build_order() {
+    let Some(store) = test_store().await else {
+        return;
+    };
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    let agent_id = format!("legacy-log-{}", Uuid::new_v4());
+    store
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "project",
+        )
+        .await
+        .expect("create tenant");
+    store
+        .admit_test_build(&NewBuild {
+            organization_id,
+            project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
+            idempotency_key: "legacy-log-work".into(),
+            pipeline_digest: [0x6f; 32],
+            node_key: "execute".into(),
+            required_capabilities: vec!["linux".into()],
+            required_trust_pool: "trusted".into(),
+            priority: 0,
+            execution_spec: json!({}),
+        })
+        .await
+        .expect("admit work");
+    assert!(
+        store
+            .open_agent_session(
+                &agent_id,
+                "trusted",
+                1,
+                0,
+                &["work-delivery-v1".into()],
+                &["linux".into()],
+            )
+            .await
+            .expect("open a session")
+    );
+    let claim = store
+        .claim_next_in_session(
+            &ClaimRequest {
+                organization_id,
+                scheduler_id: "legacy-log".into(),
+                agent_id: agent_id.clone(),
+                capabilities: vec!["linux".into()],
+                trust_pool: "trusted".into(),
+                lease_seconds: 30,
+                fairness_seed: 0,
+            },
+            1,
+        )
+        .await
+        .expect("claim under the session")
+        .expect("claim available work");
+    assert!(
+        store
+            .accept_offer_in_session(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                &agent_id,
+                1,
+            )
+            .await
+            .expect("accept under the session")
+            .is_some()
+    );
+    assert!(
+        store
+            .mark_attempt_running_in_session(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                &agent_id,
+                1,
+            )
+            .await
+            .expect("start under the session")
+    );
+    let chunk = |sequence: i64, content: &'static [u8]| NewLogChunk {
+        organization_id,
+        attempt_id: claim.attempt_id,
+        fence: claim.fence,
+        restore_epoch: claim.restore_epoch,
+        agent_id: &agent_id,
+        sequence,
+        step_ordinal: 0,
+        stream: "stdout",
+        content,
+    };
+    assert!(
+        store
+            .append_log_in_session(&chunk(0, b"v39-first"), 1)
+            .await
+            .expect("a v39 writer commits the first chunk")
+    );
+    // The pre-v39 statement: no build, no position.
+    sqlx::query(
+        "INSERT INTO attempt_log_chunks (
+             organization_id, attempt_id, fence, sequence, stream, content, digest, step_ordinal
+         ) VALUES ($1, $2, $3, 1, 'stdout', $4, sha256($4), 0)",
+    )
+    .bind(organization_id)
+    .bind(claim.attempt_id)
+    .bind(claim.fence)
+    .bind(&b"legacy-second"[..])
+    .execute(store.pool())
+    .await
+    .expect("a pre-v39 writer's chunk is admitted through the compatibility trigger");
+    assert!(
+        store
+            .append_log_in_session(&chunk(2, b"v39-third"), 1)
+            .await
+            .expect("a v39 writer continues after the legacy chunk")
+    );
+    let logs = store
+        .build_logs_after_cursor(organization_id, project_id, claim.build_id, 0, 10)
+        .await
+        .expect("read the build's chunks in commit order");
+    assert_eq!(
+        logs.iter()
+            .map(|entry| (entry.cursor, entry.sequence, entry.content.clone()))
+            .collect::<Vec<_>>(),
+        vec![
+            (1, 0, b"v39-first".to_vec()),
+            (2, 1, b"legacy-second".to_vec()),
+            (3, 2, b"v39-third".to_vec()),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_live_log_session_may_number_chunks_past_the_terminal_bound() {
+    let Some(store) = test_store().await else {
+        return;
+    };
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    let agent_id = format!("live-log-{}", Uuid::new_v4());
+    store
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "project",
+        )
+        .await
+        .expect("create tenant");
+    store
+        .admit_test_build(&NewBuild {
+            organization_id,
+            project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
+            idempotency_key: "live-log-work".into(),
+            pipeline_digest: [0x5f; 32],
+            node_key: "execute".into(),
+            required_capabilities: vec!["linux".into()],
+            required_trust_pool: "trusted".into(),
+            priority: 0,
+            execution_spec: json!({}),
+        })
+        .await
+        .expect("admit work");
+    assert!(
+        store
+            .open_agent_session(
+                &agent_id,
+                "trusted",
+                1,
+                0,
+                &["work-delivery-v1".into(), "live-log-stream-v1".into()],
+                &["linux".into()],
+            )
+            .await
+            .expect("open a live-log session")
+    );
+    let claim = store
+        .claim_next_in_session(
+            &ClaimRequest {
+                organization_id,
+                scheduler_id: "live-log".into(),
+                agent_id: agent_id.clone(),
+                capabilities: vec!["linux".into()],
+                trust_pool: "trusted".into(),
+                lease_seconds: 30,
+                fairness_seed: 0,
+            },
+            1,
+        )
+        .await
+        .expect("claim under the live-log session")
+        .expect("claim available work");
+    assert!(
+        store
+            .accept_offer_in_session(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                &agent_id,
+                1,
+            )
+            .await
+            .expect("accept under the live-log session")
+            .is_some()
+    );
+    assert!(
+        store
+            .mark_attempt_running_in_session(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                &agent_id,
+                1,
+            )
+            .await
+            .expect("start under the live-log session")
+    );
+    let chunk = |sequence: i64, content: &'static [u8]| NewLogChunk {
+        organization_id,
+        attempt_id: claim.attempt_id,
+        fence: claim.fence,
+        restore_epoch: claim.restore_epoch,
+        agent_id: &agent_id,
+        sequence,
+        step_ordinal: 0,
+        stream: "stdout",
+        content,
+    };
+    assert!(
+        store
+            .append_log_in_session(&chunk(0, b"first"), 1)
+            .await
+            .expect("commit the first chunk")
+    );
+    assert!(
+        store
+            .append_log_in_session(&chunk(96, b"ninety-seventh"), 1)
+            .await
+            .expect("a live session numbers past the terminal bound")
+    );
+    assert!(
+        !store
+            .append_log_in_session(
+                &chunk(
+                    mcloving_domain::live_logs::MAX_LIVE_ATTEMPT_LOG_CHUNKS,
+                    b"beyond",
+                ),
+                1,
+            )
+            .await
+            .expect("the live bound still holds")
+    );
+    let followed = store
+        .build_logs_after_cursor(organization_id, project_id, claim.build_id, 0, 10)
+        .await
+        .expect("follow the live session's chunks");
+    assert_eq!(
+        followed
+            .iter()
+            .map(|entry| entry.sequence)
+            .collect::<Vec<_>>(),
+        vec![0, 96]
     );
 }

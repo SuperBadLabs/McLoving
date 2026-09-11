@@ -339,6 +339,70 @@ discharge a parked reconciliation).
   and peers without the feature keep the streaming pass — a controller that
   never negotiated it would silently ignore the field, so the agent must not
   inline for such a peer.
+- Every log chunk's sequence is a journal reservation (schema 6,
+  `log_reservations`: sequence, step ordinal, stream, byte range, digest,
+  receipt) written before the chunk is first sent, so the live tail, the
+  terminal pass and a post-crash replay all number one range of one stream
+  once; sequences are attempt-wide and the next is one past the highest
+  reservation; an attempt a live tail streamed is journaled as such (schema
+  7, `attempts.live_log_stream`, durable before its first reservation)
+  and is replayed only under a session that negotiates the feature, since
+  its reservations and the chunks its spool remainder needs may pass the
+  terminal-only bound; a session with an older peer (a rolling upgrade)
+  leaves it in the journal rather than failing every other attempt's
+  recovery with it. When
+  `live-log-stream-v1` is negotiated (Unix; not for helper
+  steps, and not for a credential-bearing step, whose output is captured and
+  redacted only after it exits so nothing unredacted may leave the agent
+  early), the spawn hook opens the step's `stdout.log`/`stderr.log` by their
+  live path (`O_NOFOLLOW|O_NONBLOCK`, the opened descriptor judged a regular
+  file), and a tail runs as its own task, ticking every 250 ms while the
+  step runs so a slow send never suspends the executor's timeout,
+  cancellation or output-limit polling: a stream with at
+  least 64 KiB unpublished, or any unpublished bytes a second after its last
+  chunk, is reserved and sent; a send the controller does not accept stays
+  reserved and is retried, a stale authority stops the tail without touching
+  the step, the tail stops reserving 128 sequences below the live bound so
+  the terminal pass always has room for every stream's remainder, it never
+  streams past the step's aggregate output limit, and it paces its flushes
+  (one second, stretched as far as the step's timeout and its share
+  require) so the sequence budget lasts the
+  step's whole timeout, that budget shared out across the remaining steps
+  of the attempt so an early step cannot spend what later steps need. Each
+  chunk also raises the stream's retention floor under one lock the
+  executor's quota cut takes as well, so the length measured, the bytes
+  read and the floor raised are one step the cut cannot interleave with: a
+  step that exceeds the aggregate limit keeps every byte already published
+  (stdout still preserved first among the unpublished remainder), so the
+  terminal pass's strict coverage and digest checks hold for a
+  quota-terminated step too. The terminal pass then
+  verifies the executor's durable spool as before, checks every streamed
+  range is contiguous from zero and still hashes to what was sent (a spool
+  rewritten after streaming fails the attempt by name), sends only ranges
+  without a receipt, reserves and sends the remainder from the next
+  sequence, and lets a stream nothing was streamed from ride inline under a
+  reservation like any other. Recovery replays from the same reservations.
+  A session with the feature may number chunks up to 262 144 per attempt;
+  the 64 MiB byte quota is unchanged. A crash while a step runs leaves at most a
+  reserved, unsent chunk; on restart the recovered attempt is quiesced and
+  reported as interrupted as before, and before its cancellation completes
+  the agent, under the renewed lease the controller still retains for it,
+  publishes the interrupted step's spool from its reservations (the
+  unreceipted ranges and the unstreamed tail), probing the live step directory first and then the relocated one, since a
+  multi-step crash may fall between a finished step's relocation and its
+  journaling, restoring the agent's own access to the spool chain first (the workload
+  may have revoked it and the crashed session never reached the
+  executor's restoration at exit; only a confirmed absence is an empty
+  stream, a permission or I/O failure is an error; an empty spool with a
+  reservation outstanding still goes through the publisher and fails its
+  coverage check like a spool truncated short of its reservations; a spool
+  the workload unlinked with a reservation outstanding is `AGENT-011`) and then applying the
+  executor's aggregate quota cut to the pair with the journaled
+  reservations as floors, since the crashed session never reached that
+  cut and an orphan may have kept writing, so the output up to the quiesce is in the ledger; a failed publication keeps the
+  attempt cancelling for the next session rather than completing and
+  reclaiming the spool, and a lease definitively lost meanwhile retires the
+  attempt with the chunks already accepted exactly once.
 - Once the controller acknowledges terminal truth and the local terminal
   transition commits, both remote and embedded workers remove the attempt
   workspace through the same no-follow cleanup, delete controller-owned log

@@ -605,6 +605,7 @@ had never claimed one.
 | PAR-010 | `docs/evidence/PAR-010_SECURITY_REVIEW.md` |
 | PAR-011 | `docs/evidence/PAR-011_SECURITY_REVIEW.md` |
 | PAR-012 | `docs/evidence/PAR-012_SECURITY_REVIEW.md` |
+| PAR-001 | `docs/evidence/PAR-001_SECURITY_REVIEW.md` |
 | EXEC-005 | `docs/evidence/EXEC-005_SECURITY_REVIEW.md` |
 
 ## Residual-risk policy
@@ -884,7 +885,71 @@ the podman store identity is not yet pinned into launch and reap, implicit
 configuration, and `#`-prefixed environment names are not yet refused for
 container stages; plain process steps remain uncontained (`SEC-005`).
 
-## PAR-001 GitHub webhook receiver review, ticket ACTIVE
+## PAR-013 live log streaming review, ticket ACTIVE
+
+A step's output reaches the controller while the step runs and a reader
+follows it by one global cursor. Boundaries touched: TM-003 (agent runtime:
+live chunks travel the existing fenced, session-bound `PublishLog` path with
+the same lease, fence, restore-epoch and session checks, redaction to a fixed
+point and idempotent append, so a stale or fenced-out agent cannot publish
+and a duplicate is a no-op; the per-attempt chunk bound rises to 262 144 only
+for a session that negotiated `live-log-stream-v1`, read from the durable
+session record, the live tail stops 128 sequences short of it, paces its
+flushes so the budget lasts the step's timeout with the budget shared
+across the attempt's remaining steps, and never streams past the aggregate
+output limit, and the 64 MiB byte quota is unchanged, TM-018); TM-013 (a credential-bearing step is never tailed: its output is
+captured and redacted after it exits, as before, so nothing unredacted
+leaves the agent early); TM-006
+(durable evidence: every chunk's sequence and byte range are journaled before the
+chunk is sent, so a crash at any point cannot renumber or duplicate a range;
+the terminal pass verifies the executor's durable spool and re-hashes every
+streamed range against its reservation, refusing by name a spool the
+workload rewrote after a range was streamed (the executor's quota cut keeps
+every streamed byte through per-stream retention floors it reads under the
+same lock the tail raises them under, within the same aggregate limit, so a
+quota-terminated step passes the same checks), and
+reads the live spool files
+through descriptors opened without following links or blocking and judged
+regular files after the open, so a renamed, unlinked or swapped visible
+path cannot redirect or stall the tail; recovery replays from the same
+reservations and sends only ranges without a receipt); TM-052 (API: follow
+mode reads through the same authorization, tenant and fence filters as the
+paged read, holds a request at most 30 seconds re-reading at 200 ms, reads
+the chunks once more after observing a terminal status so the drained end
+is exact, answers from the ledger only, so a follower observes committed
+chunks and nothing in flight, and names positions within the build's own
+commit order, stored with the build identity at commit under the per-build
+log lock and unique-indexed on (organization, build, position) so a page
+after a position is one ordered range scan rather than a re-ranking of the
+ledger or a merge across attempts, rather than the store's table-wide
+identity, so a tenant cannot
+measure another's activity from cursor gaps). Capacity under TM-018: at
+most 262 144 chunk rows per attempt for a live-streaming session, each
+bounded by the 64 MiB per-attempt byte quota, the row count itself bounded
+by the tail's one-second flush floor and pacing. Residual: a workload can still write anything into its
+own stdout, as before; the live tail opens the spool by path after the
+executor created it, so a workload that swaps the path in that window
+streams other content it could have printed anyway and then fails its
+attempt at the terminal check; a crash while a step runs is followed, on
+restart, by restoration of the agent's own access to the interrupted step's spool
+chain (a workload-revoked permission is restored, never read as an absent
+stream), the executor's aggregate quota cut applied to the spool pair
+with its reservations as floors and then publication of that
+spool from its reservations under the renewed lease before the
+cancellation completes (a
+failed publication keeps the attempt cancelling for the next session
+rather than reclaiming the spool), and the interrupted attempt is reported
+as such (a lease definitively lost in the meantime retires it with the
+accepted chunks exactly once). Tests cover the journal reservations (uniqueness,
+coverage, stale authority, retirement, schema migration), the store follow
+read and both chunk bounds, and two shipped-binary gates: the first line
+visible while the step runs with the paged read agreeing with the follow,
+and a crash after the first acknowledged terminal chunk replayed under the
+journaled sequences with every chunk exactly once. Closure requires the
+reviewed merge, exact-main Foundation and native Windows runs, and a
+receipt in `docs/evidence/PAR-013_SECURITY_REVIEW.md`.
+
+## PAR-001 GitHub webhook receiver review (earned closure)
 
 A public route lets GitHub feed an SCM webhook trigger directly. Boundaries
 touched: TM-039 (trigger ingress: the receiver admits through the same
@@ -935,9 +1000,19 @@ which is what GitHub's own redelivery contract guarantees; `revision` and
 Tests cover admission, exact redelivery with one build, reused-id conflict,
 forged signature without receipt, missing headers, the unkeyed controller,
 filtered and ignored acknowledgements with their audit records, and the
-pull-request mapping. Closure requires the reviewed merge, exact-main
-Foundation and native Windows runs, and a receipt in
-`docs/evidence/PAR-001_SECURITY_REVIEW.md`.
+pull-request mapping. Closed on PR #148 (`327a032a`), exact-main Foundation
+`34612940947` and Windows Agent `34612940719`; receipt
+`docs/evidence/PAR-001_SECURITY_REVIEW.md`. The review added, before the
+merge, receipt-timed acceptance on the database clock, durable indexed
+receipts for unadmitted deliveries serialized with acceptance and redrive
+under the trigger lock, replay ahead of the current filter and pause state
+under the recorded caller identity, the body digest in the canonical
+payload, generation revalidation for receipts, receipts in the transfer
+snapshot, a permit bound with a deadline ahead of body buffering, and
+`no-store` on the secret-bearing read. Residual: the operator carries the
+secret to GitHub; GitHub's delivery id is trusted as the idempotency key;
+an event filtered under a narrower filter is not re-decided on redelivery
+(push again or use the bearer route).
 
 ## PAR-012 checkout step execution review (earned closure)
 

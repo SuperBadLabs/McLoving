@@ -172,6 +172,11 @@ pub struct SessionFeatures {
     /// agent refuses a version-5 payload terminally rather than run it with
     /// its step identity silently dropped on the wire.
     pub multi_step: bool,
+    /// The controller accepts log chunks while a step runs and numbers them
+    /// up to the live bound (PAR-013). Without it the agent publishes every
+    /// stream after its step, as before. Unix only: the tail reads the
+    /// executor's spool files by their live path.
+    pub live_log_stream: bool,
 }
 
 impl SessionFeatures {
@@ -194,6 +199,10 @@ impl SessionFeatures {
                 && features.iter().any(|feature| {
                     feature == mcloving_domain::multi_step::MULTI_STEP_EXECUTION_FEATURE
                 }),
+            live_log_stream: cfg!(unix)
+                && features
+                    .iter()
+                    .any(|feature| feature == mcloving_domain::live_logs::LIVE_LOG_STREAM_FEATURE),
         }
     }
 }
@@ -440,7 +449,14 @@ pub async fn probe_once(config: &AgentConfig) -> Result<SessionReceipt, AgentErr
         let stop = CancellationToken::new();
         let (mut client, mut receipt) = open_session(config, stop.clone()).await?;
         send_reconciliation(config, &mut client, receipt.session_epoch, stop.clone()).await?;
-        worker::recover_finalizations(config, &mut client, receipt.session_epoch, &stop).await?;
+        worker::recover_finalizations(
+            config,
+            &mut client,
+            receipt.session_epoch,
+            receipt.features.live_log_stream,
+            &stop,
+        )
+        .await?;
         receipt.active_attempts = Journal::open(&config.journal_path)?
             .reconcile()?
             .attempts
@@ -487,7 +503,14 @@ async fn run_session(config: &AgentConfig, stop: CancellationToken) -> Result<()
         receipt.session_epoch,
         async {
             send_reconciliation(config, &mut client, receipt.session_epoch, stop.clone()).await?;
-            worker::recover_finalizations(config, &mut client, receipt.session_epoch, &stop).await
+            worker::recover_finalizations(
+                config,
+                &mut client,
+                receipt.session_epoch,
+                receipt.features.live_log_stream,
+                &stop,
+            )
+            .await
         },
     )
     .await?;
@@ -596,6 +619,7 @@ async fn open_session(
                     ACCEPT_LEASE_STATE_FEATURE.to_owned(),
                     INLINE_TERMINAL_LOGS_FEATURE.to_owned(),
                     mcloving_domain::multi_step::MULTI_STEP_EXECUTION_FEATURE.to_owned(),
+                    mcloving_domain::live_logs::LIVE_LOG_STREAM_FEATURE.to_owned(),
                 ]),
             }),
             trust_pool: config.trust_pool.clone(),
@@ -1502,6 +1526,7 @@ pub async fn run_execution_service_smoke(
         ],
         environment: BTreeMap::new(),
         output_limit_bytes: None,
+        retained_output_floors: None,
         timeout: Duration::from_secs(300),
         termination_grace: Duration::from_millis(100),
     };
@@ -1564,6 +1589,7 @@ pub async fn run_creation_boundary_service_smoke(
         arguments: Vec::<OsString>::new(),
         environment: BTreeMap::new(),
         output_limit_bytes: None,
+        retained_output_floors: None,
         timeout: Duration::from_secs(300),
         termination_grace: Duration::from_millis(100),
     };
@@ -2030,6 +2056,7 @@ mod tests {
             container_name: None,
             container_context: None,
             acquisition_directory: None,
+            live_log_stream: false,
             logs: Vec::new(),
             result: None,
         };
@@ -2233,6 +2260,7 @@ mod tests {
                 container_name: None,
                 container_context: None,
                 acquisition_directory: None,
+                live_log_stream: false,
                 logs: vec![mcloving_agent_runtime::SpoolEntry {
                     sequence: 7,
                     relative_path: PathBuf::from("spool/stdout.log"),
@@ -2278,6 +2306,7 @@ mod tests {
             container_name: None,
             container_context: None,
             acquisition_directory: None,
+            live_log_stream: false,
             logs: Vec::new(),
             result: None,
         };

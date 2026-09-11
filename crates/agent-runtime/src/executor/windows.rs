@@ -217,9 +217,19 @@ where
         }
         write_redacted_output(&mut stdout_control, &captured.stdout, redactions)?;
         write_redacted_output(&mut stderr_control, &captured.stderr, redactions)?;
-        truncate_output_to_limit(&stdout_control, &stderr_control, request.output_limit_bytes)?;
+        truncate_output_to_limit(
+            &stdout_control,
+            &stderr_control,
+            request.output_limit_bytes,
+            request.retained_output_floors.as_deref(),
+        )?;
     } else if termination == Termination::OutputLimitExceeded {
-        truncate_output_to_limit(&stdout_control, &stderr_control, request.output_limit_bytes)?;
+        truncate_output_to_limit(
+            &stdout_control,
+            &stderr_control,
+            request.output_limit_bytes,
+            request.retained_output_floors.as_deref(),
+        )?;
     }
     ensure_original_workspace_root(&workspace_root_control, &request.workspace_root)?;
     stdout_control.sync_all()?;
@@ -260,16 +270,12 @@ fn truncate_output_to_limit(
     stdout: &File,
     stderr: &File,
     limit: Option<u64>,
+    floors: Option<&super::OutputFloors>,
 ) -> Result<(), std::io::Error> {
-    let Some(limit) = limit else {
-        return Ok(());
-    };
-    let stdout_bytes = stdout.metadata()?.len();
-    let stderr_bytes = stderr.metadata()?.len();
-    let retained_stdout = stdout_bytes.min(limit);
-    let retained_stderr = stderr_bytes.min(limit - retained_stdout);
-    stdout.set_len(retained_stdout)?;
-    stderr.set_len(retained_stderr)
+    match limit {
+        Some(limit) => super::cut_spools_to_limit(stdout, stderr, limit, floors),
+        None => Ok(()),
+    }
 }
 
 pub(super) fn open_workspace_root(path: &Path) -> Result<File, ExecutionError> {
@@ -555,6 +561,7 @@ mod tests {
             arguments,
             environment: BTreeMap::new(),
             output_limit_bytes: None,
+            retained_output_floors: None,
             // Hosted Windows runners can spend well over ten seconds starting
             // PowerShell while the test binary is exercising several Job
             // Objects concurrently. Keep the execution deadline above the

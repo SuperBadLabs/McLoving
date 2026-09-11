@@ -203,6 +203,14 @@ pub enum Command {
         after_stream: Option<String>,
         #[arg(long, default_value_t = 1_000)]
         limit: u32,
+        /// Print chunks as they are committed, from the global cursor, until
+        /// the build is terminal and its log is drained (PAR-013).
+        #[arg(long, conflicts_with_all = ["after_attempt", "after_fence", "after_sequence", "after_stream"])]
+        follow: bool,
+        /// Follow mode: cursor to resume after (the `next_cursor` of an
+        /// earlier follow).
+        #[arg(long, default_value_t = 0, requires = "follow")]
+        after_cursor: i64,
     },
     Cancel {
         build: Uuid,
@@ -484,11 +492,30 @@ pub async fn execute(arguments: &Arguments) -> Result<CommandOutput> {
         )?,
         Command::Logs {
             build,
+            follow: true,
+            after_cursor,
+            limit,
+            ..
+        } => {
+            follow_logs(
+                &client,
+                arguments.organization,
+                required_project(arguments.project)?,
+                *build,
+                *after_cursor,
+                *limit,
+                arguments.output,
+            )
+            .await?
+        }
+        Command::Logs {
+            build,
             after_attempt,
             after_fence,
             after_sequence,
             after_stream,
             limit,
+            ..
         } => to_value(
             client
                 .logs_page(
@@ -675,6 +702,92 @@ fn parse_parameters(parameters: &[String]) -> Result<BTreeMap<String, Value>> {
         }
     }
     Ok(parsed)
+}
+
+/// Follows a build's log as chunks commit: each request waits up to ten
+/// seconds for new chunks, so a line shows within about a quarter second of
+/// its commit; the loop ends once the build is terminal and a read after
+/// that returns nothing more. The text streams to stdout as it arrives and
+/// the returned value summarizes the follow. Only human output follows: a
+/// single JSON document would have to hold the whole build log in memory
+/// (an attempt may contribute 64 MiB) and could not be streamed, so JSON
+/// callers page with the cursor instead. A controller that does not answer
+/// the follow fields is refused rather than re-read forever.
+async fn follow_logs(
+    client: &Client,
+    organization_id: Uuid,
+    project_id: Uuid,
+    build_id: Uuid,
+    after_cursor: i64,
+    limit: u32,
+    output: OutputMode,
+) -> Result<Value> {
+    use std::io::Write as _;
+    if output != OutputMode::Human {
+        bail!(
+            "--follow streams text and is not available with --output json; use --output human, \
+             or read pages without --follow"
+        );
+    }
+    let mut cursor = after_cursor;
+    let mut chunks = 0_u64;
+    let mut stdout = std::io::stdout();
+    loop {
+        let page = client
+            .logs_after_cursor(
+                organization_id,
+                project_id,
+                build_id,
+                cursor,
+                10_000,
+                Some(limit),
+            )
+            .await?;
+        let (Some(next_cursor), Some(live)) = (page.next_cursor, page.live) else {
+            bail!(
+                "the controller did not answer follow mode; upgrade it or read pages without --follow"
+            );
+        };
+        for item in &page.items {
+            chunks += 1;
+            // The exact bytes the step wrote, so a code point the live tail
+            // split across two chunks is reproduced rather than annotated
+            // twice; the terminal decodes the stream as a whole.
+            stdout.write_all(&decode_hex(&item.content_hex)?)?;
+        }
+        stdout.flush()?;
+        let drained = page.items.is_empty();
+        cursor = next_cursor;
+        if drained && !live {
+            break;
+        }
+    }
+    Ok(json!({
+        "build_id": build_id,
+        "chunks": chunks,
+        "next_cursor": cursor,
+    }))
+}
+
+/// Decodes the API's lowercase hex log content back to the bytes the step
+/// wrote.
+fn decode_hex(hex: &str) -> Result<Vec<u8>> {
+    let digits = hex.as_bytes();
+    if !digits.len().is_multiple_of(2) {
+        bail!("log content hex has an odd length");
+    }
+    digits
+        .chunks_exact(2)
+        .map(|pair| {
+            let high = (pair[0] as char)
+                .to_digit(16)
+                .context("log content hex has a non-hex digit")?;
+            let low = (pair[1] as char)
+                .to_digit(16)
+                .context("log content hex has a non-hex digit")?;
+            Ok(u8::try_from(high * 16 + low).expect("two hex digits fit a byte"))
+        })
+        .collect()
 }
 
 fn cursor(
@@ -885,6 +998,21 @@ fn scalar(value: &Value) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_follower_writes_the_exact_bytes_across_a_split_code_point() {
+        // `é` split between two live chunks: neither half is valid UTF-8 on
+        // its own, and their concatenation is the character again.
+        let first = super::decode_hex("61c3").unwrap();
+        let second = super::decode_hex("a962").unwrap();
+        assert!(std::str::from_utf8(&first).is_err());
+        assert!(std::str::from_utf8(&second).is_err());
+        let mut joined = first;
+        joined.extend(second);
+        assert_eq!(std::str::from_utf8(&joined).unwrap(), "aéb");
+        assert!(super::decode_hex("abc").is_err());
+        assert!(super::decode_hex("zz").is_err());
+    }
+
     use super::*;
 
     #[test]

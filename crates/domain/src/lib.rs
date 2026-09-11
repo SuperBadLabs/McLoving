@@ -340,6 +340,30 @@ mod tests {
     }
 }
 
+/// Live log streaming (PAR-013): an agent publishes a step's output while
+/// the step runs, each chunk's sequence reserved in its journal before it is
+/// sent, and the controller lets a reader follow a build's log by one global
+/// cursor with a bounded wait.
+pub mod live_logs {
+    /// Wire feature: the peer streams log chunks while a step runs and
+    /// accepts the raised per-attempt chunk bound.
+    pub const LIVE_LOG_STREAM_FEATURE: &str = "live-log-stream-v1";
+    /// Exclusive upper bound on a log chunk sequence for a session that
+    /// negotiated the feature; the 96-chunk terminal bound stays for every
+    /// other session. The live tail paces its flushes so this budget lasts
+    /// the step's whole timeout (one chunk per stream per second up to about
+    /// a day and a half, a few seconds apart for the seven-day maximum); the
+    /// 64 MiB byte quota bounds the bytes regardless.
+    pub const MAX_LIVE_ATTEMPT_LOG_CHUNKS: i64 = 262_144;
+    /// Sequences the live tail leaves unreserved below the bound so the
+    /// terminal pass can always publish every stream's remainder: the byte
+    /// quota is at most 64 one-MiB chunks, plus one partial chunk per stream
+    /// of a sixteen-step stage.
+    pub const LIVE_TAIL_SEQUENCE_HEADROOM: i64 = 128;
+    /// Longest a follower may wait on one request for new chunks.
+    pub const MAX_FOLLOW_WAIT_MS: u64 = 30_000;
+}
+
 /// Multi-step stages: one node and one attempt per stage, several ordered
 /// process steps inside the attempt, distinguished in durable truth by a step
 /// ordinal rather than by a second attempt.
