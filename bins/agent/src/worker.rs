@@ -806,16 +806,16 @@ fn validate_assignment_with_features(
             }
             SpecClassification::Steps(steps) => {
                 if !features.multi_step {
-                    // The controller emits version 5 only to agents that
-                    // advertised the capability, so reaching here without the
-                    // wire feature is a defect on one side; refuse for good
-                    // rather than run with step identity dropped on the wire.
-                    return Ok(AssignmentDisposition::Unsupported(UnsupportedAssignment {
-                        authority,
-                        workspace,
-                        payload_digest,
-                        detail: "multi-step execution was not negotiated".to_owned(),
-                    }));
+                    // The capability is advertised at session open, before
+                    // negotiation can tell this agent whether the controller
+                    // it reached understands step ordinals. A previous-release
+                    // replica in a mixed rollout may therefore claim a
+                    // version-5 node for this session. That work is valid for
+                    // any session that did negotiate the feature, so decline
+                    // it back to the queue rather than fail it for good.
+                    return Ok(AssignmentDisposition::ForAnotherRuntime(
+                        "multi-step work requires a session that negotiated multi-step-execution-v1",
+                    ));
                 }
                 if workspace_grant.is_some() {
                     return Ok(AssignmentDisposition::Unsupported(UnsupportedAssignment {
@@ -2774,6 +2774,13 @@ async fn reclaim_spool_entries(
     for entry in logs.iter().chain(result) {
         changed.extend(remove_spool_file(&config.workspace_root, entry).await?);
     }
+    // The relocated step spools of a multi-step attempt sit in one fixed
+    // directory. Every journaled entry below it was acknowledged before this
+    // point, and anything the journal never learned about is exactly the
+    // crash-window orphan this removal exists for.
+    changed.extend(
+        remove_terminal_relative_path(&config.workspace_root, &step_spool_area(workspace)).await?,
+    );
     flush_terminal_cleanup(&config.workspace_root, workspace, changed).await?;
     Journal::open(&config.journal_path)?.retire_terminal_spools(
         organization_id,
@@ -3036,9 +3043,11 @@ async fn relocate_step_spool(
     ordinal: u32,
     outcome: &mut mcloving_agent_runtime::executor::ExecutionOutcome,
 ) -> Result<(), AgentError> {
-    let relative_parent = PathBuf::from(AGENT_RESULT_DIRECTORY)
-        .join(workspace)
-        .join(Uuid::new_v4().simple().to_string());
+    // Deterministic, not random: terminal reclaim removes this whole
+    // directory whether or not the journal references what is inside, so a
+    // crash between the rename below and the journal write that follows it
+    // orphans nothing.
+    let relative_parent = step_spool_area(workspace);
     let (parent, changed_parents) =
         create_result_directory(workspace_root, &relative_parent).await?;
     let step_directory = format!("step-{ordinal}");
@@ -3066,6 +3075,15 @@ async fn relocate_step_spool(
     outcome.stdout.relative_path = relative_step.join("stdout.log");
     outcome.stderr.relative_path = relative_step.join("stderr.log");
     Ok(())
+}
+
+/// Where a multi-step attempt's finished step spools live once relocated:
+/// one fixed directory per attempt workspace, so cleanup can find it without
+/// the journal.
+fn step_spool_area(workspace: &Path) -> PathBuf {
+    PathBuf::from(AGENT_RESULT_DIRECTORY)
+        .join(workspace)
+        .join("steps")
 }
 
 async fn create_result_directory(
@@ -3527,13 +3545,17 @@ mod tests {
     }
 
     /// PAR-010: the version-5 envelope is runnable only once the controller
-    /// confirmed it understands step ordinals on the wire; without that it
-    /// is a permanent refusal, never a silent single-step run.
+    /// confirmed it understands step ordinals on the wire; without that the
+    /// work is declined back to the queue for a session that did, never run
+    /// as a silent single step and never failed for good.
     #[test]
     fn multi_step_envelope_runs_only_when_the_feature_was_negotiated() {
         let spec = multi_step_spec(3);
-        let refusal = unsupported(validate_assignment(&config(), 4, assignment(&spec)).unwrap());
-        assert_eq!(refusal.detail, "multi-step execution was not negotiated");
+        assert!(matches!(
+            validate_assignment(&config(), 4, assignment(&spec)).unwrap(),
+            AssignmentDisposition::ForAnotherRuntime(reason)
+                if reason.contains("multi-step-execution-v1")
+        ));
 
         let features = SessionFeatures {
             multi_step: true,
