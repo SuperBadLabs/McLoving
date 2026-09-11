@@ -197,6 +197,10 @@ message WorkLogChunk {
   uint64 sequence = 2;
   string stream = 3;
   bytes content = 4;
+  // Which step of a multi-step stage produced this chunk. Zero for the
+  // single-step envelope, so a peer that never negotiated
+  // multi-step-execution-v1 reads and writes the field's default.
+  uint32 step_ordinal = 5;
 }
 
 message WorkCompletion {
@@ -218,6 +222,7 @@ message InlineLogChunk {
   uint64 sequence = 1;
   string stream = 2;
   bytes content = 3;
+  uint32 step_ordinal = 4;
 }
 
 enum WorkOutcome {

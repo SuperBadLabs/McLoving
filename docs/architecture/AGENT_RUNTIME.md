@@ -252,9 +252,24 @@ discharge a parked reconciliation).
 - Standard output and error are written directly to files, fsynced, and hashed
   before the outcome is returned. Replay verifies each descriptor in a bounded
   first pass and publishes one-MiB chunks in a second streaming pass. A single
-  attempt may retain at most 64 MiB of logs across at most 66 chunks and a
+  attempt may retain at most 64 MiB of logs across at most 96 chunks (64 full
+  chunks plus one partial chunk per stream of a sixteen-step attempt) and a
   64 KiB result. Both the agent and controller independently reject excess
   chunk cardinality.
+- When `multi-step-execution-v1` is negotiated and the node requires the
+  `multi-step-v1` capability, the controller emits the version-5 envelope:
+  one to sixteen ordered process steps of one stage run inside one attempt
+  under one lease (PAR-010). Every step's streams are their own journaled
+  spools under `spool/step-N/`, every chunk carries the step ordinal on the
+  wire and in `attempt_log_chunks.step_ordinal`, the journal records each
+  step's start (`attempts.current_step`) before its spawn, and execution stops
+  at the first step that does not succeed; the per-step outcomes ride the
+  terminal summary as `steps`. A crash after a step's process exits and
+  before its finalization is the existing unverifiable-containment case: the
+  attempt parks reconciliation-required naming `interrupted_at_step:N`, and
+  the step is neither re-run nor skipped. Workspace transfer, helpers and
+  inline terminal logs stay single-step; the Windows agent does not advertise
+  the capability.
 - When `inline-terminal-logs-v1` is negotiated, a stream that fits one chunk
   is verified identically and then carried in the terminal publication's
   `inline_log_chunks` instead of its own `PublishLog` round trip; the

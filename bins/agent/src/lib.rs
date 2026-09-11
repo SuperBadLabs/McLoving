@@ -159,6 +159,11 @@ pub struct SessionFeatures {
     /// `WorkCompletion.inline_log_chunks` is processed, so single-chunk log
     /// streams may ride the completion instead of `PublishLog` round trips.
     pub inline_terminal_logs: bool,
+    /// The controller emits the version-5 multi-step envelope and reads the
+    /// `step_ordinal` it puts on every log chunk (PAR-010). Without it the
+    /// agent refuses a version-5 payload terminally rather than run it with
+    /// its step identity silently dropped on the wire.
+    pub multi_step: bool,
 }
 
 impl SessionFeatures {
@@ -177,6 +182,10 @@ impl SessionFeatures {
             inline_terminal_logs: features
                 .iter()
                 .any(|feature| feature == INLINE_TERMINAL_LOGS_FEATURE),
+            multi_step: cfg!(unix)
+                && features.iter().any(|feature| {
+                    feature == mcloving_domain::multi_step::MULTI_STEP_EXECUTION_FEATURE
+                }),
         }
     }
 }
@@ -537,6 +546,7 @@ async fn open_session(
                     RECOVERED_DISCHARGE_FEATURE.to_owned(),
                     ACCEPT_LEASE_STATE_FEATURE.to_owned(),
                     INLINE_TERMINAL_LOGS_FEATURE.to_owned(),
+                    mcloving_domain::multi_step::MULTI_STEP_EXECUTION_FEATURE.to_owned(),
                 ]),
             }),
             trust_pool: config.trust_pool.clone(),
@@ -845,6 +855,18 @@ async fn send_reconciliation(
                          confirmed its fenced authority is disowned; terminal evidence \
                          is preserved in the journal and its spools are reclaimed under \
                          the terminal spool rules",
+                        attempt.organization_id, attempt.attempt_id, attempt.fence_token
+                    );
+                }
+                if phase == AttemptPhase::ReconciliationRequired
+                    && let Some(step) = attempt.current_step
+                {
+                    // PAR-010: the journal recorded this step's start and
+                    // nothing about its exit, so the attempt parks naming it.
+                    // The step is neither re-run nor skipped.
+                    eprintln!(
+                        "recovered attempt {}/{} fence {} parked reconciliation-required: \
+                         interrupted_at_step:{step}; the step is neither re-run nor skipped",
                         attempt.organization_id, attempt.attempt_id, attempt.fence_token
                     );
                 }
@@ -1236,6 +1258,11 @@ fn session_capabilities() -> Vec<String> {
     if cfg!(target_os = "linux") {
         capabilities.push(mcloving_domain::workspace::WORKSPACE_TRANSFER_CAPABILITY.to_owned());
     }
+    // Only the Unix executor lays out per-step spools; a Windows agent that
+    // advertised this would be offered work it must then refuse for good.
+    if cfg!(unix) {
+        capabilities.push(mcloving_domain::multi_step::MULTI_STEP_CAPABILITY.to_owned());
+    }
     capabilities
 }
 
@@ -1284,6 +1311,7 @@ pub async fn run_execution_service_smoke(
     journal.accept(&acceptance)?;
     let request = ExecutionRequest {
         workspace_seed: None,
+        step_ordinal: None,
         workspace_root: workspace_root.to_owned(),
         workspace: acceptance.workspace.clone(),
         mode: ExecutionMode::Direct,
@@ -1347,6 +1375,7 @@ pub async fn run_creation_boundary_service_smoke(
     journal.accept(&acceptance)?;
     let request = ExecutionRequest {
         workspace_seed: None,
+        step_ordinal: None,
         workspace_root: workspace_root.to_owned(),
         workspace: acceptance.workspace.clone(),
         mode: ExecutionMode::PowerShell,
@@ -1782,6 +1811,7 @@ mod tests {
             workspace: PathBuf::from("org/attempt/7"),
             process_id: Some(42),
             process_birth_identity: None,
+            current_step: None,
             logs: Vec::new(),
             result: None,
         };
@@ -1981,6 +2011,7 @@ mod tests {
                 workspace: PathBuf::from("org/attempt"),
                 process_id: Some(42),
                 process_birth_identity: Some("linux-proc-v1:boot:42".to_owned()),
+                current_step: None,
                 logs: vec![mcloving_agent_runtime::SpoolEntry {
                     sequence: 7,
                     relative_path: PathBuf::from("spool/stdout.log"),
@@ -2022,6 +2053,7 @@ mod tests {
             workspace: PathBuf::from("org/attempt"),
             process_id: None,
             process_birth_identity: None,
+            current_step: None,
             logs: Vec::new(),
             result: None,
         };

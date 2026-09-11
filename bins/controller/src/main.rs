@@ -789,6 +789,7 @@ impl AgentControl for ControllerAgentService {
             ACCEPT_LEASE_STATE_FEATURE.to_owned(),
             INLINE_TERMINAL_LOGS_FEATURE.to_owned(),
             mcloving_domain::workspace::WORKSPACE_TRANSFER_FEATURE.to_owned(),
+            mcloving_domain::multi_step::MULTI_STEP_EXECUTION_FEATURE.to_owned(),
         ]);
         let negotiated = negotiate(&local, &remote)
             .map_err(|error| Status::failed_precondition(error.to_string()))?;
@@ -1386,6 +1387,7 @@ impl AgentControl for ControllerAgentService {
         }
         let sequence = i64::try_from(request.sequence)
             .map_err(|_| Status::invalid_argument("log sequence is out of range"))?;
+        let step_ordinal = bounded_step_ordinal(request.step_ordinal)?;
         let accepted = self
             .store
             .append_log_in_session(
@@ -1396,6 +1398,7 @@ impl AgentControl for ControllerAgentService {
                     restore_epoch: context.restore_epoch,
                     agent_id: &authority.agent_id,
                     sequence,
+                    step_ordinal,
                     stream: &request.stream,
                     content: &request.content,
                 },
@@ -1469,6 +1472,7 @@ impl AgentControl for ControllerAgentService {
             inline_streams.push(chunk.stream.as_str());
             let sequence = i64::try_from(chunk.sequence)
                 .map_err(|_| Status::invalid_argument("log sequence is out of range"))?;
+            let step_ordinal = bounded_step_ordinal(chunk.step_ordinal)?;
             let appended = self
                 .store
                 .append_log_in_session(
@@ -1479,6 +1483,7 @@ impl AgentControl for ControllerAgentService {
                         restore_epoch: context.restore_epoch,
                         agent_id: &authority.agent_id,
                         sequence,
+                        step_ordinal,
                         stream: &chunk.stream,
                         content: &chunk.content,
                     },
@@ -1909,6 +1914,17 @@ fn decode_authority_token(token: u64) -> (i64, i64) {
         i64::from((token >> 32) as u32),
         i64::from((token & u64::from(u32::MAX)) as u32),
     )
+}
+
+/// A step ordinal on a log chunk must fit the store's schema check. An agent
+/// without multi-step-execution-v1 never sets the field, so zero is the
+/// single-step envelope and needs no feature lookup here.
+fn bounded_step_ordinal(step_ordinal: u32) -> Result<i32, Status> {
+    if step_ordinal >= mcloving_domain::multi_step::MAX_STEP_ORDINAL_EXCLUSIVE {
+        return Err(Status::invalid_argument("log step ordinal is out of range"));
+    }
+    i32::try_from(step_ordinal)
+        .map_err(|_| Status::invalid_argument("log step ordinal is out of range"))
 }
 
 fn internal_store_error(error: mcloving_controller_store::StoreError) -> Status {

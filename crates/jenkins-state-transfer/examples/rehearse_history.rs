@@ -243,6 +243,7 @@ async fn main() -> Result<(), AnyError> {
             restore_epoch: claim.restore_epoch,
             agent_id: AGENT_ID,
             sequence: 0,
+            step_ordinal: 0,
             stream: "stderr",
             content: trace_log,
         })
@@ -255,6 +256,7 @@ async fn main() -> Result<(), AnyError> {
                 restore_epoch: claim.restore_epoch,
                 agent_id: AGENT_ID,
                 sequence: 1,
+                step_ordinal: 0,
                 stream: "stdout",
                 content: stdout_log,
             })

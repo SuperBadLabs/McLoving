@@ -471,6 +471,7 @@ async fn controller_restart_replay_is_logically_exactly_once() {
         restore_epoch: claim.restore_epoch,
         agent_id: "restart-agent",
         sequence: 0,
+        step_ordinal: 0,
         stream: "stdout",
         content: log,
     };

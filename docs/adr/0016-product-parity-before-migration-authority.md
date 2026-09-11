@@ -50,6 +50,23 @@ converge.
    command whose output is recorded in its pull request; the threat-model row
    requirement is unchanged.
 
+## Three rules that keep the board pointed at the product
+
+Both McLoving and its sibling Fogell drifted into ceremony for the same
+reason: the shared charter sentence about compatibility claims defines what
+counts as a claim and never what counts as a product. These rules bind every
+future ticket on this board.
+
+1. **A ticket names a user-visible verb.** Check out, run, stream, upload,
+   notify, log in. A ticket whose only verbs are verify, seal, attest,
+   certify or receipt is bookkeeping and cannot hold a dispatch slot alone.
+2. **Done means used.** The dogfood pipeline is the phase's definition of
+   done. The fortnightly report states what the product can do; the distance
+   count to `PAR-005` must fall.
+3. **Process may not grow faster than product.** The verifiers' ratchets only
+   let rules and floors rise. A Working rule may be added only when a rule is
+   retired or a user-visible ticket closes in the same pull request.
+
 ## Consequences
 
 - The execution spec becomes an explicit versioned envelope with an ordered

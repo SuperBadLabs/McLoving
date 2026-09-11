@@ -15,7 +15,10 @@ pub mod executor;
 /// Hard aggregate stdout/stderr ceiling shared by every execution topology.
 pub const MAX_ATTEMPT_OUTPUT_BYTES: u64 = 64 * 1_048_576;
 
-const SCHEMA_VERSION: i64 = 2;
+/// Version 3 (PAR-010) adds `attempts.current_step`, the ordinal of the step a
+/// multi-step attempt most recently started. It is NULL for single-step work,
+/// so an older row reads exactly as it did before.
+const SCHEMA_VERSION: i64 = 3;
 const MAX_PROCESS_BIRTH_IDENTITY_BYTES: usize = 256;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -126,6 +129,10 @@ pub struct ReconciliationAttempt {
     /// Windows relies on its kill-on-close Job Object and leaves this unset.
     /// A legacy Unix row without this value must never be signalled.
     pub process_birth_identity: Option<String>,
+    /// Ordinal of the most recently started step of a multi-step attempt
+    /// (PAR-010); `None` for single-step work. A recovered attempt names it
+    /// so an interrupted step is reported rather than re-run or skipped.
+    pub current_step: Option<u32>,
     pub logs: Vec<SpoolEntry>,
     pub result: Option<SpoolEntry>,
 }
@@ -223,7 +230,7 @@ impl Journal {
             [],
             |row| row.get(0),
         )?;
-        if !matches!(schema_version, 1 | SCHEMA_VERSION) {
+        if !matches!(schema_version, 1 | 2 | SCHEMA_VERSION) {
             return Err(JournalError::SchemaVersionMismatch {
                 expected: SCHEMA_VERSION,
                 found: schema_version,
@@ -311,6 +318,7 @@ impl Journal {
                 workspace TEXT NOT NULL,
                 process_group_id INTEGER,
                 process_birth_identity TEXT,
+                current_step INTEGER,
                 accepted_at_unix_ms INTEGER NOT NULL,
                 updated_at_unix_ms INTEGER NOT NULL,
                 PRIMARY KEY (organization_id, attempt_id, fence_token)
@@ -368,12 +376,15 @@ impl Journal {
         )?;
         match schema_version {
             SCHEMA_VERSION => {}
-            1 => {
+            found @ (1 | 2) => {
                 let transaction = connection.unchecked_transaction()?;
-                transaction.execute(
-                    "ALTER TABLE attempts ADD COLUMN process_birth_identity TEXT",
-                    [],
-                )?;
+                if found == 1 {
+                    transaction.execute(
+                        "ALTER TABLE attempts ADD COLUMN process_birth_identity TEXT",
+                        [],
+                    )?;
+                }
+                transaction.execute("ALTER TABLE attempts ADD COLUMN current_step INTEGER", [])?;
                 transaction.execute(
                     "UPDATE journal_metadata SET schema_version = ?1 WHERE singleton = 1",
                     [SCHEMA_VERSION],
@@ -568,6 +579,46 @@ impl Journal {
             phase,
             (process_id, None),
         )
+    }
+
+    /// Durably records that a multi-step attempt is about to start step
+    /// `ordinal` (PAR-010). Written before the step spawns, so a crash at any
+    /// later point names this step: recovery reports it interrupted and
+    /// neither re-runs nor skips it, because the journal cannot tell a
+    /// process that exited from one that was cut off.
+    pub fn record_step_start(
+        &mut self,
+        organization_id: &str,
+        attempt_id: &str,
+        fence_token: u64,
+        session_epoch: u64,
+        ordinal: u32,
+    ) -> Result<(), JournalError> {
+        let fence_token = to_sql_integer(fence_token)?;
+        let session_epoch = to_sql_integer(session_epoch)?;
+        let changed = self.connection.execute(
+            "
+            UPDATE attempts
+            SET current_step = ?5, updated_at_unix_ms = ?6
+            WHERE organization_id = ?1
+              AND attempt_id = ?2
+              AND fence_token = ?3
+              AND session_epoch = ?4
+              AND phase IN ('accepted', 'running')
+            ",
+            params![
+                organization_id,
+                attempt_id,
+                fence_token,
+                session_epoch,
+                i64::from(ordinal),
+                unix_time_ms()?
+            ],
+        )?;
+        if changed != 1 {
+            return Err(JournalError::StaleAuthority);
+        }
+        Ok(())
     }
 
     /// Transitions an attempt while durably binding a process ID to its
@@ -1015,7 +1066,7 @@ impl Journal {
             "
             SELECT organization_id, attempt_id, fence_token, session_epoch,
                    payload_digest, phase, workspace, process_group_id,
-                   process_birth_identity
+                   process_birth_identity, current_step
             FROM attempts
             WHERE phase NOT IN ('succeeded', 'failed', 'aborted')
             ORDER BY organization_id, attempt_id, fence_token
@@ -1032,6 +1083,7 @@ impl Journal {
                 row.get::<_, String>(6)?,
                 row.get::<_, Option<i64>>(7)?,
                 row.get::<_, Option<String>>(8)?,
+                row.get::<_, Option<i64>>(9)?,
             ))
         })?;
 
@@ -1047,6 +1099,7 @@ impl Journal {
                 workspace,
                 process_id,
                 process_birth_identity,
+                current_step,
             ) = row?;
             attempts.push(ReconciliationAttempt {
                 logs: self.log_entries(&organization_id, &attempt_id, fence_token)?,
@@ -1062,6 +1115,9 @@ impl Journal {
                     .map(|value| u32::try_from(value).map_err(|_| JournalError::AuthorityOverflow))
                     .transpose()?,
                 process_birth_identity,
+                current_step: current_step
+                    .map(|value| u32::try_from(value).map_err(|_| JournalError::AuthorityOverflow))
+                    .transpose()?,
             });
         }
         Ok(ReconciliationReport { attempts })
@@ -1136,6 +1192,7 @@ impl Journal {
                     .map(|value| u32::try_from(value).map_err(|_| JournalError::AuthorityOverflow))
                     .transpose()?,
                 process_birth_identity,
+                current_step: None,
             });
         }
         Ok(ReconciliationReport { attempts })
@@ -1346,8 +1403,12 @@ fn valid_transition(from: AttemptPhase, to: AttemptPhase) -> bool {
                 | AttemptPhase::Cancelling
                 | AttemptPhase::ReconciliationRequired
         ) | (
+            // Running -> Running is the next step of a multi-step attempt
+            // spawning (PAR-010): the row stays running and rebinds its
+            // process identity to the new leader.
             AttemptPhase::Running,
-            AttemptPhase::Finalizing
+            AttemptPhase::Running
+                | AttemptPhase::Finalizing
                 | AttemptPhase::Cancelling
                 | AttemptPhase::ReconciliationRequired
         ) | (

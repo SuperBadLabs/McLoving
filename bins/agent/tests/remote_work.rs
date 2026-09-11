@@ -12,6 +12,7 @@ use mcloving_controller_store::{
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use sqlx::postgres::{PgListener, PgPoolOptions};
+use tokio::io::AsyncReadExt;
 use tokio::process::{Child, Command};
 use uuid::Uuid;
 
@@ -1280,4 +1281,418 @@ fn path(value: &Path) -> &str {
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// PAR-010: several process steps in one stage run as one attempt, in order,
+/// under one lease, with each step's output kept apart by step ordinal, and
+/// execution stops at the first step that does not succeed.
+const MULTI_STEP_PIPELINE: &str = r#"
+version: 1
+name: multi-step
+stages:
+  - id: build
+    name: Build
+    steps:
+      - process:
+          program: /bin/sh
+          args: [-c, "printf 'step-zero\n'"]
+          timeout_seconds: 10
+      - process:
+          program: /bin/sh
+          args: [-c, "printf 'step-one-err\n' >&2; exit 3"]
+          timeout_seconds: 10
+      - process:
+          program: /bin/sh
+          args: [-c, "printf 'never\n'"]
+          timeout_seconds: 10
+"#;
+
+struct MultiStepHarness {
+    _directory: tempfile::TempDir,
+    controller: Child,
+    client: Client,
+    pool: sqlx::PgPool,
+    organization_id: Uuid,
+    project_id: Uuid,
+    tls: MtlsFiles,
+    agent_port: u16,
+    journal: PathBuf,
+    workspace: PathBuf,
+    scratch: PathBuf,
+}
+
+async fn multi_step_harness(agent_id: &str, slug: &str) -> Option<MultiStepHarness> {
+    let Ok(migration_url) = std::env::var("MCLOVING_TEST_DATABASE_URL") else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return None;
+    };
+    let controller_binary = std::env::var_os("MCLOVING_CONTROLLER_BINARY")
+        .map(PathBuf::from)
+        .expect("MCLOVING_CONTROLLER_BINARY must name the shipped controller binary");
+    let runtime_url =
+        migration_url.replacen("postgres://mcloving@", "postgres://mcloving_tenant@", 1);
+    assert_ne!(migration_url, runtime_url);
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&migration_url)
+        .await
+        .expect("connect migration role");
+    let store = Store::new(pool.clone());
+    store.migrate().await.expect("install schema");
+    enable_runtime_login(&pool).await;
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    store
+        .create_project(
+            organization_id,
+            &format!("{slug}-org-{organization_id}"),
+            project_id,
+            slug,
+        )
+        .await
+        .expect("create test project");
+
+    let directory = tempfile::tempdir().expect("test root");
+    let tls = create_mtls(directory.path(), organization_id, agent_id);
+    let api_port = free_port();
+    let agent_port = free_port();
+    let workspace = directory.path().join("workspace");
+    std::fs::create_dir(&workspace).expect("create remote workspace root");
+    let scratch = directory.path().join("scratch");
+    std::fs::create_dir(&scratch).expect("create scratch root");
+    let controller = Command::new(controller_binary)
+        .env("MCLOVING_MIGRATION_DATABASE_URL", &migration_url)
+        .env("MCLOVING_DATABASE_URL", &runtime_url)
+        .env("MCLOVING_API_TOKEN", TOKEN)
+        .env(
+            "MCLOVING_ARTIFACT_AGENT_TOKEN",
+            "remote-artifact-agent-token-32-bytes",
+        )
+        .env("MCLOVING_LISTEN", format!("127.0.0.1:{api_port}"))
+        .env("MCLOVING_AGENT_LISTEN", format!("127.0.0.1:{agent_port}"))
+        .env("MCLOVING_AGENT_SERVER_CERT_PATH", &tls.server_certificate)
+        .env("MCLOVING_AGENT_SERVER_KEY_PATH", &tls.server_key)
+        .env("MCLOVING_AGENT_CLIENT_CA_PATH", &tls.ca_certificate)
+        .env("MCLOVING_AGENT_IDENTITY_BINDINGS_PATH", &tls.bindings)
+        .env("MCLOVING_ORGANIZATION_ID", organization_id.to_string())
+        .env("MCLOVING_AGENT_ID", format!("{agent_id}-embedded-disabled"))
+        .env("MCLOVING_AGENT_CAPABILITIES", "disabled")
+        .env("MCLOVING_AGENT_TRUST_POOL", "trusted-linux")
+        .env("MCLOVING_LEASE_SECONDS", "5")
+        .env("MCLOVING_POLL_MILLISECONDS", "10")
+        .env("MCLOVING_CANCELLATION_POLL_MILLISECONDS", "50")
+        .env("MCLOVING_TERMINATION_GRACE_MILLISECONDS", "100")
+        .env("MCLOVING_SESSION_EPOCH", "1")
+        .env(
+            "MCLOVING_WORKSPACE_ROOT",
+            directory.path().join("embedded-workspace"),
+        )
+        .env(
+            "MCLOVING_AGENT_JOURNAL",
+            directory.path().join("embedded-agent.db"),
+        )
+        .env(
+            "MCLOVING_OBJECT_ROOT",
+            directory.path().join("embedded-objects"),
+        )
+        .kill_on_drop(true)
+        .spawn()
+        .expect("start shipped controller");
+    let client = Client::new(&format!("http://127.0.0.1:{api_port}"), TOKEN);
+    wait_until_listening(&client, organization_id).await;
+    let journal = directory.path().join("agent.db");
+    Some(MultiStepHarness {
+        _directory: directory,
+        controller,
+        client,
+        pool,
+        organization_id,
+        project_id,
+        tls,
+        agent_port,
+        journal,
+        workspace,
+        scratch,
+    })
+}
+
+async fn wait_for_terminal(
+    client: &Client,
+    organization_id: Uuid,
+    project_id: Uuid,
+    build_id: Uuid,
+) -> mcloving_controller_api::BuildResponse {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let status = client
+                .status(organization_id, project_id, build_id)
+                .await
+                .expect("read build status");
+            if matches!(status.status.as_str(), "succeeded" | "failed" | "aborted") {
+                break status;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("build reaches a terminal within bound")
+}
+
+#[tokio::test]
+async fn multi_step_stage_runs_in_order_and_stops_at_the_first_failure() {
+    let Some(mut harness) = multi_step_harness("multi-step-agent", "multi-step").await else {
+        return;
+    };
+    let mut agent = agent_command(
+        "multi-step-agent",
+        harness.organization_id,
+        harness.agent_port,
+        &harness.tls,
+        &harness.journal,
+        &harness.workspace,
+    )
+    .kill_on_drop(true)
+    .spawn()
+    .expect("start shipped remote agent");
+
+    let pipeline_id = Uuid::new_v4();
+    harness
+        .client
+        .put_pipeline(
+            harness.organization_id,
+            harness.project_id,
+            pipeline_id,
+            0,
+            &PipelineUpsertRequest {
+                slug: "multi-step-e2e".to_owned(),
+                source: MULTI_STEP_PIPELINE.to_owned(),
+                parameters: Default::default(),
+            },
+        )
+        .await
+        .expect("a three-step stage validates and saves");
+    let admission = harness
+        .client
+        .submit_pipeline_on_platform_in_pool(
+            harness.organization_id,
+            harness.project_id,
+            pipeline_id,
+            "multi-step-e2e",
+            "linux",
+            "trusted-linux",
+            &PipelineBuildRequest::default(),
+        )
+        .await
+        .expect("submit work");
+
+    // The node routes on the multi-step capability, so an agent from a
+    // release without it is never offered this work.
+    let required: Vec<String> = sqlx::query_scalar(
+        "SELECT required_capabilities FROM nodes WHERE organization_id = $1 AND build_id = $2",
+    )
+    .bind(harness.organization_id)
+    .bind(admission.build_id)
+    .fetch_one(&harness.pool)
+    .await
+    .expect("read the node's required capabilities");
+    assert!(
+        required
+            .iter()
+            .any(|capability| capability == "multi-step-v1"),
+        "{required:?}"
+    );
+
+    let status = wait_for_terminal(
+        &harness.client,
+        harness.organization_id,
+        harness.project_id,
+        admission.build_id,
+    )
+    .await;
+    assert_eq!(status.status, "failed");
+    assert_eq!(status.attempt_status, "failed");
+    let summary = status
+        .terminal_summary
+        .expect("terminal summary is published");
+    assert_eq!(summary["exit_code"], 3, "{summary}");
+    let steps = summary["steps"]
+        .as_array()
+        .expect("multi-step summary lists its steps");
+    assert_eq!(steps.len(), 2, "the third step never ran: {summary}");
+    assert_eq!(steps[0]["ordinal"], 0);
+    assert_eq!(steps[0]["outcome"], "succeeded");
+    assert_eq!(steps[1]["ordinal"], 1);
+    assert_eq!(steps[1]["outcome"], "failed");
+    assert_eq!(steps[1]["exit_code"], 3);
+
+    let logs = harness
+        .client
+        .logs(
+            harness.organization_id,
+            harness.project_id,
+            admission.build_id,
+        )
+        .await
+        .expect("read logs");
+    let chunks = logs
+        .iter()
+        .map(|log| (log.step_ordinal, log.stream.as_str(), log.text.clone()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        chunks,
+        vec![
+            (0, "stdout", Some("step-zero\n".to_owned())),
+            (1, "stderr", Some("step-one-err\n".to_owned())),
+        ],
+        "each step's output is its own chunk under its own ordinal; empty streams and the unrun step publish nothing"
+    );
+    assert!(
+        logs.iter().all(|log| log.attempt_id == status.attempt_id),
+        "one attempt ran every step"
+    );
+
+    stop(&mut agent).await;
+    stop(&mut harness.controller).await;
+}
+
+/// The ambiguity window: a step's process has exited and nothing about that
+/// exit is durable yet. A restart from exactly there must report the step
+/// interrupted, never run it again and never skip past it.
+#[tokio::test]
+async fn crash_between_a_step_exit_and_its_record_is_reported_not_rerun() {
+    let Some(mut harness) = multi_step_harness("multi-step-crash-agent", "multi-step-crash").await
+    else {
+        return;
+    };
+    let marker = harness.scratch.join("marker");
+    let pipeline = format!(
+        r#"
+version: 1
+name: multi-step-crash
+stages:
+  - id: build
+    name: Build
+    steps:
+      - process:
+          program: /bin/sh
+          args: [-c, "printf 'ran\n' >> {marker}"]
+          timeout_seconds: 10
+      - process:
+          program: /bin/sh
+          args: [-c, "printf 'second\n' >> {marker}"]
+          timeout_seconds: 10
+"#,
+        marker = marker.display()
+    );
+    let mut agent = agent_command(
+        "multi-step-crash-agent",
+        harness.organization_id,
+        harness.agent_port,
+        &harness.tls,
+        &harness.journal,
+        &harness.workspace,
+    )
+    .env("MCLOVING_TEST_CRASH_AFTER_STEP_EXIT", "0")
+    .kill_on_drop(true)
+    .spawn()
+    .expect("start fault-injected agent");
+
+    let pipeline_id = Uuid::new_v4();
+    harness
+        .client
+        .put_pipeline(
+            harness.organization_id,
+            harness.project_id,
+            pipeline_id,
+            0,
+            &PipelineUpsertRequest {
+                slug: "multi-step-crash-e2e".to_owned(),
+                source: pipeline,
+                parameters: Default::default(),
+            },
+        )
+        .await
+        .expect("save pipeline");
+    let admission = harness
+        .client
+        .submit_pipeline_on_platform_in_pool(
+            harness.organization_id,
+            harness.project_id,
+            pipeline_id,
+            "multi-step-crash-e2e",
+            "linux",
+            "trusted-linux",
+            &PipelineBuildRequest::default(),
+        )
+        .await
+        .expect("submit work");
+    let first_exit = tokio::time::timeout(Duration::from_secs(20), agent.wait())
+        .await
+        .expect("fault-injected agent exits within bound")
+        .expect("wait for fault-injected agent");
+    assert_eq!(
+        first_exit.code(),
+        Some(88),
+        "crashed exactly after step 0 exited"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&marker).expect("step 0 ran before the crash"),
+        "ran\n"
+    );
+
+    let mut agent = agent_command(
+        "multi-step-crash-agent",
+        harness.organization_id,
+        harness.agent_port,
+        &harness.tls,
+        &harness.journal,
+        &harness.workspace,
+    )
+    .stderr(Stdio::piped())
+    .kill_on_drop(true)
+    .spawn()
+    .expect("restart shipped remote agent");
+    // The recovered leader has exited and its birth identity is gone, so the
+    // journal cannot prove its descendants are gone either: the attempt parks
+    // reconciliation-required under the existing fail-closed rule, naming the
+    // interrupted step. Give a wrong implementation every chance to re-run or
+    // to skip ahead before checking that it did neither.
+    tokio::time::sleep(Duration::from_secs(4)).await;
+    assert_eq!(
+        std::fs::read_to_string(&marker).expect("marker survives recovery"),
+        "ran\n",
+        "step 0 ran exactly once and step 1 never ran"
+    );
+    assert_eq!(
+        mcloving_agent::journal_health(&harness.journal)
+            .expect("read recovered agent journal")
+            .2,
+        1,
+        "the interrupted attempt stays parked rather than being discharged"
+    );
+    let status = harness
+        .client
+        .status(
+            harness.organization_id,
+            harness.project_id,
+            admission.build_id,
+        )
+        .await
+        .expect("read build status");
+    assert_ne!(
+        status.status, "succeeded",
+        "an interrupted step cannot be skipped: {status:?}"
+    );
+    let mut stderr = agent.stderr.take().expect("agent stderr is piped");
+    stop(&mut agent).await;
+    let mut report = String::new();
+    stderr
+        .read_to_string(&mut report)
+        .await
+        .expect("read agent stderr");
+    assert!(
+        report.contains("interrupted_at_step:0"),
+        "the parked attempt names its interrupted step: {report}"
+    );
+    stop(&mut harness.controller).await;
 }

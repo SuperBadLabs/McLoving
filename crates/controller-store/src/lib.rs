@@ -101,7 +101,7 @@ pub use trigger_ingress::{
 
 pub(crate) const RESTORE_FENCE_LOCK_KEY: i64 = 0x4d_63_4c_6f_76_72_65_63;
 const MAX_ATTEMPT_LOG_BYTES: i64 = 64 * 1_048_576;
-const MAX_ATTEMPT_LOG_CHUNKS: i64 = 66;
+const MAX_ATTEMPT_LOG_CHUNKS: i64 = 96;
 /// Largest caller-selected object-retention interval accepted by the controller.
 ///
 /// This keeps PostgreSQL interval arithmetic comfortably inside its timestamp
@@ -195,6 +195,7 @@ pub const ACTIVE_LEASE_NOTIFICATIONS_V35: &str =
     include_str!("../migrations/0035_active_lease_notifications.sql");
 
 pub const BUILD_WORKSPACE_V36: &str = include_str!("../migrations/0036_build_workspace.sql");
+pub const STEP_ORDINAL_V37: &str = include_str!("../migrations/0037_step_ordinal.sql");
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AgentReconciliationDisposition {
@@ -302,6 +303,8 @@ pub struct CommittedLog {
     pub attempt_id: Uuid,
     pub fence: i64,
     pub sequence: i64,
+    /// Which step of a multi-step stage produced the chunk; zero otherwise.
+    pub step_ordinal: i32,
     pub stream: String,
     pub content: Vec<u8>,
     pub digest: [u8; 32],
@@ -315,6 +318,8 @@ pub struct NewLogChunk<'a> {
     pub restore_epoch: i64,
     pub agent_id: &'a str,
     pub sequence: i64,
+    /// Step ordinal within the attempt; zero for the single-step envelope.
+    pub step_ordinal: i32,
     pub stream: &'a str,
     pub content: &'a [u8],
 }
@@ -1377,6 +1382,7 @@ impl Store {
         apply_migration(&mut tx, 34, WORK_READY_NOTIFICATIONS_V34).await?;
         apply_migration(&mut tx, 35, ACTIVE_LEASE_NOTIFICATIONS_V35).await?;
         apply_migration(&mut tx, 36, BUILD_WORKSPACE_V36).await?;
+        apply_migration(&mut tx, 37, STEP_ORDINAL_V37).await?;
         tx.commit().await?;
         Ok(())
     }
@@ -2661,10 +2667,10 @@ impl Store {
         project_id: Uuid,
         build_id: Uuid,
     ) -> Result<Vec<CommittedLog>, StoreError> {
-        type LogRow = (Uuid, i64, i64, String, Vec<u8>, Vec<u8>);
+        type LogRow = (Uuid, i64, i64, String, Vec<u8>, Vec<u8>, i32);
         let mut tx = self.tenant_transaction(organization_id).await?;
         let rows = sqlx::query_as::<_, LogRow>(
-            "SELECT l.attempt_id, l.fence, l.sequence, l.stream, l.content, l.digest
+            "SELECT l.attempt_id, l.fence, l.sequence, l.stream, l.content, l.digest, l.step_ordinal
              FROM attempt_log_chunks AS l
              JOIN attempts AS a
                ON a.id = l.attempt_id AND a.organization_id = l.organization_id
@@ -2685,23 +2691,26 @@ impl Store {
         .await?;
         tx.commit().await?;
         rows.into_iter()
-            .map(|(attempt_id, fence, sequence, stream, content, digest)| {
-                let digest: [u8; 32] =
-                    digest
-                        .try_into()
-                        .map_err(|_| StoreError::CorruptLogDigest {
-                            attempt_id,
-                            sequence,
-                        })?;
-                Ok(CommittedLog {
-                    attempt_id,
-                    fence,
-                    sequence,
-                    stream,
-                    content,
-                    digest,
-                })
-            })
+            .map(
+                |(attempt_id, fence, sequence, stream, content, digest, step_ordinal)| {
+                    let digest: [u8; 32] =
+                        digest
+                            .try_into()
+                            .map_err(|_| StoreError::CorruptLogDigest {
+                                attempt_id,
+                                sequence,
+                            })?;
+                    Ok(CommittedLog {
+                        attempt_id,
+                        fence,
+                        sequence,
+                        step_ordinal,
+                        stream,
+                        content,
+                        digest,
+                    })
+                },
+            )
             .collect()
     }
 
@@ -2817,7 +2826,7 @@ impl Store {
                     .to_owned(),
             ));
         }
-        type LogRow = (Uuid, i64, i64, String, Vec<u8>, Vec<u8>);
+        type LogRow = (Uuid, i64, i64, String, Vec<u8>, Vec<u8>, i32);
         let mut tx = self.tenant_transaction(organization_id).await?;
         let rows = sqlx::query_as::<_, LogRow>(
             "WITH cursor AS (
@@ -2840,7 +2849,7 @@ impl Store {
                    AND l.sequence = $6
                    AND l.stream = $7
              )
-             SELECT l.attempt_id, l.fence, l.sequence, l.stream, l.content, l.digest
+             SELECT l.attempt_id, l.fence, l.sequence, l.stream, l.content, l.digest, l.step_ordinal
              FROM attempt_log_chunks AS l
              JOIN attempts AS a
                ON a.id = l.attempt_id AND a.organization_id = l.organization_id
@@ -2874,23 +2883,26 @@ impl Store {
         .await?;
         tx.commit().await?;
         rows.into_iter()
-            .map(|(attempt_id, fence, sequence, stream, content, digest)| {
-                let digest: [u8; 32] =
-                    digest
-                        .try_into()
-                        .map_err(|_| StoreError::CorruptLogDigest {
-                            attempt_id,
-                            sequence,
-                        })?;
-                Ok(CommittedLog {
-                    attempt_id,
-                    fence,
-                    sequence,
-                    stream,
-                    content,
-                    digest,
-                })
-            })
+            .map(
+                |(attempt_id, fence, sequence, stream, content, digest, step_ordinal)| {
+                    let digest: [u8; 32] =
+                        digest
+                            .try_into()
+                            .map_err(|_| StoreError::CorruptLogDigest {
+                                attempt_id,
+                                sequence,
+                            })?;
+                    Ok(CommittedLog {
+                        attempt_id,
+                        fence,
+                        sequence,
+                        step_ordinal,
+                        stream,
+                        content,
+                        digest,
+                    })
+                },
+            )
             .collect()
     }
 
@@ -2964,8 +2976,8 @@ impl Store {
         .await?;
         let content = redact_to_fixed_point(chunk.content, &redactions)?;
         let digest: [u8; 32] = Sha256::digest(&content).into();
-        let existing = sqlx::query_as::<_, (String, Vec<u8>)>(
-            "SELECT l.stream, l.digest
+        let existing = sqlx::query_as::<_, (String, Vec<u8>, i32)>(
+            "SELECT l.stream, l.digest, l.step_ordinal
              FROM attempt_log_chunks AS l
              JOIN attempts AS a
                ON a.organization_id = l.organization_id
@@ -2989,8 +3001,10 @@ impl Store {
         .bind(chunk.agent_id)
         .fetch_optional(&mut *tx)
         .await?;
-        if let Some((stream, existing_digest)) = existing {
-            let identical = stream == chunk.stream && existing_digest == digest;
+        if let Some((stream, existing_digest, existing_ordinal)) = existing {
+            let identical = stream == chunk.stream
+                && existing_digest == digest
+                && existing_ordinal == chunk.step_ordinal;
             if identical {
                 tx.commit().await?;
             } else {
@@ -3018,9 +3032,9 @@ impl Store {
         let inserted = sqlx::query_scalar::<_, i64>(
             "INSERT INTO attempt_log_chunks (
                  organization_id, attempt_id, fence, sequence,
-                 stream, content, digest
+                 stream, content, digest, step_ordinal
              )
-             SELECT $1, a.id, $3, $6, $7, $8, $9
+             SELECT $1, a.id, $3, $6, $7, $8, $9, $10
              FROM attempts AS a
              WHERE a.organization_id = $1
                AND a.id = $2
@@ -3036,6 +3050,7 @@ impl Store {
              DO UPDATE SET content = EXCLUDED.content
              WHERE attempt_log_chunks.stream = EXCLUDED.stream
                AND attempt_log_chunks.digest = EXCLUDED.digest
+               AND attempt_log_chunks.step_ordinal = EXCLUDED.step_ordinal
              RETURNING sequence",
         )
         .bind(chunk.organization_id)
@@ -3047,6 +3062,7 @@ impl Store {
         .bind(chunk.stream)
         .bind(&content)
         .bind(digest.as_slice())
+        .bind(chunk.step_ordinal)
         .fetch_optional(&mut *tx)
         .await?;
         tx.commit().await?;

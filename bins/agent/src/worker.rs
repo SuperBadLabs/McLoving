@@ -32,7 +32,7 @@ use mcloving_domain::ConnectorIntentSpec;
 use mcloving_domain::cache_intent::{CacheIntentSpec, CacheWorkContext, cache_assignment_digest};
 use mcloving_domain::input_intent::{InputIntentSpec, InputWorkContext, input_assignment_digest};
 use mcloving_domain::workspace::{WorkspaceGrant, WorkspaceTransferResult};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use tokio::fs;
@@ -44,7 +44,9 @@ use uuid::Uuid;
 use crate::{AgentConfig, AgentError, SessionFeatures, process_birth_identity_for};
 
 const MAX_LOG_CHUNK_BYTES: usize = 1_048_576;
-const MAX_LOG_CHUNKS_PER_ATTEMPT: u64 = 66;
+// 64 full chunks of the 64 MiB quota plus one partial chunk per stream of a
+// sixteen-step attempt (PAR-010); the controller enforces the same count.
+const MAX_LOG_CHUNKS_PER_ATTEMPT: u64 = 96;
 const MAX_RESULT_SPOOL_BYTES: u64 = 65_536;
 const MAX_EXECUTION_TIMEOUT_SECONDS: u64 = 7 * 24 * 60 * 60;
 const WORK_POLL_RPC_WINDOW: Duration = Duration::from_secs(25);
@@ -90,6 +92,8 @@ struct PersistedResult {
     #[serde(default = "default_completion_protocol")]
     completion_protocol: String,
     cancellation_outcome: Option<i32>,
+    #[serde(default)]
+    steps: Vec<StepRecord>,
 }
 
 /// Build the wire summary from the digest-verified durable result. Workspace
@@ -113,6 +117,12 @@ fn work_completion_summary(
             .validate()
             .map_err(|error| AgentError::InvalidAssignment(error.to_string()))?;
         summary["workspace_transfer"] = serde_json::to_value(transfer)?;
+        if let Some(reason) = &result.reason {
+            summary["reason"] = json!(reason);
+        }
+    }
+    if !result.steps.is_empty() {
+        summary["steps"] = serde_json::to_value(&result.steps)?;
         if let Some(reason) = &result.reason {
             summary["reason"] = json!(reason);
         }
@@ -158,7 +168,24 @@ struct ValidatedAssignment {
     authority: WorkAuthority,
     workspace: PathBuf,
     payload_digest: [u8; 32],
-    process: ProcessSpec,
+    /// Ordered steps of one attempt; exactly one unless `multi_step`.
+    steps: Vec<ProcessSpec>,
+    /// The payload arrived as the version-5 envelope (PAR-010): steps run
+    /// under per-step spools and step ordinals, and the journal records
+    /// each step start before its spawn.
+    multi_step: bool,
+}
+
+/// One step's durable outcome inside a multi-step attempt, written into the
+/// result spool and carried on the terminal summary.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+struct StepRecord {
+    ordinal: u32,
+    outcome: String,
+    exit_code: Option<i32>,
+    termination: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
 }
 
 /// The digest-verified payload permanently determines whether an assignment is
@@ -197,6 +224,9 @@ struct DurableResult<'a> {
     reason: Option<&'a str>,
     completion_protocol: &'a str,
     cancellation_outcome: Option<i32>,
+    /// Per-step outcomes of a multi-step attempt; empty for single-step work
+    /// so the single-step result bytes are unchanged.
+    steps: &'a [StepRecord],
 }
 
 struct LeaseRenewalControl {
@@ -362,7 +392,7 @@ pub(super) async fn poll_and_run_one(
             "workspace transfer was not negotiated".to_owned(),
         ));
     }
-    match validate_assignment(config, session_epoch, assignment)? {
+    match validate_assignment_with_features(config, session_epoch, assignment, features)? {
         AssignmentDisposition::Runnable(assignment) => {
             run_assignment(
                 config,
@@ -540,10 +570,11 @@ async fn replay_finalization(
         control,
     };
     for entry in &attempt.logs {
-        let stream = spool_stream(entry)?;
+        let (stream, step_ordinal) = spool_stream(entry)?;
         sequence = publish_spool(
             &mut publication,
             stream,
+            step_ordinal,
             &config.workspace_root,
             entry,
             sequence,
@@ -648,10 +679,25 @@ async fn replay_finalization(
     }
 }
 
+#[cfg(test)]
 fn validate_assignment(
     config: &AgentConfig,
     session_epoch: u64,
     assignment: WorkAssignment,
+) -> Result<AssignmentDisposition, AgentError> {
+    validate_assignment_with_features(
+        config,
+        session_epoch,
+        assignment,
+        SessionFeatures::default(),
+    )
+}
+
+fn validate_assignment_with_features(
+    config: &AgentConfig,
+    session_epoch: u64,
+    assignment: WorkAssignment,
+    features: SessionFeatures,
 ) -> Result<AssignmentDisposition, AgentError> {
     let organization = parse_uuid("organization_id", &assignment.organization_id)?;
     let configured_organization =
@@ -751,7 +797,40 @@ fn validate_assignment(
                     authority,
                     workspace,
                     payload_digest,
-                    process,
+                    steps: vec![process],
+                    multi_step: false,
+                }))
+            }
+            SpecClassification::Steps(steps) => {
+                if !features.multi_step {
+                    // The controller emits version 5 only to agents that
+                    // advertised the capability, so reaching here without the
+                    // wire feature is a defect on one side; refuse for good
+                    // rather than run with step identity dropped on the wire.
+                    return Ok(AssignmentDisposition::Unsupported(UnsupportedAssignment {
+                        authority,
+                        workspace,
+                        payload_digest,
+                        detail: "multi-step execution was not negotiated".to_owned(),
+                    }));
+                }
+                if workspace_grant.is_some() {
+                    return Ok(AssignmentDisposition::Unsupported(UnsupportedAssignment {
+                        authority,
+                        workspace,
+                        payload_digest,
+                        detail: "workspace transfer is not supported for multi-step stages"
+                            .to_owned(),
+                    }));
+                }
+                AssignmentDisposition::Runnable(Box::new(ValidatedAssignment {
+                    helper: None,
+                    workspace_grant: None,
+                    authority,
+                    workspace,
+                    payload_digest,
+                    steps,
+                    multi_step: true,
                 }))
             }
             SpecClassification::Cache(intent) => {
@@ -783,7 +862,8 @@ fn validate_assignment(
                         authority,
                         workspace,
                         payload_digest,
-                        process,
+                        steps: vec![process],
+                        multi_step: false,
                     }))
                 }
             }
@@ -816,7 +896,8 @@ fn validate_assignment(
                         authority,
                         workspace,
                         payload_digest,
-                        process,
+                        steps: vec![process],
+                        multi_step: false,
                     }))
                 }
             }
@@ -840,6 +921,8 @@ enum SpecClassification {
     Input(InputIntentSpec),
     Cache(CacheIntentSpec),
     Process(ProcessSpec),
+    /// The version-5 multi-step envelope: ordered process steps of one stage.
+    Steps(Vec<ProcessSpec>),
     ForAnotherRuntime(&'static str),
     Unsupported(String),
 }
@@ -955,10 +1038,65 @@ fn classify_assignment_spec(execution_spec_json: &[u8]) -> SpecClassification {
             "connector-intent work requires a controller-owned effect runtime",
         );
     }
+    if serde_json::from_slice::<serde_json::Value>(execution_spec_json)
+        .ok()
+        .is_some_and(|value| value.get("version").and_then(serde_json::Value::as_u64) == Some(5))
+    {
+        return match supported_multi_step_spec(execution_spec_json) {
+            Ok(steps) => SpecClassification::Steps(steps),
+            Err(detail) => SpecClassification::Unsupported(bounded_refusal_detail(detail)),
+        };
+    }
     match supported_process_spec(execution_spec_json) {
         Ok(process) => SpecClassification::Process(process),
         Err(detail) => SpecClassification::Unsupported(bounded_refusal_detail(detail)),
     }
+}
+
+/// Classifies the version-5 envelope (PAR-010): one to sixteen bounded
+/// process steps, each held to exactly the per-step rules of the single-step
+/// contract. Every refusal is permanent for this payload.
+fn supported_multi_step_spec(execution_spec_json: &[u8]) -> Result<Vec<ProcessSpec>, String> {
+    use mcloving_domain::multi_step::MAX_STEPS_PER_STAGE;
+    let spec: ExecutionSpec = serde_json::from_slice(execution_spec_json).map_err(|error| {
+        format!("execution spec does not deserialize as a version-5 multi-step spec: {error}")
+    })?;
+    if spec.version != 5 {
+        return Err(format!(
+            "execution spec version {} is not supported (expected 5)",
+            spec.version
+        ));
+    }
+    if spec.steps.is_empty() || spec.steps.len() > MAX_STEPS_PER_STAGE {
+        return Err(format!(
+            "execution spec declares {} steps (expected 1..={MAX_STEPS_PER_STAGE} process steps)",
+            spec.steps.len()
+        ));
+    }
+    for (index, process) in spec.steps.iter().enumerate() {
+        if process.kind != "process" {
+            return Err(format!(
+                "execution spec step {index} kind {:?} is not supported (expected \"process\")",
+                process.kind
+            ));
+        }
+        if !matches!(
+            process.timeout_seconds,
+            None | Some(1..=MAX_EXECUTION_TIMEOUT_SECONDS)
+        ) {
+            return Err(format!(
+                "step {index} timeout must be between 1 and {MAX_EXECUTION_TIMEOUT_SECONDS} seconds"
+            ));
+        }
+        if process.credentials.len() > 8
+            || !credential_targets_are_valid(&process.env, &process.credentials)
+        {
+            return Err(format!(
+                "step {index} credential targets must be unique bounded environment names and must not collide with pipeline environment"
+            ));
+        }
+    }
+    Ok(spec.steps)
 }
 
 /// The refusal reason is written twice into the durable result and sent as the
@@ -1335,25 +1473,38 @@ async fn run_assignment(
             return renewal;
         }
     };
-    let mut process = assignment.process;
+    let mut assignment = assignment;
+    let mut steps = std::mem::take(&mut assignment.steps);
+    let multi_step = assignment.multi_step;
     if let Some(prepared) = &prepared_helper {
-        process.program = prepared.program().to_string_lossy().into_owned();
-        process.args = prepared
+        let first = steps
+            .first_mut()
+            .expect("a validated assignment carries at least one step");
+        first.program = prepared.program().to_string_lossy().into_owned();
+        first.args = prepared
             .arguments()
             .iter()
             .map(|value| value.to_string_lossy().into_owned())
             .collect();
+        first.env = prepared.environment();
     }
-    if let Some(prepared) = &prepared_helper {
-        process.env = prepared.environment();
+    // Credentials are granted per attempt. Every step's targets are fetched
+    // once, and each step below binds only the targets it declared.
+    let mut credential_targets: Vec<String> = Vec::new();
+    for step in &steps {
+        for target in &step.credentials {
+            if !credential_targets.contains(target) {
+                credential_targets.push(target.clone());
+            }
+        }
     }
-    let credentials = if process.credentials.is_empty() {
+    let credentials = if credential_targets.is_empty() {
         Vec::new()
     } else {
         match wait_for_credentials(
             client,
             &assignment.authority,
-            &process.credentials,
+            &credential_targets,
             session_epoch,
             lease_window,
             &execution_cancellation,
@@ -1440,157 +1591,262 @@ async fn run_assignment(
         }
     };
     require_work_receipt(start_receipt, session_epoch)?;
-    let execution_environment = match execution_environment(process.env, credentials) {
-        Ok(environment) => environment,
-        Err(error) => {
-            lease_stop.cancel();
-            let _ = lease_task.await;
-            return Err(error);
-        }
-    };
-    let request = ExecutionRequest {
-        workspace_seed: assignment
-            .workspace_grant
-            .as_ref()
-            .map(|grant| grant.snapshot.clone()),
-        workspace_root: config.workspace_root.clone(),
-        workspace: assignment.workspace.clone(),
-        mode: match process.mode {
-            ProcessMode::Direct => ExecutionMode::Direct,
-            ProcessMode::WindowsCmd => ExecutionMode::WindowsCmd,
-            ProcessMode::PowerShell => ExecutionMode::PowerShell,
-        },
-        program: PathBuf::from(process.program),
-        arguments: process.args.into_iter().map(OsString::from).collect(),
-        environment: execution_environment
-            .values
-            .into_iter()
-            .map(|(key, value)| (OsString::from(key), OsString::from(value)))
-            .collect(),
-        output_limit_bytes: Some(
-            prepared_helper
-                .as_ref()
-                .map_or(MAX_ATTEMPT_OUTPUT_BYTES, |helper| helper.output_limit()),
-        ),
-        timeout: Duration::from_secs(process.timeout_seconds.unwrap_or(3_600)),
-        termination_grace: config.termination_grace,
-    };
-    let on_spawn = |process_id| {
-        let process_birth_identity = process_birth_identity_for(process_id)
-            .map_err(|error| ExecutionError::SpawnHook(error.to_string()))?;
-        match process_birth_identity {
-            Some(identity) => journal.transition_with_process_identity(
-                &organization,
-                &attempt,
-                fence,
-                session_epoch,
-                AttemptPhase::Running,
-                ProcessIdentity {
-                    process_id,
-                    birth_identity: &identity,
-                },
-            ),
-            None => journal.transition(
-                &organization,
-                &attempt,
-                fence,
-                session_epoch,
-                AttemptPhase::Running,
-                Some(process_id),
-            ),
-        }
-        .map_err(|error| ExecutionError::SpawnHook(error.to_string()))
-    };
-    let execution = execute_prepared(
-        &request,
-        execution_cancellation.clone(),
-        &execution_environment.redactions,
-        prepared_helper.as_ref(),
-        on_spawn,
-    )
-    .await;
     let completion_result: Result<(), AgentError> = async {
-        let outcome = match execution {
-            Ok(outcome) => outcome,
-            Err(error) => {
-                if let Some(process_id) = unverified_containment_process_id(&error) {
-                    journal.transition(
-                        &organization,
-                        &attempt,
-                        fence,
-                        session_epoch,
-                        AttemptPhase::ReconciliationRequired,
-                        Some(process_id),
-                    )?;
-                    return Err(AgentError::ExecutionReconciliationRequired {
-                        organization: organization.clone(),
-                        attempt: attempt.clone(),
-                        cause: error.to_string(),
-                    });
-                }
-                if requires_processless_reconciliation(&error) {
-                    // Containment is proven empty, but the configured root has
-                    // lost its pinned identity. Never write result evidence
-                    // through an attacker-controlled replacement pathname.
-                    journal.transition(
-                        &organization,
-                        &attempt,
-                        fence,
-                        session_epoch,
-                        AttemptPhase::ReconciliationRequired,
-                        None,
-                    )?;
-                    return Err(AgentError::ExecutionReconciliationRequired {
-                        organization: organization.clone(),
-                        attempt: attempt.clone(),
-                        cause: error.to_string(),
-                    });
-                }
-                return finalize_without_process(
-                    config,
-                    client,
-                    &mut journal,
-                    ProcesslessCompletion {
-                        authority: &assignment.authority,
-                        workspace: &assignment.workspace,
-                        session_epoch,
-                        outcome: if matches!(&error, ExecutionError::CancelledBeforeSpawn) {
-                            WorkOutcome::Aborted
-                        } else {
-                            WorkOutcome::Failed
-                        },
-                        reason: match &error {
-                            ExecutionError::CancelledBeforeSpawn => lease_loss_reason
-                                .get()
-                                .map(|cause| format!("lease_lost_during_execution:{cause}"))
-                                .unwrap_or_else(|| "cancelled_before_process_spawn".to_owned()),
-                            ExecutionError::WorkspaceTransfer(_) => {
-                                format!("workspace_seed_failed:{error}")
-                            }
-                            _ => format!("process_spawn_failed: {error}"),
-                        },
-                    },
-                    AuthorityRpcControl {
-                        authority_lost: &authority_lost,
-                        stop: &stop,
-                        lease_window,
-                    },
-                )
-                .await;
+        // One attempt, several ordered steps (PAR-010). Every step's spool is
+        // journaled before the first publication, every step's outcome is
+        // recorded in the durable result, and execution stops at the first
+        // step that does not succeed. The single-step envelope is the
+        // one-iteration case of the same loop.
+        let mut step_records: Vec<StepRecord> = Vec::with_capacity(steps.len());
+        let mut logs: Vec<SpoolEntry> = Vec::with_capacity(steps.len() * 2);
+        let mut output_budget = MAX_ATTEMPT_OUTPUT_BYTES;
+        let mut last_outcome: Option<mcloving_agent_runtime::executor::ExecutionOutcome> = None;
+        for (index, process) in steps.into_iter().enumerate() {
+            let ordinal = u32::try_from(index).expect("step count is bounded");
+            let step_credentials = credentials
+                .iter()
+                .filter(|credential| process.credentials.contains(&credential.target_name))
+                .cloned()
+                .collect::<Vec<_>>();
+            let execution_environment = execution_environment(process.env, step_credentials)?;
+            if multi_step {
+                // Durable before the spawn: a crash anywhere after this point
+                // names this step as interrupted, because the journal cannot
+                // tell an exited process from one that was cut off.
+                journal.record_step_start(
+                    &organization,
+                    &attempt,
+                    fence,
+                    session_epoch,
+                    ordinal,
+                )?;
             }
-        };
-        #[cfg(debug_assertions)]
-        if prepared_helper.is_some()
-            && outcome.private_response_accepted == Some(true)
-            && std::env::var("MCLOVING_TEST_CRASH_AFTER_HELPER_RECEIPT").as_deref() == Ok("1")
-        {
-            std::process::exit(87);
+            let request = ExecutionRequest {
+                workspace_seed: if index == 0 {
+                    assignment
+                        .workspace_grant
+                        .as_ref()
+                        .map(|grant| grant.snapshot.clone())
+                } else {
+                    None
+                },
+                step_ordinal: multi_step.then_some(ordinal),
+                workspace_root: config.workspace_root.clone(),
+                workspace: assignment.workspace.clone(),
+                mode: match process.mode {
+                    ProcessMode::Direct => ExecutionMode::Direct,
+                    ProcessMode::WindowsCmd => ExecutionMode::WindowsCmd,
+                    ProcessMode::PowerShell => ExecutionMode::PowerShell,
+                },
+                program: PathBuf::from(process.program),
+                arguments: process.args.into_iter().map(OsString::from).collect(),
+                environment: execution_environment
+                    .values
+                    .into_iter()
+                    .map(|(key, value)| (OsString::from(key), OsString::from(value)))
+                    .collect(),
+                // The per-attempt output quota is shared by every step, so a
+                // later step may only spend what earlier steps left.
+                output_limit_bytes: Some(
+                    prepared_helper
+                        .as_ref()
+                        .map_or(output_budget, |helper| helper.output_limit()),
+                ),
+                timeout: Duration::from_secs(process.timeout_seconds.unwrap_or(3_600)),
+                termination_grace: config.termination_grace,
+            };
+            let on_spawn = |process_id| {
+                let process_birth_identity = process_birth_identity_for(process_id)
+                    .map_err(|error| ExecutionError::SpawnHook(error.to_string()))?;
+                match process_birth_identity {
+                    Some(identity) => journal.transition_with_process_identity(
+                        &organization,
+                        &attempt,
+                        fence,
+                        session_epoch,
+                        AttemptPhase::Running,
+                        ProcessIdentity {
+                            process_id,
+                            birth_identity: &identity,
+                        },
+                    ),
+                    None => journal.transition(
+                        &organization,
+                        &attempt,
+                        fence,
+                        session_epoch,
+                        AttemptPhase::Running,
+                        Some(process_id),
+                    ),
+                }
+                .map_err(|error| ExecutionError::SpawnHook(error.to_string()))
+            };
+            let helper = if index == 0 {
+                prepared_helper.as_ref()
+            } else {
+                None
+            };
+            let execution = execute_prepared(
+                &request,
+                execution_cancellation.clone(),
+                &execution_environment.redactions,
+                helper,
+                on_spawn,
+            )
+            .await;
+            let mut outcome = match execution {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    if let Some(process_id) = unverified_containment_process_id(&error) {
+                        journal.transition(
+                            &organization,
+                            &attempt,
+                            fence,
+                            session_epoch,
+                            AttemptPhase::ReconciliationRequired,
+                            Some(process_id),
+                        )?;
+                        return Err(AgentError::ExecutionReconciliationRequired {
+                            organization: organization.clone(),
+                            attempt: attempt.clone(),
+                            cause: error.to_string(),
+                        });
+                    }
+                    if requires_processless_reconciliation(&error) {
+                        // Containment is proven empty, but the configured root has
+                        // lost its pinned identity. Never write result evidence
+                        // through an attacker-controlled replacement pathname.
+                        journal.transition(
+                            &organization,
+                            &attempt,
+                            fence,
+                            session_epoch,
+                            AttemptPhase::ReconciliationRequired,
+                            None,
+                        )?;
+                        return Err(AgentError::ExecutionReconciliationRequired {
+                            organization: organization.clone(),
+                            attempt: attempt.clone(),
+                            cause: error.to_string(),
+                        });
+                    }
+                    if index == 0 {
+                        return finalize_without_process(
+                            config,
+                            client,
+                            &mut journal,
+                            ProcesslessCompletion {
+                                authority: &assignment.authority,
+                                workspace: &assignment.workspace,
+                                session_epoch,
+                                outcome: if matches!(&error, ExecutionError::CancelledBeforeSpawn) {
+                                    WorkOutcome::Aborted
+                                } else {
+                                    WorkOutcome::Failed
+                                },
+                                reason: match &error {
+                                    ExecutionError::CancelledBeforeSpawn => lease_loss_reason
+                                        .get()
+                                        .map(|cause| format!("lease_lost_during_execution:{cause}"))
+                                        .unwrap_or_else(|| {
+                                            "cancelled_before_process_spawn".to_owned()
+                                        }),
+                                    ExecutionError::WorkspaceTransfer(_) => {
+                                        format!("workspace_seed_failed:{error}")
+                                    }
+                                    _ => format!("process_spawn_failed: {error}"),
+                                },
+                            },
+                            AuthorityRpcControl {
+                                authority_lost: &authority_lost,
+                                stop: &stop,
+                                lease_window,
+                            },
+                        )
+                        .await;
+                    }
+                    // A later step could not start. The earlier steps ran and
+                    // their evidence is journaled below, so this is a failed
+                    // step inside a real attempt, not a processless one.
+                    step_records.push(StepRecord {
+                        ordinal,
+                        outcome: outcome_name(
+                            if matches!(&error, ExecutionError::CancelledBeforeSpawn) {
+                                WorkOutcome::Aborted
+                            } else {
+                                WorkOutcome::Failed
+                            },
+                        )
+                        .to_owned(),
+                        exit_code: None,
+                        termination: "spawn_failed".to_owned(),
+                        reason: Some(bounded_refusal_detail(format!(
+                            "process_spawn_failed: {error}"
+                        ))),
+                    });
+                    break;
+                }
+            };
+            #[cfg(debug_assertions)]
+            {
+                if helper.is_some()
+                    && outcome.private_response_accepted == Some(true)
+                    && std::env::var("MCLOVING_TEST_CRASH_AFTER_HELPER_RECEIPT").as_deref()
+                        == Ok("1")
+                {
+                    std::process::exit(87);
+                }
+                // The exact ambiguity window: the step's process has exited,
+                // nothing about that exit is durable yet. A restart from here
+                // must report the step interrupted, never re-run it.
+                if std::env::var("MCLOVING_TEST_CRASH_AFTER_STEP_EXIT").as_deref()
+                    == Ok(ordinal.to_string().as_str())
+                {
+                    std::process::exit(88);
+                }
+            }
+            // Journal spool sequences are per attempt, and the executor
+            // numbers each execution's streams 0 and 1; give every step its
+            // own pair so no step's evidence collides with another's.
+            outcome.stdout.sequence = u64::from(ordinal) * 2;
+            outcome.stderr.sequence = u64::from(ordinal) * 2 + 1;
+            output_budget = output_budget
+                .saturating_sub(outcome.stdout.bytes)
+                .saturating_sub(outcome.stderr.bytes);
+            let step_terminal = match outcome.termination {
+                Termination::Cancelled => WorkOutcome::Aborted,
+                Termination::TimedOut | Termination::OutputLimitExceeded => WorkOutcome::Failed,
+                Termination::Exited if outcome.exit_code == Some(0) => WorkOutcome::Succeeded,
+                Termination::Exited => WorkOutcome::Failed,
+            };
+            logs.push(outcome.stdout.clone());
+            logs.push(outcome.stderr.clone());
+            step_records.push(StepRecord {
+                ordinal,
+                outcome: outcome_name(step_terminal).to_owned(),
+                exit_code: outcome.exit_code,
+                termination: termination_name(outcome.termination).to_owned(),
+                reason: None,
+            });
+            let stop_here = step_terminal != WorkOutcome::Succeeded;
+            last_outcome = Some(outcome);
+            if stop_here {
+                break;
+            }
         }
-        validate_log_spool_quota(&[outcome.stdout.clone(), outcome.stderr.clone()])?;
+        let outcome = last_outcome.expect("the first step either ran or returned above");
+        let last_record = step_records
+            .last()
+            .expect("every executed step leaves a record");
+        validate_log_spool_quota(&logs)?;
         let mut terminal = match outcome.termination {
             Termination::Cancelled => WorkOutcome::Aborted,
             Termination::TimedOut | Termination::OutputLimitExceeded => WorkOutcome::Failed,
-            Termination::Exited if outcome.exit_code == Some(0) => WorkOutcome::Succeeded,
+            Termination::Exited
+                if outcome.exit_code == Some(0) && last_record.outcome == "succeeded" =>
+            {
+                WorkOutcome::Succeeded
+            }
             Termination::Exited => WorkOutcome::Failed,
         };
         let helper_failure = (outcome.private_response_accepted == Some(false)).then(|| {
@@ -1632,6 +1888,7 @@ async fn run_assignment(
             .flatten()
             .filter(|cause| **cause != CONTROLLER_CANCELLATION_TRIGGER)
             .map(|cause| format!("lease_lost_during_execution:{cause}"));
+        let step_failure = last_record.reason.clone();
         let result = write_result(
             &config.workspace_root,
             &assignment.workspace,
@@ -1639,15 +1896,21 @@ async fn run_assignment(
                 workspace_transfer: workspace_transfer.as_ref(),
                 outcome: terminal,
                 exit_code: outcome.exit_code,
-                termination: termination_name(outcome.termination),
+                termination: if last_record.termination == "spawn_failed" {
+                    "spawn_failed"
+                } else {
+                    termination_name(outcome.termination)
+                },
                 // Keep the authority-loss cause primary; capture refusal remains
                 // independently recorded in workspace_transfer.error.
                 reason: lease_loss
                     .as_deref()
                     .or(workspace_failure.as_deref())
-                    .or(helper_failure),
+                    .or(helper_failure)
+                    .or(step_failure.as_deref()),
                 completion_protocol: WORK_COMPLETION_PROTOCOL,
                 cancellation_outcome: None,
+                steps: if multi_step { &step_records } else { &[] },
             },
         )
         .await?;
@@ -1662,7 +1925,7 @@ async fn run_assignment(
                 AttemptPhase::Finalizing
             },
             process_id: Some(outcome.process_id),
-            logs: &[outcome.stdout.clone(), outcome.stderr.clone()],
+            logs: &logs,
             result: &result,
         })?;
 
@@ -1679,25 +1942,23 @@ async fn run_assignment(
                 lease_window,
             },
         };
-        let mut inline_chunks = features.inline_terminal_logs.then(Vec::new);
-        let next_sequence = publish_or_inline_spool(
-            &mut publication,
-            "stdout",
-            &config.workspace_root,
-            &outcome.stdout,
-            0,
-            inline_chunks.as_mut(),
-        )
-        .await?;
-        publish_or_inline_spool(
-            &mut publication,
-            "stderr",
-            &config.workspace_root,
-            &outcome.stderr,
-            next_sequence,
-            inline_chunks.as_mut(),
-        )
-        .await?;
+        // Inline delivery carries at most one chunk per stream name, which a
+        // multi-step attempt has several of; those always stream.
+        let mut inline_chunks = (features.inline_terminal_logs && !multi_step).then(Vec::new);
+        let mut next_sequence = 0;
+        for entry in &logs {
+            let (stream, step_ordinal) = spool_stream(entry)?;
+            next_sequence = publish_or_inline_spool(
+                &mut publication,
+                stream,
+                step_ordinal,
+                &config.workspace_root,
+                entry,
+                next_sequence,
+                inline_chunks.as_mut(),
+            )
+            .await?;
+        }
         let result_content =
             verified_spool_content(&config.workspace_root, &result, "result").await?;
         let persisted: PersistedResult = serde_json::from_slice(&result_content)?;
@@ -1729,7 +1990,7 @@ async fn run_assignment(
             &attempt,
             fence,
             session_epoch,
-            &[outcome.stdout.clone(), outcome.stderr.clone()],
+            &logs,
             Some(&result),
             &assignment.workspace,
         )
@@ -2263,6 +2524,7 @@ async fn authority_rpc<T>(
 async fn publish_or_inline_spool(
     publication: &mut PublicationContext<'_>,
     stream: &str,
+    step_ordinal: u32,
     workspace_root: &Path,
     entry: &SpoolEntry,
     first_sequence: u64,
@@ -2270,7 +2532,15 @@ async fn publish_or_inline_spool(
 ) -> Result<u64, AgentError> {
     let single_chunk = entry.bytes <= MAX_LOG_CHUNK_BYTES as u64;
     let Some(chunks) = inline.filter(|_| single_chunk) else {
-        return publish_spool(publication, stream, workspace_root, entry, first_sequence).await;
+        return publish_spool(
+            publication,
+            stream,
+            step_ordinal,
+            workspace_root,
+            entry,
+            first_sequence,
+        )
+        .await;
     };
     if entry.bytes > MAX_ATTEMPT_OUTPUT_BYTES {
         return Err(AgentError::InvalidAssignment(
@@ -2313,6 +2583,7 @@ async fn publish_or_inline_spool(
         sequence: first_sequence,
         stream: stream.to_owned(),
         content,
+        step_ordinal,
     });
     first_sequence
         .checked_add(1)
@@ -2322,6 +2593,7 @@ async fn publish_or_inline_spool(
 async fn publish_spool(
     publication: &mut PublicationContext<'_>,
     stream: &str,
+    step_ordinal: u32,
     workspace_root: &Path,
     entry: &SpoolEntry,
     first_sequence: u64,
@@ -2361,6 +2633,7 @@ async fn publish_spool(
                     sequence,
                     stream: stream.to_owned(),
                     content: buffer[..bytes].to_vec(),
+                    step_ordinal,
                 }),
             )
             .await?,
@@ -2564,18 +2837,46 @@ fn validate_log_spool_quota(entries: &[SpoolEntry]) -> Result<(), AgentError> {
     Ok(())
 }
 
-fn spool_stream(entry: &SpoolEntry) -> Result<&'static str, AgentError> {
-    match entry
+/// Reads a journaled spool's stream name and step ordinal back from its path:
+/// `spool/{stdout,stderr}.log` is the single-step layout (ordinal zero), and
+/// `spool/step-N/{stdout,stderr}.log` is step N of a multi-step attempt.
+fn spool_stream(entry: &SpoolEntry) -> Result<(&'static str, u32), AgentError> {
+    let stream = match entry
         .relative_path
         .file_name()
         .and_then(|name| name.to_str())
     {
-        Some("stdout.log") => Ok("stdout"),
-        Some("stderr.log") => Ok("stderr"),
-        _ => Err(AgentError::InvalidAssignment(
-            "journal log spool has an unknown stream path".to_owned(),
-        )),
-    }
+        Some("stdout.log") => "stdout",
+        Some("stderr.log") => "stderr",
+        _ => {
+            return Err(AgentError::InvalidAssignment(
+                "journal log spool has an unknown stream path".to_owned(),
+            ));
+        }
+    };
+    let parent = entry
+        .relative_path
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|name| name.to_str());
+    let ordinal = match parent {
+        Some("spool") => 0,
+        Some(step) => step
+            .strip_prefix("step-")
+            .and_then(|digits| digits.parse::<u32>().ok())
+            .filter(|ordinal| *ordinal < mcloving_domain::multi_step::MAX_STEP_ORDINAL_EXCLUSIVE)
+            .ok_or_else(|| {
+                AgentError::InvalidAssignment(
+                    "journal log spool has an unknown step directory".to_owned(),
+                )
+            })?,
+        None => {
+            return Err(AgentError::InvalidAssignment(
+                "journal log spool has no spool directory".to_owned(),
+            ));
+        }
+    };
+    Ok((stream, ordinal))
 }
 
 async fn write_result(
@@ -2591,6 +2892,7 @@ async fn write_result(
         reason,
         completion_protocol,
         cancellation_outcome,
+        steps,
     } = result;
     let relative_parent = PathBuf::from(AGENT_RESULT_DIRECTORY)
         .join(workspace)
@@ -2607,6 +2909,9 @@ async fn write_result(
         "completion_protocol": completion_protocol,
         "cancellation_outcome": cancellation_outcome,
     });
+    if !steps.is_empty() {
+        value["steps"] = serde_json::to_value(steps)?;
+    }
     if let Some(transfer) = workspace_transfer {
         transfer
             .validate()
@@ -2727,6 +3032,12 @@ pub(super) async fn persist_recovered_cancellation(
     attempt: &mcloving_agent_runtime::ReconciliationAttempt,
     cancellation_outcome: i32,
 ) -> Result<(), AgentError> {
+    // A multi-step attempt names the step it was cut off in. The journal
+    // recorded that step's start before its spawn and nothing about its exit,
+    // so recovery can only report it interrupted: never re-run, never skipped.
+    let interrupted_step = attempt
+        .current_step
+        .map(|ordinal| format!("interrupted_at_step:{ordinal}"));
     let result = write_result(
         &config.workspace_root,
         &attempt.workspace,
@@ -2735,9 +3046,10 @@ pub(super) async fn persist_recovered_cancellation(
             outcome: WorkOutcome::Aborted,
             exit_code: None,
             termination: "recovered_cancellation",
-            reason: None,
+            reason: interrupted_step.as_deref(),
             completion_protocol: CANCELLATION_COMPLETION_PROTOCOL,
             cancellation_outcome: Some(cancellation_outcome),
+            steps: &[],
         },
     )
     .await?;
@@ -2831,6 +3143,7 @@ async fn finalize_without_process(
             reason: Some(&reason),
             completion_protocol: WORK_COMPLETION_PROTOCOL,
             cancellation_outcome: None,
+            steps: &[],
         },
     )
     .await?;
@@ -3095,6 +3408,179 @@ mod tests {
             execution_spec_json: spec.to_vec(),
             payload_digest: Sha256::digest(spec).to_vec(),
         }
+    }
+
+    fn multi_step_spec(count: usize) -> Vec<u8> {
+        let steps = (0..count)
+            .map(|index| {
+                json!({
+                    "kind": "process",
+                    "program": "/bin/sh",
+                    "args": ["-c", format!("echo step-{index}")],
+                    "timeout_seconds": 10
+                })
+            })
+            .collect::<Vec<_>>();
+        serde_json::to_vec(&json!({"version": 5, "steps": steps})).unwrap()
+    }
+
+    /// PAR-010: the version-5 envelope is runnable only once the controller
+    /// confirmed it understands step ordinals on the wire; without that it
+    /// is a permanent refusal, never a silent single-step run.
+    #[test]
+    fn multi_step_envelope_runs_only_when_the_feature_was_negotiated() {
+        let spec = multi_step_spec(3);
+        let refusal = unsupported(validate_assignment(&config(), 4, assignment(&spec)).unwrap());
+        assert_eq!(refusal.detail, "multi-step execution was not negotiated");
+
+        let features = SessionFeatures {
+            multi_step: true,
+            ..SessionFeatures::default()
+        };
+        let validated = runnable(
+            validate_assignment_with_features(&config(), 4, assignment(&spec), features).unwrap(),
+        );
+        assert!(validated.multi_step);
+        assert_eq!(validated.steps.len(), 3);
+        assert_eq!(validated.steps[2].args, vec!["-c", "echo step-2"]);
+        assert!(validated.helper.is_none());
+    }
+
+    #[test]
+    fn multi_step_envelope_refuses_shapes_outside_its_contract() {
+        let features = SessionFeatures {
+            multi_step: true,
+            ..SessionFeatures::default()
+        };
+        let too_many = multi_step_spec(17);
+        let refusal = unsupported(
+            validate_assignment_with_features(&config(), 4, assignment(&too_many), features)
+                .unwrap(),
+        );
+        assert!(refusal.detail.contains("17 steps"), "{}", refusal.detail);
+
+        let empty = serde_json::to_vec(&json!({"version": 5, "steps": []})).unwrap();
+        let refusal = unsupported(
+            validate_assignment_with_features(&config(), 4, assignment(&empty), features).unwrap(),
+        );
+        assert!(refusal.detail.contains("0 steps"), "{}", refusal.detail);
+
+        let foreign_kind = serde_json::to_vec(&json!({"version": 5, "steps": [
+            {"kind": "process", "program": "/bin/true"},
+            {"kind": "checkout", "program": ""}
+        ]}))
+        .unwrap();
+        let refusal = unsupported(
+            validate_assignment_with_features(&config(), 4, assignment(&foreign_kind), features)
+                .unwrap(),
+        );
+        assert!(refusal.detail.contains("step 1 kind"), "{}", refusal.detail);
+
+        let unbounded = serde_json::to_vec(&json!({"version": 5, "steps": [
+            {"kind": "process", "program": "/bin/true"},
+            {"kind": "process", "program": "/bin/true", "timeout_seconds": 0}
+        ]}))
+        .unwrap();
+        let refusal = unsupported(
+            validate_assignment_with_features(&config(), 4, assignment(&unbounded), features)
+                .unwrap(),
+        );
+        assert!(
+            refusal.detail.contains("step 1 timeout"),
+            "{}",
+            refusal.detail
+        );
+    }
+
+    /// A single process step keeps the version-1 shape and the single-step
+    /// path exactly as before; version 5 never changes what an old spec means.
+    #[test]
+    fn single_step_envelope_is_unchanged_by_multi_step_support() {
+        let spec = serde_json::to_vec(&json!({"version": 1, "steps": [
+            {"kind": "process", "program": "/bin/true"}
+        ]}))
+        .unwrap();
+        let validated = runnable(validate_assignment(&config(), 4, assignment(&spec)).unwrap());
+        assert!(!validated.multi_step);
+        assert_eq!(validated.steps.len(), 1);
+    }
+
+    #[test]
+    fn spool_paths_encode_their_stream_and_step_ordinal() {
+        let entry = |path: &str| SpoolEntry {
+            sequence: 0,
+            relative_path: PathBuf::from(path),
+            digest: [0; 32],
+            bytes: 0,
+        };
+        assert_eq!(
+            spool_stream(&entry("org/a/spool/stdout.log")).unwrap(),
+            ("stdout", 0)
+        );
+        assert_eq!(
+            spool_stream(&entry("org/a/spool/stderr.log")).unwrap(),
+            ("stderr", 0)
+        );
+        assert_eq!(
+            spool_stream(&entry("org/a/spool/step-0/stdout.log")).unwrap(),
+            ("stdout", 0)
+        );
+        assert_eq!(
+            spool_stream(&entry("org/a/spool/step-15/stderr.log")).unwrap(),
+            ("stderr", 15)
+        );
+        assert!(spool_stream(&entry("org/a/spool/step-x/stdout.log")).is_err());
+        assert!(spool_stream(&entry("org/a/other/stdout.log")).is_err());
+        assert!(spool_stream(&entry("org/a/spool/step-1/result.json")).is_err());
+    }
+
+    #[test]
+    fn completion_summary_carries_per_step_records_and_the_failing_reason() {
+        let persisted = PersistedResult {
+            workspace_transfer: None,
+            outcome: "failed".to_owned(),
+            exit_code: Some(3),
+            termination: "exited".to_owned(),
+            reason: None,
+            completion_protocol: WORK_COMPLETION_PROTOCOL.to_owned(),
+            cancellation_outcome: None,
+            steps: vec![
+                StepRecord {
+                    ordinal: 0,
+                    outcome: "succeeded".to_owned(),
+                    exit_code: Some(0),
+                    termination: "exited".to_owned(),
+                    reason: None,
+                },
+                StepRecord {
+                    ordinal: 1,
+                    outcome: "failed".to_owned(),
+                    exit_code: Some(3),
+                    termination: "exited".to_owned(),
+                    reason: None,
+                },
+            ],
+        };
+        let summary: serde_json::Value =
+            serde_json::from_slice(&work_completion_summary(&persisted, &[7; 32], false).unwrap())
+                .unwrap();
+        assert_eq!(summary["exit_code"], 3);
+        assert_eq!(summary["steps"].as_array().unwrap().len(), 2);
+        assert_eq!(summary["steps"][1]["outcome"], "failed");
+        assert_eq!(summary["steps"][1]["exit_code"], 3);
+        assert!(summary["steps"][0].get("reason").is_none());
+
+        let single = PersistedResult {
+            steps: Vec::new(),
+            ..persisted
+        };
+        let summary: serde_json::Value =
+            serde_json::from_slice(&work_completion_summary(&single, &[7; 32], false).unwrap())
+                .unwrap();
+        assert!(
+            summary.get("steps").is_none(),
+            "single-step summaries are byte-compatible"
+        );
     }
 
     #[test]
@@ -3850,8 +4336,8 @@ mod tests {
                 validate_assignment(&config(), 1, assignment(windows_cmd))
                     .expect("accept explicit cmd mode")
             )
-            .process
-            .mode,
+            .steps[0]
+                .mode,
             ProcessMode::WindowsCmd
         ));
         let powershell = br#"{"version":1,"steps":[{"kind":"process","mode":"powershell","program":"build.ps1"}]}"#;
@@ -3860,8 +4346,8 @@ mod tests {
                 validate_assignment(&config(), 1, assignment(powershell))
                     .expect("accept explicit PowerShell mode")
             )
-            .process
-            .mode,
+            .steps[0]
+                .mode,
             ProcessMode::PowerShell
         ));
         let legacy_powershell = br#"{"version":1,"steps":[{"kind":"process","mode":"power_shell","program":"build.ps1"}]}"#;
@@ -3870,8 +4356,8 @@ mod tests {
                 validate_assignment(&config(), 1, assignment(legacy_powershell))
                     .expect("accept the protocol v1.0 PowerShell spelling")
             )
-            .process
-            .mode,
+            .steps[0]
+                .mode,
             ProcessMode::PowerShell
         ));
         let unknown_mode =
@@ -3969,6 +4455,7 @@ mod tests {
                 reason: Some("process_spawn_failed: refused"),
                 completion_protocol: WORK_COMPLETION_PROTOCOL,
                 cancellation_outcome: None,
+                steps: &[],
             },
         )
         .await
@@ -3984,6 +4471,7 @@ mod tests {
                 reason: Some("process_spawn_failed: refused"),
                 completion_protocol: WORK_COMPLETION_PROTOCOL,
                 cancellation_outcome: None,
+                steps: &[],
             },
         )
         .await
@@ -4029,6 +4517,7 @@ mod tests {
                 reason: None,
                 completion_protocol: CANCELLATION_COMPLETION_PROTOCOL,
                 cancellation_outcome: Some(CancellationOutcome::Terminated as i32),
+                steps: &[],
             },
         )
         .await
@@ -4073,6 +4562,7 @@ mod tests {
                     reason: Some("refused"),
                     completion_protocol: WORK_COMPLETION_PROTOCOL,
                     cancellation_outcome: None,
+                    steps: &[],
                 },
             )
             .await,
@@ -4119,6 +4609,7 @@ mod tests {
                     reason: Some("refused"),
                     completion_protocol: WORK_COMPLETION_PROTOCOL,
                     cancellation_outcome: None,
+                    steps: &[],
                 },
             )
             .await,
@@ -4152,6 +4643,7 @@ mod tests {
                 reason: Some("restored"),
                 completion_protocol: WORK_COMPLETION_PROTOCOL,
                 cancellation_outcome: None,
+                steps: &[],
             },
         )
         .await
@@ -4184,6 +4676,7 @@ mod tests {
                 reason: None,
                 completion_protocol: WORK_COMPLETION_PROTOCOL,
                 cancellation_outcome: None,
+                steps: &[],
             },
         )
         .await
@@ -4200,6 +4693,7 @@ mod tests {
             workspace,
             process_id: None,
             process_birth_identity: None,
+            current_step: None,
             logs: Vec::new(),
             result: Some(result),
         };
@@ -4226,6 +4720,7 @@ mod tests {
                 reason: None,
                 completion_protocol: CANCELLATION_COMPLETION_PROTOCOL,
                 cancellation_outcome: Some(CancellationOutcome::Terminated as i32),
+                steps: &[],
             },
         )
         .await
@@ -4305,6 +4800,7 @@ mod tests {
                 reason: None,
                 completion_protocol: WORK_COMPLETION_PROTOCOL,
                 cancellation_outcome: None,
+                steps: &[],
             },
         )
         .await
