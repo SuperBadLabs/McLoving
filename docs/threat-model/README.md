@@ -1003,8 +1003,9 @@ declarations of thirty-two patterns per stage, pattern matching a table
 over pattern and path segments so a pattern of many `**` segments costs
 their product rather than a combinatorial search, a walk bounded at depth
 32 and 65 536 entries, at most 1 024 objects and 256 MiB per attempt
-counted by the agent before the first upload and enforced by the store at
-every registration, one-MiB frames, and an RPC budget of one second per MiB
+counted by the agent before the first upload and both enforced by the store
+at every registration under the attempt-scoped lock, so a custom peer
+cannot register unbounded rows under one lease, one-MiB frames, and an RPC budget of one second per MiB
 bounded at fifteen minutes under a lease the agent keeps renewing);
 TM-052 (API: no new public route; the existing authorized artifact listing
 and download routes serve the objects). Residual: an attempt's own steps

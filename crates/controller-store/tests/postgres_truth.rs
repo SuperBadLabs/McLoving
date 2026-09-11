@@ -12508,6 +12508,39 @@ async fn an_attempts_artifacts_are_bounded_by_the_per_attempt_quota() {
             .expect("sum again"),
         quota
     );
+    // The object-count quota holds at the store too: with rows up to the
+    // bound already registered (inserted directly, as a custom peer's
+    // registrations would have left them), the next is refused, and a
+    // re-registration of an existing one is still not a new row.
+    let files =
+        i64::try_from(mcloving_domain::artifacts::MAX_ARTIFACT_FILES_PER_ATTEMPT).expect("fits");
+    sqlx::query(
+        "INSERT INTO attempt_objects (
+             organization_id, attempt_id, fence, kind, name, object_digest, bytes,
+             media_type, status
+         )
+         SELECT $1, $2, $3, 'artifact', 'many/' || index::text,
+                sha256(convert_to(index::text, 'UTF8')), 0,
+                'application/octet-stream', 'available'
+         FROM generate_series(1, $4) AS index",
+    )
+    .bind(organization_id)
+    .bind(claim.attempt_id)
+    .bind(claim.fence)
+    .bind(files - 2)
+    .execute(store.pool())
+    .await
+    .expect("fill the attempt's artifact rows up to the bound");
+    assert!(
+        !register("many/one-too-many", 0x44, 0)
+            .await
+            .expect("a registration past the object count is refused, not failed")
+    );
+    assert!(
+        register("outputs/last.bin", 0x33, 1)
+            .await
+            .expect("an existing object re-registers")
+    );
 }
 
 #[tokio::test]

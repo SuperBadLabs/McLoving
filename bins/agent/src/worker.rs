@@ -3269,6 +3269,9 @@ async fn upload_artifact(
     use std::io::{Read as _, Seek as _};
 
     let digest: [u8; 32] = tokio::task::block_in_place(|| -> Result<[u8; 32], std::io::Error> {
+        // From the start whatever the description's offset: the same file
+        // may be emitted under several declarations.
+        file.file.seek(std::io::SeekFrom::Start(0))?;
         let mut digest = Sha256::new();
         let mut buffer = vec![0_u8; 64 * 1024];
         let mut total = 0_u64;

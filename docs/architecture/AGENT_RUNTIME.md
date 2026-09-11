@@ -441,8 +441,10 @@ discharge a parked reconciliation).
   and node) fenced by the agent's current session epoch inside the same
   transaction, under an attempt-scoped artifact lock shared by every name
   and then the per-name lock, refuses the registration when the attempt's
-  artifacts would pass 256 MiB, and commits it into the immutable digest
-  namespace. The stream is accepted only for a session
+  artifacts would pass 256 MiB or 1 024 objects, and commits it into the
+  immutable digest namespace. A Windows submission of a stage that declares
+  artifacts is refused at admission like a multi-step or container stage,
+  since no Windows agent collects. The stream is accepted only for a session
   that negotiated `artifact-upload-v1`; the agent advertises the
   `artifact-upload-v1` capability on Unix, the controller keeps it for
   scheduling only when the feature was negotiated, and a node whose stage

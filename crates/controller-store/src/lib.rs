@@ -5447,6 +5447,29 @@ impl Store {
             tx.rollback().await?;
             return Ok(false);
         }
+        // The object-count quota too, at the protocol boundary rather than
+        // only in the shipped collector, so an authenticated peer cannot
+        // register unbounded rows under one live lease.
+        let count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)
+             FROM attempt_objects
+             WHERE organization_id = $1
+               AND attempt_id = $2
+               AND fence = $3
+               AND kind = 'artifact'",
+        )
+        .bind(organization_id)
+        .bind(attempt_id)
+        .bind(fence)
+        .fetch_one(&mut *tx)
+        .await?;
+        if count
+            >= i64::try_from(mcloving_domain::artifacts::MAX_ARTIFACT_FILES_PER_ATTEMPT)
+                .unwrap_or(i64::MAX)
+        {
+            tx.rollback().await?;
+            return Ok(false);
+        }
         let inserted = match sqlx::query_scalar::<_, String>(
             "INSERT INTO attempt_objects (
                  organization_id, attempt_id, fence, kind, name,

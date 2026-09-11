@@ -5163,6 +5163,22 @@ fn validate_execution_platform(pipeline: &PipelineIr, platform: &str) -> Result<
                 ),
             ));
         }
+        // The shipped Windows agent has no artifact collector and never
+        // advertises `artifact-upload-v1` (PAR-014).
+        if let Some(stage) = pipeline
+            .stages
+            .iter()
+            .find(|stage| !stage.artifacts.is_empty())
+        {
+            return Err(ApiError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "unsupported_execution_spec",
+                format!(
+                    "stage {} declares artifacts; artifact collection runs on platform linux only",
+                    stage.id
+                ),
+            ));
+        }
         return Ok(());
     }
     let windows_mode = pipeline
@@ -8799,6 +8815,32 @@ stages:
         let spec = execution_spec(&pipeline.stages[0]);
         assert_eq!(spec["steps"][0]["mode"], "power_shell");
         assert_eq!(spec["steps"][0]["program"], "build.ps1");
+    }
+
+    #[test]
+    fn artifact_stages_are_refused_for_windows_admission() {
+        let pipeline = compile_source_with_parameters(
+            r#"
+version: 1
+name: artifacts
+stages:
+  - id: execute
+    name: Execute
+    steps:
+      - process:
+          program: build.cmd
+    artifacts:
+      - name: outputs
+        paths: ["out/*"]
+"#,
+            BTreeMap::new(),
+        )
+        .expect("compile a stage with declared artifacts");
+        let error = validate_execution_platform(&pipeline, "windows")
+            .expect_err("a Windows submission has no collector to route to");
+        assert_eq!(error.code, "unsupported_execution_spec");
+        assert!(error.message.contains("artifact"), "{}", error.message);
+        validate_execution_platform(&pipeline, "linux").expect("linux runs the collector");
     }
 
     #[test]

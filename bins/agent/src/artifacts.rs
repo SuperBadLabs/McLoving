@@ -246,11 +246,12 @@ fn walk_directory(
             return Err(CollectionRefusal::IdentityChanged(path).into());
         }
         let bytes = u64::try_from(opened_stat.st_size).unwrap_or(u64::MAX);
-        let opened = File::from(opened);
         // One object per declaration that matches: declarations may
         // overlap on purpose, and the object's identity includes the
         // declaration's name, so each emitted object counts against the
-        // file and byte bounds.
+        // file and byte bounds. Each object gets its own open file
+        // description (a duplicated descriptor would share one offset) and
+        // is re-identified against the walk's entry like the first.
         // The object name must satisfy the controller's rules before a byte
         // is sent: a name it would refuse is a named refusal here, not an
         // RPC failure that ends the session.
@@ -269,11 +270,21 @@ fn walk_directory(
             if walk.bytes > MAX_ATTEMPT_ARTIFACT_BYTES {
                 return Err(CollectionRefusal::TooManyBytes(walk.bytes).into());
             }
+            let file = if walk.files.iter().any(|file| file.relative_path == path) {
+                let again = open_regular(directory, raw_name)?;
+                let again_stat = fstat(&again)?;
+                if !same_identity(&stat, &again_stat) || !is_regular(&again_stat) {
+                    return Err(CollectionRefusal::IdentityChanged(path).into());
+                }
+                File::from(again)
+            } else {
+                File::from(opened.try_clone()?)
+            };
             walk.files.push(CollectedFile {
                 name,
                 relative_path: path.clone(),
                 bytes,
-                file: opened.try_clone()?,
+                file,
             });
         }
     }
@@ -545,6 +556,15 @@ mod tests {
                 "logs/target/debug/deep/x.log",
             ]
         );
+        // Every emitted object reads its whole file: the descriptors do not
+        // share an offset, so the second declaration's upload sees the same
+        // bytes the first did.
+        for mut file in files {
+            let mut content = Vec::new();
+            file.file.read_to_end(&mut content).unwrap();
+            assert_eq!(content.len() as u64, file.bytes, "{}", file.name);
+            assert!(!content.is_empty(), "{}", file.name);
+        }
     }
 
     #[test]
