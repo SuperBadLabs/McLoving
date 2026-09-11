@@ -968,10 +968,22 @@ async fn quiesce_recovered_executions(config: &AgentConfig) -> Result<(), AgentE
         // The terminated group was only the podman client of a container
         // stage; the container it started outlives that client (PAR-011).
         // Reap it by its derived name and require proof it is gone, or park
-        // the attempt exactly as an unverifiable process group would.
-        if outcome != RecoveredCancellation::ReconciliationRequired
-            && !container::recovered_container_gone(config, attempt)
-        {
+        // the attempt exactly as an unverifiable process group would. The
+        // reap runs even when the group itself could not be verified: that
+        // outcome already parks the attempt, but the container must not keep
+        // writing into the workspace until a later session retries.
+        let container_gone = container::recovered_container_gone(config, attempt);
+        if outcome == RecoveredCancellation::ReconciliationRequired && !container_gone {
+            eprintln!(
+                "recovered attempt {}/{} fence {}: container {} not proven gone while the \
+                 process group was unverifiable; parked reconciliation-required",
+                attempt.organization_id,
+                attempt.attempt_id,
+                attempt.fence_token,
+                attempt.container_name.as_deref().unwrap_or("?")
+            );
+        }
+        if outcome != RecoveredCancellation::ReconciliationRequired && !container_gone {
             journal.transition(
                 &attempt.organization_id,
                 &attempt.attempt_id,

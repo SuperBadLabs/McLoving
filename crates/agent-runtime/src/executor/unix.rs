@@ -587,8 +587,11 @@ async fn reap_container(runtime: &Path, name: &str) -> Result<(), ExecutionError
                 "PATH",
                 "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
             )
-            .envs(std::env::vars().filter(|(key, _)| {
-                matches!(key.as_str(), "HOME" | "XDG_RUNTIME_DIR" | "USER" | "TMPDIR")
+            .envs(std::env::vars_os().filter(|(key, _)| {
+                matches!(
+                    key.to_str(),
+                    Some("HOME" | "XDG_RUNTIME_DIR" | "USER" | "TMPDIR")
+                )
             }))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -620,8 +623,11 @@ async fn reap_container(runtime: &Path, name: &str) -> Result<(), ExecutionError
                 "PATH",
                 "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
             )
-            .envs(std::env::vars().filter(|(key, _)| {
-                matches!(key.as_str(), "HOME" | "XDG_RUNTIME_DIR" | "USER" | "TMPDIR")
+            .envs(std::env::vars_os().filter(|(key, _)| {
+                matches!(
+                    key.to_str(),
+                    Some("HOME" | "XDG_RUNTIME_DIR" | "USER" | "TMPDIR")
+                )
             }))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
