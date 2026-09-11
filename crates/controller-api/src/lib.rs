@@ -4948,13 +4948,19 @@ fn stage_required_capabilities(stage: &mcloving_pipeline_ir::Stage) -> Vec<Strin
         .steps
         .iter()
         .any(|step| matches!(step, Step::Checkout(_)));
-    if stage.steps.len() > 1 || stage.image.is_some() || has_checkout {
+    let has_artifacts = !stage.artifacts.is_empty();
+    if stage.steps.len() > 1 || stage.image.is_some() || has_checkout || has_artifacts {
         required.push(mcloving_domain::multi_step::MULTI_STEP_CAPABILITY.to_owned());
     }
     // A container stage also needs an agent whose pinned podman answered at
     // session open (PAR-011).
     if stage.image.is_some() {
         required.push(mcloving_domain::container::CONTAINER_CAPABILITY.to_owned());
+    }
+    // Declared artifacts need an agent that collects and uploads them
+    // (PAR-014); an older agent would run the steps and strand the files.
+    if has_artifacts {
+        required.push(mcloving_domain::artifacts::ARTIFACT_UPLOAD_CAPABILITY.to_owned());
     }
     for step in &stage.steps {
         if let Step::CacheIntent(cache) = step {
@@ -5004,10 +5010,14 @@ fn stage_required_capabilities(stage: &mcloving_pipeline_ir::Stage) -> Vec<Strin
 }
 
 fn execution_spec(stage: &mcloving_pipeline_ir::Stage) -> Value {
-    execution_spec_parts(&stage.steps, stage.image.as_deref())
+    execution_spec_parts(&stage.steps, stage.image.as_deref(), &stage.artifacts)
 }
 
-pub(crate) fn execution_spec_parts(steps: &[Step], image: Option<&str>) -> Value {
+pub(crate) fn execution_spec_parts(
+    steps: &[Step],
+    image: Option<&str>,
+    artifacts: &[mcloving_domain::artifacts::ArtifactSpec],
+) -> Value {
     let contains_input_intent = steps
         .iter()
         .any(|step| matches!(step, Step::InputIntent(_)));
@@ -5072,18 +5082,24 @@ pub(crate) fn execution_spec_parts(steps: &[Step], image: Option<&str>) -> Value
         3
     } else if contains_connector_intent {
         2
-    } else if steps.len() > 1 || image.is_some() || contains_checkout {
+    } else if steps.len() > 1 || image.is_some() || contains_checkout || !artifacts.is_empty() {
         // A container stage rides the version-5 envelope even with one step:
         // the image is a stage-level property the single-step shape never had.
         // So does a checkout stage: the step kind did not exist in version 1.
+        // So does a stage with declared artifacts (PAR-014).
         5
     } else {
         1
     };
-    match image {
-        Some(image) => json!({"version": version, "steps": steps, "image": image}),
-        None => json!({"version": version, "steps": steps}),
+    let mut envelope = json!({"version": version, "steps": steps});
+    if let Some(image) = image {
+        envelope["image"] = json!(image);
     }
+    if !artifacts.is_empty() {
+        envelope["artifacts"] =
+            serde_json::to_value(artifacts).expect("artifact declarations are serializable");
+    }
+    envelope
 }
 
 fn json_field_type_name(kind: mcloving_pipeline_ir::JsonFieldType) -> &'static str {
@@ -5147,6 +5163,22 @@ fn validate_execution_platform(pipeline: &PipelineIr, platform: &str) -> Result<
                 ),
             ));
         }
+        // The shipped Windows agent has no artifact collector and never
+        // advertises `artifact-upload-v1` (PAR-014).
+        if let Some(stage) = pipeline
+            .stages
+            .iter()
+            .find(|stage| !stage.artifacts.is_empty())
+        {
+            return Err(ApiError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "unsupported_execution_spec",
+                format!(
+                    "stage {} declares artifacts; artifact collection runs on platform linux only",
+                    stage.id
+                ),
+            ));
+        }
         return Ok(());
     }
     let windows_mode = pipeline
@@ -5190,6 +5222,16 @@ fn validate_execution_support(pipeline: &PipelineIr) -> Result<(), ApiError> {
             .steps
             .iter()
             .all(|step| matches!(step, Step::Process(_) | Step::Checkout(_)));
+        if !stage.artifacts.is_empty() && !all_process_or_checkout {
+            return Err(ApiError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "unsupported_execution",
+                format!(
+                    "stage {} declares artifacts, which only a stage of process and checkout steps collects",
+                    stage.id
+                ),
+            ));
+        }
         if stage.steps.len() != 1 && !all_process_or_checkout {
             return Err(ApiError::new(
                 StatusCode::UNPROCESSABLE_ENTITY,
@@ -8699,6 +8741,61 @@ stages:
     }
 
     #[test]
+    fn execution_spec_declares_artifacts_under_the_version_five_envelope() {
+        let pipeline = compile_source_with_parameters(
+            r#"
+version: 1
+name: artifacts
+stages:
+  - id: execute
+    name: Execute
+    steps:
+      - process:
+          program: /bin/true
+    artifacts:
+      - name: target-logs
+        paths: ["target/**/*.log"]
+"#,
+            BTreeMap::new(),
+        )
+        .expect("compile a stage with declared artifacts");
+        let spec = execution_spec(&pipeline.stages[0]);
+        assert_eq!(spec["version"], 5);
+        assert_eq!(spec["artifacts"][0]["name"], "target-logs");
+        assert_eq!(spec["artifacts"][0]["paths"][0], "target/**/*.log");
+        let required = stage_required_capabilities(&pipeline.stages[0]);
+        assert!(
+            required
+                .iter()
+                .any(|capability| capability == "multi-step-v1")
+        );
+        assert!(
+            required
+                .iter()
+                .any(|capability| capability == "artifact-upload-v1")
+        );
+        // A stage without declarations keeps the version-1 shape and no
+        // artifact field, so deployed agents see exactly what they did.
+        let plain = compile_source_with_parameters(
+            r#"
+version: 1
+name: plain
+stages:
+  - id: execute
+    name: Execute
+    steps:
+      - process:
+          program: /bin/true
+"#,
+            BTreeMap::new(),
+        )
+        .expect("compile a plain stage");
+        let spec = execution_spec(&plain.stages[0]);
+        assert_eq!(spec["version"], 1);
+        assert!(spec.get("artifacts").is_none());
+    }
+
+    #[test]
     fn execution_spec_preserves_explicit_process_mode() {
         let pipeline = compile_source_with_parameters(
             r#"
@@ -8718,6 +8815,32 @@ stages:
         let spec = execution_spec(&pipeline.stages[0]);
         assert_eq!(spec["steps"][0]["mode"], "power_shell");
         assert_eq!(spec["steps"][0]["program"], "build.ps1");
+    }
+
+    #[test]
+    fn artifact_stages_are_refused_for_windows_admission() {
+        let pipeline = compile_source_with_parameters(
+            r#"
+version: 1
+name: artifacts
+stages:
+  - id: execute
+    name: Execute
+    steps:
+      - process:
+          program: build.cmd
+    artifacts:
+      - name: outputs
+        paths: ["out/*"]
+"#,
+            BTreeMap::new(),
+        )
+        .expect("compile a stage with declared artifacts");
+        let error = validate_execution_platform(&pipeline, "windows")
+            .expect_err("a Windows submission has no collector to route to");
+        assert_eq!(error.code, "unsupported_execution_spec");
+        assert!(error.message.contains("artifact"), "{}", error.message);
+        validate_execution_platform(&pipeline, "linux").expect("linux runs the collector");
     }
 
     #[test]

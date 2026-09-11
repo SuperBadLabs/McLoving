@@ -8,6 +8,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+#[cfg(unix)]
+mod artifacts;
 pub mod cache;
 mod container;
 pub mod input;
@@ -177,6 +179,9 @@ pub struct SessionFeatures {
     /// stream after its step, as before. Unix only: the tail reads the
     /// executor's spool files by their live path.
     pub live_log_stream: bool,
+    /// The controller accepts the artifact upload stream (PAR-014). Unix
+    /// only: the collector walks the workspace descriptor-relative.
+    pub artifact_upload: bool,
 }
 
 impl SessionFeatures {
@@ -203,6 +208,10 @@ impl SessionFeatures {
                 && features
                     .iter()
                     .any(|feature| feature == mcloving_domain::live_logs::LIVE_LOG_STREAM_FEATURE),
+            artifact_upload: cfg!(unix)
+                && features
+                    .iter()
+                    .any(|feature| feature == mcloving_domain::artifacts::ARTIFACT_UPLOAD_FEATURE),
         }
     }
 }
@@ -620,6 +629,7 @@ async fn open_session(
                     INLINE_TERMINAL_LOGS_FEATURE.to_owned(),
                     mcloving_domain::multi_step::MULTI_STEP_EXECUTION_FEATURE.to_owned(),
                     mcloving_domain::live_logs::LIVE_LOG_STREAM_FEATURE.to_owned(),
+                    mcloving_domain::artifacts::ARTIFACT_UPLOAD_FEATURE.to_owned(),
                 ]),
             }),
             trust_pool: config.trust_pool.clone(),
@@ -1465,6 +1475,8 @@ fn session_capabilities() -> Vec<String> {
     // advertised this would be offered work it must then refuse for good.
     if cfg!(unix) {
         capabilities.push(mcloving_domain::multi_step::MULTI_STEP_CAPABILITY.to_owned());
+        // The artifact collector is a descriptor-relative Unix walk (PAR-014).
+        capabilities.push(mcloving_domain::artifacts::ARTIFACT_UPLOAD_CAPABILITY.to_owned());
     }
     capabilities
 }

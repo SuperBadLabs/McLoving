@@ -106,6 +106,99 @@ impl StagedObject {
     }
 }
 
+/// A staging file receiving an artifact's bytes in order (PAR-014). The
+/// declared length was reserved against the quota at creation; `finish`
+/// yields the staged object only when exactly that many bytes arrived.
+#[derive(Debug)]
+pub struct StagingWriter {
+    staging: PathBuf,
+    path: PathBuf,
+    file: Option<File>,
+    declared: u64,
+    written: u64,
+    digest: Sha256,
+}
+
+impl StagingWriter {
+    /// Appends the next bytes; more than the declared length is refused.
+    pub fn write(&mut self, chunk: &[u8]) -> Result<(), ObjectStoreError> {
+        let length =
+            u64::try_from(chunk.len()).map_err(|_| ObjectStoreError::ObjectQuotaExceeded)?;
+        if self
+            .written
+            .checked_add(length)
+            .ok_or(ObjectStoreError::CorruptStagedObject)?
+            > self.declared
+        {
+            return Err(ObjectStoreError::CorruptStagedObject);
+        }
+        let file = self
+            .file
+            .as_mut()
+            .ok_or(ObjectStoreError::ForeignStagingPath)?;
+        file.write_all(chunk)?;
+        self.digest.update(chunk);
+        self.written += length;
+        Ok(())
+    }
+
+    /// The bytes received so far.
+    #[must_use]
+    pub fn written(&self) -> u64 {
+        self.written
+    }
+
+    /// Makes the received bytes durable and returns the staged object; a
+    /// short upload is refused and the reservation released.
+    pub fn finish(mut self) -> Result<StagedObject, ObjectStoreError> {
+        if self.written != self.declared {
+            self.discard();
+            return Err(ObjectStoreError::CorruptStagedObject);
+        }
+        let file = self
+            .file
+            .take()
+            .ok_or(ObjectStoreError::ForeignStagingPath)?;
+        let result = (|| -> Result<(), ObjectStoreError> {
+            file.sync_all()?;
+            sync_directory(&self.staging)?;
+            Ok(())
+        })();
+        drop(file);
+        if let Err(error) = result {
+            self.discard();
+            return Err(error);
+        }
+        let reference = ObjectRef {
+            sha256: std::mem::take(&mut self.digest).finalize().into(),
+            bytes: self.declared,
+        };
+        let path = std::mem::take(&mut self.path);
+        Ok(StagedObject {
+            path,
+            reference,
+            active: true,
+            preserve_on_drop: false,
+        })
+    }
+
+    fn discard(&mut self) {
+        self.file = None;
+        if self.path.as_os_str().is_empty() {
+            return;
+        }
+        let _ = fs::remove_file(&self.path);
+        let _ = sync_directory(&self.staging);
+        self.path = PathBuf::new();
+    }
+}
+
+impl Drop for StagingWriter {
+    fn drop(&mut self) {
+        self.discard();
+    }
+}
+
 impl Drop for StagedObject {
     fn drop(&mut self) {
         if self.active && !self.preserve_on_drop {
@@ -209,6 +302,58 @@ impl FilesystemObjectStore {
 
     pub fn quota(&self) -> Quota {
         self.quota
+    }
+
+    /// Reserves a staging file for an artifact whose bytes arrive in order
+    /// over a stream (PAR-014). The declared length is admitted against the
+    /// quota now and reserved on disk, so a concurrent stager cannot oversell
+    /// the total; the writer must deliver exactly that many bytes before the
+    /// object can be persisted, and a dropped writer releases the file.
+    pub fn begin_artifact(
+        &self,
+        namespace: &str,
+        declared_bytes: u64,
+    ) -> Result<StagingWriter, ObjectStoreError> {
+        validate_namespace(namespace)?;
+        if declared_bytes > self.quota.max_object_bytes {
+            return Err(ObjectStoreError::ObjectQuotaExceeded);
+        }
+        let quota_lock = self.lock_quota()?;
+        if staged_object_count(&self.staging)? >= self.quota.max_staged_objects {
+            return Err(ObjectStoreError::StagedObjectQuotaExceeded);
+        }
+        let used = committed_bytes(&self.objects)?
+            .checked_add(staged_bytes(&self.staging)?)
+            .ok_or(ObjectStoreError::TotalQuotaExceeded)?;
+        if used
+            .checked_add(declared_bytes)
+            .ok_or(ObjectStoreError::TotalQuotaExceeded)?
+            > self.quota.max_total_bytes
+        {
+            return Err(ObjectStoreError::TotalQuotaExceeded);
+        }
+        let (path, file) = create_staging_file(&self.staging, namespace, &STAGE_SEQUENCE)?;
+        let mut writer = StagingWriter {
+            staging: self.staging.clone(),
+            path,
+            file: Some(file),
+            declared: declared_bytes,
+            written: 0,
+            digest: Sha256::new(),
+        };
+        // The reservation is the file's length: every quota walk counts it
+        // from now on, before a byte has arrived.
+        if let Err(error) = writer
+            .file
+            .as_ref()
+            .expect("fresh staging writer holds its file")
+            .set_len(declared_bytes)
+        {
+            writer.discard();
+            return Err(error.into());
+        }
+        drop(quota_lock);
+        Ok(writer)
     }
 
     /// Stages binary bytes without transformation.
@@ -1175,6 +1320,49 @@ mod tests {
             store.stage_artifact("tenant-a", b"567"),
             Err(ObjectStoreError::TotalQuotaExceeded)
         ));
+    }
+
+    #[test]
+    fn a_streamed_artifact_reserves_its_length_and_must_arrive_whole() {
+        let root = tempfile::tempdir().unwrap();
+        let store = store(root.path(), 8, 12);
+        assert!(matches!(
+            store.begin_artifact("tenant-a", 9),
+            Err(ObjectStoreError::ObjectQuotaExceeded)
+        ));
+        let mut writer = store.begin_artifact("tenant-a", 8).unwrap();
+        // The reservation counts before a byte arrives.
+        assert!(matches!(
+            store.stage_artifact("tenant-a", b"12345"),
+            Err(ObjectStoreError::TotalQuotaExceeded)
+        ));
+        writer.write(b"1234").unwrap();
+        assert!(matches!(
+            writer.write(b"56789"),
+            Err(ObjectStoreError::CorruptStagedObject)
+        ));
+        writer.write(b"5678").unwrap();
+        assert_eq!(writer.written(), 8);
+        let staged = writer.finish().unwrap();
+        assert_eq!(staged.object_ref().bytes, 8);
+        assert_eq!(
+            staged.object_ref().sha256,
+            <[u8; 32]>::from(Sha256::digest(b"12345678"))
+        );
+        let committed = store.commit(staged).unwrap();
+        assert_eq!(committed.bytes, 8);
+        // A short upload is refused and releases its reservation.
+        let mut short = store.begin_artifact("tenant-a", 4).unwrap();
+        short.write(b"12").unwrap();
+        assert!(matches!(
+            short.finish(),
+            Err(ObjectStoreError::CorruptStagedObject)
+        ));
+        assert_eq!(staged_bytes(&store.staging).unwrap(), 0);
+        // A dropped writer releases its reservation too.
+        let dropped = store.begin_artifact("tenant-a", 4).unwrap();
+        drop(dropped);
+        assert_eq!(staged_bytes(&store.staging).unwrap(), 0);
     }
 
     #[test]

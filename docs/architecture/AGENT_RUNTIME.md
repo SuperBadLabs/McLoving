@@ -403,6 +403,85 @@ discharge a parked reconciliation).
   attempt cancelling for the next session rather than completing and
   reclaiming the spool, and a lease definitively lost meanwhile retires the
   attempt with the chunks already accepted exactly once.
+- Declared artifacts (PAR-014). A stage may declare up to sixteen named
+  artifacts, each up to thirty-two workspace-relative path patterns
+  (`/`-separated segments; `**` alone matches any depth, `*` and `?` match
+  within a segment; never absolute, never `.` or `..`). After the steps of an
+  attempt that was not cancelled, and before its terminal is made durable,
+  the agent collects the matching regular files by a descriptor-relative
+  walk: the agent-owned workspace root is resolved from the filesystem root
+  one component at a time without following a link in any of them, the
+  attempt workspace is reached from it one component at a time
+  `O_DIRECTORY|O_NOFOLLOW` (a link in its place, a step having swapped its
+  workspace, is refused by name), every directory below is opened the same
+  way and re-identified against the entry it was reached by, every matching
+  file is opened `O_NOFOLLOW` and re-identified the same way, the agent's
+  own `spool/` is never visited, a directory is entered only when some
+  pattern can match below it, an entry whose name is not UTF-8 is refused
+  when a declaration would collect or enter it and skipped otherwise, a
+  matching path holding a control character is refused by name before any
+  upload, and
+  the walk is bounded (depth 32, 65 536 entries, 1 024 objects, 256 MiB).
+  Pattern matching is a table over pattern and path segments, so a pattern
+  of many `**` segments costs their product. A link that a declaration
+  would collect or descend into refuses the whole set by name
+  (`artifact_refused:link:<path>`), as does a matching entry that is not a
+  regular file, an entry the walk cannot stat, open or read (a step that
+  left its file mode 000 gets `artifact_refused:unreadable:<path>:<cause>`,
+  not a broken session), a name that would exceed the store's 512-byte
+  object name, or a bound; a refusal fails an attempt whose steps succeeded and is its
+  recorded reason, and nothing of a refused set is uploaded. Each collected
+  file is one object per declaration that matches it (declarations may
+  overlap), named `<artifact name>/<workspace path>`, read at most to the
+  length identified at open (a file still growing under a writer the step
+  left behind is a changed length, never an unbounded read), streamed over the session's
+  mTLS channel as an `UploadArtifact` client stream (a header carrying the
+  work authority, name, length and SHA-256, then one-MiB data frames) under
+  the attempt's live lease, with the upload budget both sides share
+  (thirty seconds plus one second per MiB, at most fifteen minutes, not the
+  lease-sized RPC budget) and ended by a lost lease, a stop, or the
+  attempt's cancellation (a cancellation that lands after the last step
+  collects nothing more and is recorded as `artifact_collection_cancelled`,
+  so a succeeded step outcome the controller lets stand is never reported
+  with its declared artifacts absent); a file that runs short or grows
+  under the streaming read (its last frame is held back until a probe shows
+  no growth, so the server registers nothing) is the same `changed_length`
+  refusal as one that changes under the digest read, and one rewritten in place between the passes, which the controller
+  refuses for its digest, is the `changed_content` refusal; the controller stages it into the same object store the public
+  upload routes use, with the declared length reserved against the store
+  quota before the first byte, charges the declared length against the
+  attempt's quota in an in-process ledger of streams still in flight before
+  staging, bytes and objects both (so concurrent streams for one attempt
+  cannot each pass the committed figures and together reserve the store or
+  its staging slots; an exact retry of an object the attempt already holds
+  is answered from the ledger without receiving a byte when the object is
+  available, and charged once, not twice, while it is pending), and bounds the header and the whole
+  receive phase by the declared length (thirty seconds for the header,
+  thirty seconds plus one second per MiB for the data, at most fifteen
+  minutes; a stalled stream releases its reservation), registers it through
+  the same
+  `register_artifact` predicate (lease owner, fence, restore epoch, build
+  and node) fenced by the agent's current session epoch inside the same
+  transaction, under an attempt-scoped artifact lock shared by every name
+  and then the per-name lock, refuses the registration when the attempt's
+  artifacts would pass 256 MiB or 1 024 objects, and commits it into the
+  immutable digest namespace. A Windows submission of a stage that declares
+  artifacts is refused at admission like a multi-step or container stage,
+  since no Windows agent collects. The stream is accepted only for a session
+  that negotiated `artifact-upload-v1`; the agent advertises the
+  `artifact-upload-v1` capability on Unix, the controller keeps it for
+  scheduling only when the feature was negotiated, and a node whose stage
+  declares artifacts requires it, so an older agent or a session with an
+  older peer is never offered such a node; an artifact node that reaches a
+  session without the feature anyway (a mixed rollout) is declined back to
+  the queue before a step runs, as a multi-step node is. A file whose
+  length changes under the digest read, and a workspace the step made
+  unreadable before exiting, are named refusals (`changed_length`,
+  `unreadable:<workspace>/...`) recorded as the attempt's reason. A crash between the steps and
+  the terminal leaves the objects already committed registered under the
+  attempt and reports the attempt interrupted as before; recovery does not
+  resume uploads. A Windows agent advertises no collector and a stage that
+  declares artifacts is not routed to it.
 - Once the controller acknowledges terminal truth and the local terminal
   transition commits, both remote and embedded workers remove the attempt
   workspace through the same no-follow cleanup, delete controller-owned log

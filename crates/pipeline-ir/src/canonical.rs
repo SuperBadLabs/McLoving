@@ -135,6 +135,16 @@ pub(crate) fn encode_pipeline(pipeline: &PipelineIr) -> Vec<u8> {
                 }
             }
         }
+        if pipeline.schema.minor >= 8 {
+            writer.u32(stage.artifacts.len());
+            for artifact in &stage.artifacts {
+                writer.string(&artifact.name);
+                writer.u32(artifact.paths.len());
+                for pattern in &artifact.paths {
+                    writer.string(pattern);
+                }
+            }
+        }
     }
     writer.bytes
 }
@@ -309,7 +319,7 @@ pub fn validate_canonical_bytes(bytes: &[u8]) -> Result<CanonicalSummary, Canoni
         major: reader.u16()?,
         minor: reader.u16()?,
     };
-    if schema.major != 1 || schema.minor > 7 {
+    if schema.major != 1 || schema.minor > 8 {
         return Err(CanonicalError::new(
             reader.offset.saturating_sub(4),
             "unsupported Pipeline IR schema",
@@ -675,6 +685,24 @@ pub fn validate_canonical_bytes(bytes: &[u8]) -> Result<CanonicalSummary, Canoni
                     ));
                 }
             }
+        }
+        if schema.minor >= 8 {
+            use mcloving_domain::artifacts::{
+                ArtifactSpec, MAX_ARTIFACT_PATTERNS, MAX_ARTIFACTS_PER_STAGE, validate_declarations,
+            };
+            let declared = reader.count(MAX_ARTIFACTS_PER_STAGE, "artifact")?;
+            let mut specs = Vec::with_capacity(declared);
+            for _ in 0..declared {
+                let name = reader.string()?;
+                let patterns = reader.count(MAX_ARTIFACT_PATTERNS, "artifact path pattern")?;
+                let mut paths = Vec::with_capacity(patterns);
+                for _ in 0..patterns {
+                    paths.push(reader.string()?);
+                }
+                specs.push(ArtifactSpec { name, paths });
+            }
+            validate_declarations(&specs)
+                .map_err(|error| CanonicalError::new(reader.offset, error.to_string()))?;
         }
     }
     for (path, expression) in expression_bindings {

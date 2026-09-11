@@ -51,3 +51,7 @@ pub const IR_V1_6: SchemaVersion = SchemaVersion { major: 1, minor: 6 };
 
 /// Checkout steps through the sealed source acquirer (PAR-012).
 pub const IR_V1_7: SchemaVersion = SchemaVersion { major: 1, minor: 7 };
+
+/// Declared artifacts: a stage may name bounded workspace path patterns whose
+/// matching files the agent uploads after its steps (PAR-014).
+pub const IR_V1_8: SchemaVersion = SchemaVersion { major: 1, minor: 8 };

@@ -606,6 +606,7 @@ had never claimed one.
 | PAR-011 | `docs/evidence/PAR-011_SECURITY_REVIEW.md` |
 | PAR-012 | `docs/evidence/PAR-012_SECURITY_REVIEW.md` |
 | PAR-001 | `docs/evidence/PAR-001_SECURITY_REVIEW.md` |
+| PAR-013 | `docs/evidence/PAR-013_SECURITY_REVIEW.md` |
 | EXEC-005 | `docs/evidence/EXEC-005_SECURITY_REVIEW.md` |
 
 ## Residual-risk policy
@@ -885,7 +886,7 @@ the podman store identity is not yet pinned into launch and reap, implicit
 configuration, and `#`-prefixed environment names are not yet refused for
 container stages; plain process steps remain uncontained (`SEC-005`).
 
-## PAR-013 live log streaming review, ticket ACTIVE
+## PAR-013 live log streaming review (earned closure)
 
 A step's output reaches the controller while the step runs and a reader
 follows it by one global cursor. Boundaries touched: TM-003 (agent runtime:
@@ -945,9 +946,119 @@ coverage, stale authority, retirement, schema migration), the store follow
 read and both chunk bounds, and two shipped-binary gates: the first line
 visible while the step runs with the paged read agreeing with the follow,
 and a crash after the first acknowledged terminal chunk replayed under the
-journaled sequences with every chunk exactly once. Closure requires the
+journaled sequences with every chunk exactly once. Closed on PR #149
+(`0e2cf213`), exact-main Foundation `34636714250` and Windows Agent `34636714092`; receipt
+`docs/evidence/PAR-013_SECURITY_REVIEW.md`. The review added, before the
+merge, build-scoped follow positions stored at commit under the per-build
+lock with an ADR 0012 compatibility trigger for a pre-v39 writer, the
+executor's retention floors shared with the tail, recovery of an
+interrupted step's spool with access restored, the quota cut applied and
+an emptied stream with a reservation outstanding refused rather than
+dropped, the attempt's live log mode journaled (schema 7) so a session
+with an older peer defers its replay, and the follower writing exact bytes.
+Residuals carried as tickets: a spool the workload unlinks, renames,
+truncates or overwrites under a reservation strands or pins that sequence
+until reserved chunks are kept in agent custody (`AGENT-011`); the byte
+quota's per-append sum over prior chunks is cost, not exposure
+(`CTRL-005`).
+
+## PAR-014 artifact upload review, ticket ACTIVE
+
+A stage declares the files it publishes and the agent uploads them after its
+steps over its own channel. Boundaries touched: TM-003 (agent runtime: the
+upload stream rides the existing session-bound, fenced work authority with
+the same lease, fence and restore-epoch checks as log publication and the
+session epoch re-checked inside the registration and availability
+transactions themselves, so a session superseded during a long stream cannot
+register after its replacement,
+is accepted only for a session that negotiated `artifact-upload-v1`, and
+the scheduling capability is kept only for such a session, so an older
+agent or peer is never offered a stage that declares artifacts, an artifact
+node that reaches a session without the feature in a mixed rollout is
+declined before a step runs, and never
+strands its files); TM-013 (credential and host exposure: the collector
+resolves the agent-owned workspace root from the filesystem root one
+component at a time without following a link in any of them, so a writable
+ancestor swapped for a link cannot redirect the walk, reaches the attempt
+workspace from it one component at a time `O_NOFOLLOW`
+so a step that swaps its workspace for a link is refused by name rather
+than followed, opens every directory and file below `O_NOFOLLOW` and
+re-identifies each against the entry it was reached by, never visits the
+agent's own spool, enters a directory only when a pattern can match below
+it, refuses an entry whose name is not UTF-8 when a declaration would
+collect or enter it rather than naming an object by a lossy spelling,
+refuses a matching path holding a control character by name before any
+upload rather than letting the controller's refusal end the session, and
+refuses the whole set by name when a link stands where a declaration would
+collect or descend, so a step that plants a link to a service-account file
+gets a named refusal and no upload; a Windows agent has no collector and is not
+routed such work); TM-006 (durable evidence: the controller stages each
+object into the same content-addressed store the public upload routes use,
+with the declared length and the object itself charged against the
+attempt's byte and object quotas in an in-process ledger of streams in
+flight and then reserved against the store quota before the first byte (an exact retry of an available object is
+answered without receiving a byte, so retries cannot stage; a pending one is
+charged once), the header and the receive phase bounded so a
+stream opened and never written or stalled mid-way releases the reservation,
+and a short or mismatching upload discarded, registers it through the
+same fenced `register_artifact` predicate under an attempt-scoped
+artifact lock shared by every name (so concurrent uploads cannot each fit
+the quota and together exceed it) and then the per-name lock, and commits
+it into the immutable digest namespace, so an artifact is either registered
+with its digest and length or absent); TM-018 (capacity: sixteen
+declarations of thirty-two patterns per stage, pattern matching a table
+over pattern and path segments so a pattern of many `**` segments costs
+their product rather than a combinatorial search, a walk bounded at depth
+32 and 65 536 entries, at most 1 024 objects and 256 MiB per attempt
+counted by the agent before the first upload and both enforced by the store
+at every registration under the attempt-scoped lock, so a custom peer
+cannot register unbounded rows under one lease, the agent's reads bounded by the length identified at open so a writer the
+step left behind cannot keep it reading, one-MiB frames, the upload budget both
+sides share (thirty seconds plus one second per MiB, bounded at fifteen
+minutes) under a lease the agent keeps renewing, and the attempt's
+cancellation ending collection and any upload in flight);
+TM-052 (API: no new public route; the existing authorized artifact listing
+and download routes serve the objects). Residual: an attempt's own steps
+choose the bytes, as before; a crash between the steps and the durable
+terminal leaves the objects already committed registered under the
+interrupted attempt and recovery does not resume the rest, so a partial
+set is visible with the attempt reported interrupted; artifacts of a
+failed step are collected like a succeeded step's, since a failing build's
+logs are what a reader wants. Tests cover the pattern dialect and
+declaration bounds, the canonical encoding and version gate, the execution
+envelope and required capabilities, the collector's refusals by name (a
+link the declarations would collect or enter, a non-regular entry, an
+object name past the bound), and two shipped-binary gates: a step's files
+listed under the declared name and downloaded with a matching digest, and
+a planted link refusing the set with nothing uploaded. Residual: the
+in-flight ledger is per controller process, so replicas of an HA deployment
+each admit streams against the committed figure alone until registration,
+where the quota is authoritative; the walk's aggregate matching work is
+bounded per pattern-and-path pair but not across the walk, a zero-length
+file is not probed for growth before its header-only stream closes, the
+collector holds every collected file open at once so a set near the object
+bound needs a descriptor limit above the default 1 024, the controller
+finalizes a staging writer (its fsync) on a runtime worker thread, a set
+is published one object at a time, so a file that changes under a later
+upload fails the attempt by name with the earlier objects of the set already
+visible rather than none, the digest pass does not check cancellation
+between reads, so a cancellation that lands while a large file is hashed on
+a slow filesystem takes effect only after the read, the client's upload
+deadline equals the server's receive budget with no headroom for the commit,
+the streaming reader's join is unbounded on a stalled read, the controller
+writes each frame on a runtime worker, an upload's in-flight ledger
+charge overlaps its registered row until the stream ends, so two uploads
+that exactly fill the quota can see the second refused, and a file larger
+than the controller's per-object limit (64 MiB by default, below the 256 MiB
+attempt quota) is refused by the controller with an answer the agent treats
+as a session error rather than a named refusal, and an exact retry of a
+`pending` object stages a second full copy rather than resuming the first,
+so near the store's total quota such a retry cannot recover the pending
+metadata (`AGENT-012`); the sequential planner, which no pipeline with declarations reaches today,
+would plan such a stage with its declarations dropped rather than refuse it
+(`CTRL-006`). Closure requires the
 reviewed merge, exact-main Foundation and native Windows runs, and a
-receipt in `docs/evidence/PAR-013_SECURITY_REVIEW.md`.
+receipt in `docs/evidence/PAR-014_SECURITY_REVIEW.md`.
 
 ## PAR-001 GitHub webhook receiver review (earned closure)
 

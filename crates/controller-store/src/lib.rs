@@ -5205,6 +5205,155 @@ impl Store {
     }
 
     /// Reserves one immutable artifact identity before object publication.
+    /// The build and node an attempt belongs to, for a registration made
+    /// under the attempt's own work authority rather than a build route.
+    pub async fn attempt_scope(
+        &self,
+        organization_id: Uuid,
+        attempt_id: Uuid,
+        fence: i64,
+    ) -> Result<Option<(Uuid, Uuid)>, StoreError> {
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        let scope = sqlx::query_as::<_, (Uuid, Uuid)>(
+            "SELECT n.build_id, n.id
+             FROM attempts AS a
+             JOIN nodes AS n
+               ON n.id = a.node_id AND n.organization_id = a.organization_id
+             WHERE a.organization_id = $1
+               AND a.id = $2
+               AND a.fence = $3",
+        )
+        .bind(organization_id)
+        .bind(attempt_id)
+        .bind(fence)
+        .fetch_optional(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(scope)
+    }
+
+    /// Bytes of every artifact registered under an attempt and fence, the
+    /// figure the per-attempt artifact quota is enforced against.
+    pub async fn attempt_artifact_bytes(
+        &self,
+        organization_id: Uuid,
+        attempt_id: Uuid,
+        fence: i64,
+    ) -> Result<i64, StoreError> {
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        let used = artifact_bytes_used(&mut tx, organization_id, attempt_id, fence).await?;
+        tx.commit().await?;
+        Ok(used)
+    }
+
+    /// Artifact objects registered under an attempt and fence, the figure
+    /// the per-attempt object-count quota is enforced against.
+    pub async fn attempt_artifact_count(
+        &self,
+        organization_id: Uuid,
+        attempt_id: Uuid,
+        fence: i64,
+    ) -> Result<i64, StoreError> {
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        let count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)
+             FROM attempt_objects
+             WHERE organization_id = $1
+               AND attempt_id = $2
+               AND fence = $3
+               AND kind = 'artifact'",
+        )
+        .bind(organization_id)
+        .bind(attempt_id)
+        .bind(fence)
+        .fetch_one(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(count)
+    }
+
+    /// The status (`pending` or `available`) under which exactly this
+    /// artifact (name, digest, length and media type) is already registered for the
+    /// attempt and fence, if it is: a retry of an upload whose receipt was
+    /// lost. An available object needs no bytes at all; a pending one is
+    /// already counted in the attempt's byte figure.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn artifact_registration_status(
+        &self,
+        organization_id: Uuid,
+        attempt_id: Uuid,
+        fence: i64,
+        name: &str,
+        digest: [u8; 32],
+        bytes: i64,
+        media_type: &str,
+    ) -> Result<Option<String>, StoreError> {
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        let registered = sqlx::query_scalar::<_, String>(
+            "SELECT status
+             FROM attempt_objects
+             WHERE organization_id = $1
+               AND attempt_id = $2
+               AND fence = $3
+               AND kind = 'artifact'
+               AND name = $4
+               AND object_digest = $5
+               AND bytes = $6
+               AND media_type = $7
+               AND status IN ('pending', 'available')",
+        )
+        .bind(organization_id)
+        .bind(attempt_id)
+        .bind(fence)
+        .bind(name)
+        .bind(digest.as_slice())
+        .bind(bytes)
+        .bind(media_type)
+        .fetch_optional(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(registered)
+    }
+
+    /// [`Self::register_artifact`] for an agent's own upload (PAR-014): the
+    /// registration is fenced by the agent's current session epoch inside
+    /// the same transaction, so a session superseded while a long stream was
+    /// in flight cannot register after its replacement.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn register_artifact_in_session(
+        &self,
+        organization_id: Uuid,
+        build_id: Uuid,
+        node_id: Uuid,
+        attempt_id: Uuid,
+        fence: i64,
+        restore_epoch: i64,
+        agent_id: &str,
+        name: &str,
+        digest: [u8; 32],
+        bytes: i64,
+        media_type: &str,
+        retention_seconds: i64,
+        session_epoch: u64,
+    ) -> Result<bool, StoreError> {
+        self.register_artifact_with_session(
+            organization_id,
+            build_id,
+            node_id,
+            attempt_id,
+            fence,
+            restore_epoch,
+            agent_id,
+            name,
+            digest,
+            bytes,
+            media_type,
+            retention_seconds,
+            Some(session_epoch),
+        )
+        .await
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn register_artifact(
         &self,
@@ -5221,6 +5370,41 @@ impl Store {
         media_type: &str,
         retention_seconds: i64,
     ) -> Result<bool, StoreError> {
+        self.register_artifact_with_session(
+            organization_id,
+            build_id,
+            node_id,
+            attempt_id,
+            fence,
+            restore_epoch,
+            agent_id,
+            name,
+            digest,
+            bytes,
+            media_type,
+            retention_seconds,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn register_artifact_with_session(
+        &self,
+        organization_id: Uuid,
+        build_id: Uuid,
+        node_id: Uuid,
+        attempt_id: Uuid,
+        fence: i64,
+        restore_epoch: i64,
+        agent_id: &str,
+        name: &str,
+        digest: [u8; 32],
+        bytes: i64,
+        media_type: &str,
+        retention_seconds: i64,
+        session_epoch: Option<u64>,
+    ) -> Result<bool, StoreError> {
         if name.is_empty()
             || name.len() > 512
             || name.chars().any(char::is_control)
@@ -5235,7 +5419,23 @@ impl Store {
         }
         let mut tx = self.tenant_transaction(organization_id).await?;
         acquire_restore_fence_shared(&mut tx).await?;
+        if let Some(session_epoch) = session_epoch
+            && !Self::lock_agent_session(&mut tx, agent_id, session_epoch).await?
+        {
+            tx.rollback().await?;
+            return Ok(false);
+        }
         acquire_object_deletion_fence(&mut tx, &digest).await?;
+        // The attempt-scoped lock first (PAR-014): every registration for the
+        // attempt, whatever its name, reads the quota and inserts under it,
+        // so two concurrent uploads cannot each fit and together exceed it.
+        // Then the per-name lock the availability transition also takes.
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(format!(
+                "mcloving.artifact.attempt.{organization_id}.{attempt_id}.{fence}"
+            ))
+            .execute(&mut *tx)
+            .await?;
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
             .bind(format!(
                 "mcloving.artifact.{organization_id}.{attempt_id}.{fence}.{name}"
@@ -5304,6 +5504,40 @@ impl Store {
             .await?;
             tx.commit().await?;
             return Ok(true);
+        }
+        // The per-attempt artifact quota (PAR-014), under the same lock every
+        // registration for this attempt takes, so concurrent uploads cannot
+        // each fit and together exceed it.
+        let used = artifact_bytes_used(&mut tx, organization_id, attempt_id, fence).await?;
+        if used.saturating_add(bytes)
+            > i64::try_from(mcloving_domain::artifacts::MAX_ATTEMPT_ARTIFACT_BYTES)
+                .unwrap_or(i64::MAX)
+        {
+            tx.rollback().await?;
+            return Ok(false);
+        }
+        // The object-count quota too, at the protocol boundary rather than
+        // only in the shipped collector, so an authenticated peer cannot
+        // register unbounded rows under one live lease.
+        let count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)
+             FROM attempt_objects
+             WHERE organization_id = $1
+               AND attempt_id = $2
+               AND fence = $3
+               AND kind = 'artifact'",
+        )
+        .bind(organization_id)
+        .bind(attempt_id)
+        .bind(fence)
+        .fetch_one(&mut *tx)
+        .await?;
+        if count
+            >= i64::try_from(mcloving_domain::artifacts::MAX_ARTIFACT_FILES_PER_ATTEMPT)
+                .unwrap_or(i64::MAX)
+        {
+            tx.rollback().await?;
+            return Ok(false);
         }
         let inserted = match sqlx::query_scalar::<_, String>(
             "INSERT INTO attempt_objects (
@@ -5445,6 +5679,41 @@ impl Store {
     }
 
     /// Marks an exact reserved artifact available only after bytes are published.
+    /// [`Self::mark_artifact_available`] for an agent's own upload
+    /// (PAR-014), fenced by the agent's current session epoch inside the
+    /// same transaction.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn mark_artifact_available_in_session(
+        &self,
+        organization_id: Uuid,
+        build_id: Uuid,
+        node_id: Uuid,
+        attempt_id: Uuid,
+        fence: i64,
+        name: &str,
+        digest: [u8; 32],
+        bytes: i64,
+        media_type: &str,
+        retention_seconds: i64,
+        agent_id: &str,
+        session_epoch: u64,
+    ) -> Result<bool, StoreError> {
+        self.mark_artifact_available_with_session(
+            organization_id,
+            build_id,
+            node_id,
+            attempt_id,
+            fence,
+            name,
+            digest,
+            bytes,
+            media_type,
+            retention_seconds,
+            Some((agent_id, session_epoch)),
+        )
+        .await
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn mark_artifact_available(
         &self,
@@ -5459,10 +5728,47 @@ impl Store {
         media_type: &str,
         retention_seconds: i64,
     ) -> Result<bool, StoreError> {
+        self.mark_artifact_available_with_session(
+            organization_id,
+            build_id,
+            node_id,
+            attempt_id,
+            fence,
+            name,
+            digest,
+            bytes,
+            media_type,
+            retention_seconds,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn mark_artifact_available_with_session(
+        &self,
+        organization_id: Uuid,
+        build_id: Uuid,
+        node_id: Uuid,
+        attempt_id: Uuid,
+        fence: i64,
+        name: &str,
+        digest: [u8; 32],
+        bytes: i64,
+        media_type: &str,
+        retention_seconds: i64,
+        session: Option<(&str, u64)>,
+    ) -> Result<bool, StoreError> {
         if !(0..=MAX_OBJECT_RETENTION_SECONDS).contains(&retention_seconds) {
             return Ok(false);
         }
         let mut tx = self.tenant_transaction(organization_id).await?;
+        if let Some((agent_id, session_epoch)) = session
+            && !Self::lock_agent_session(&mut tx, agent_id, session_epoch).await?
+        {
+            tx.rollback().await?;
+            return Ok(false);
+        }
         acquire_object_deletion_fence(&mut tx, &digest).await?;
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
             .bind(format!(
@@ -7359,6 +7665,27 @@ pub(crate) async fn acquire_restore_fence_shared(
         .execute(&mut **tx)
         .await?;
     Ok(())
+}
+
+async fn artifact_bytes_used(
+    tx: &mut sqlx::Transaction<'_, Postgres>,
+    organization_id: Uuid,
+    attempt_id: Uuid,
+    fence: i64,
+) -> Result<i64, StoreError> {
+    Ok(sqlx::query_scalar::<_, i64>(
+        "SELECT COALESCE(SUM(bytes), 0)::bigint
+         FROM attempt_objects
+         WHERE organization_id = $1
+           AND attempt_id = $2
+           AND fence = $3
+           AND kind = 'artifact'",
+    )
+    .bind(organization_id)
+    .bind(attempt_id)
+    .bind(fence)
+    .fetch_one(&mut **tx)
+    .await?)
 }
 
 async fn acquire_object_deletion_fence(

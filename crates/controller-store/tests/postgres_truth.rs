@@ -12380,6 +12380,169 @@ async fn product_catalogs_are_versioned_immutable_paginated_and_tenant_scoped() 
 /// inserts chunks with the old column list; the migration's compatibility
 /// trigger derives the build and the next position under the build lock, so
 /// the legacy chunk lands in the build's commit order rather than failing.
+/// PAR-014: every registration for an attempt counts against one byte quota
+/// under the per-attempt artifact lock, and an agent upload learns the
+/// attempt's build and node from the attempt alone.
+#[tokio::test]
+async fn an_attempts_artifacts_are_bounded_by_the_per_attempt_quota() {
+    let Some(store) = test_store().await else {
+        return;
+    };
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    store
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "project",
+        )
+        .await
+        .expect("create tenant");
+    let admission = store
+        .admit_test_build(&NewBuild {
+            organization_id,
+            project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
+            idempotency_key: "artifact-quota-work".into(),
+            pipeline_digest: [0x7f; 32],
+            node_key: "execute".into(),
+            required_capabilities: vec!["linux".into()],
+            required_trust_pool: "trusted".into(),
+            priority: 0,
+            execution_spec: json!({}),
+        })
+        .await
+        .expect("admit work");
+    let claim = store
+        .claim_next(&ClaimRequest {
+            organization_id,
+            scheduler_id: "artifact-quota".into(),
+            agent_id: "artifact-quota-agent".into(),
+            capabilities: vec!["linux".into()],
+            trust_pool: "trusted".into(),
+            lease_seconds: 60,
+            fairness_seed: 0,
+        })
+        .await
+        .expect("claim work")
+        .expect("work is ready");
+    assert!(
+        store
+            .accept_offer(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                "artifact-quota-agent",
+            )
+            .await
+            .expect("accept work")
+    );
+    assert_eq!(
+        store
+            .attempt_scope(organization_id, claim.attempt_id, claim.fence)
+            .await
+            .expect("read the attempt's scope"),
+        Some((admission.build_id, admission.node_id))
+    );
+    assert_eq!(
+        store
+            .attempt_scope(organization_id, Uuid::new_v4(), claim.fence)
+            .await
+            .expect("an unknown attempt has no scope"),
+        None
+    );
+    let quota =
+        i64::try_from(mcloving_domain::artifacts::MAX_ATTEMPT_ARTIFACT_BYTES).expect("fits");
+    let register = |name: &'static str, digest: u8, bytes: i64| {
+        store.register_artifact(
+            organization_id,
+            admission.build_id,
+            admission.node_id,
+            claim.attempt_id,
+            claim.fence,
+            claim.restore_epoch,
+            "artifact-quota-agent",
+            name,
+            [digest; 32],
+            bytes,
+            "application/octet-stream",
+            86_400,
+        )
+    };
+    assert!(
+        register("outputs/big.bin", 0x11, quota - 1)
+            .await
+            .expect("register within quota")
+    );
+    assert_eq!(
+        store
+            .attempt_artifact_bytes(organization_id, claim.attempt_id, claim.fence)
+            .await
+            .expect("sum the attempt's artifact bytes"),
+        quota - 1
+    );
+    assert!(
+        !register("outputs/over.bin", 0x22, 2)
+            .await
+            .expect("a registration past the quota is refused, not failed"),
+    );
+    // The same registration again is idempotent, not a second charge.
+    assert!(
+        register("outputs/big.bin", 0x11, quota - 1)
+            .await
+            .expect("re-register")
+    );
+    assert!(
+        register("outputs/last.bin", 0x33, 1)
+            .await
+            .expect("the last byte fits")
+    );
+    assert_eq!(
+        store
+            .attempt_artifact_bytes(organization_id, claim.attempt_id, claim.fence)
+            .await
+            .expect("sum again"),
+        quota
+    );
+    // The object-count quota holds at the store too: with rows up to the
+    // bound already registered (inserted directly, as a custom peer's
+    // registrations would have left them), the next is refused, and a
+    // re-registration of an existing one is still not a new row.
+    let files =
+        i64::try_from(mcloving_domain::artifacts::MAX_ARTIFACT_FILES_PER_ATTEMPT).expect("fits");
+    sqlx::query(
+        "INSERT INTO attempt_objects (
+             organization_id, attempt_id, fence, kind, name, object_digest, bytes,
+             media_type, status
+         )
+         SELECT $1, $2, $3, 'artifact', 'many/' || index::text,
+                sha256(convert_to(index::text, 'UTF8')), 0,
+                'application/octet-stream', 'available'
+         FROM generate_series(1, $4) AS index",
+    )
+    .bind(organization_id)
+    .bind(claim.attempt_id)
+    .bind(claim.fence)
+    .bind(files - 2)
+    .execute(store.pool())
+    .await
+    .expect("fill the attempt's artifact rows up to the bound");
+    assert!(
+        !register("many/one-too-many", 0x44, 0)
+            .await
+            .expect("a registration past the object count is refused, not failed")
+    );
+    assert!(
+        register("outputs/last.bin", 0x33, 1)
+            .await
+            .expect("an existing object re-registers")
+    );
+}
+
 #[tokio::test]
 async fn a_pre_v39_writer_still_commits_log_chunks_in_build_order() {
     let Some(store) = test_store().await else {
