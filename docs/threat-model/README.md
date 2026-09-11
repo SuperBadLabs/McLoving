@@ -606,6 +606,7 @@ had never claimed one.
 | PAR-011 | `docs/evidence/PAR-011_SECURITY_REVIEW.md` |
 | PAR-012 | `docs/evidence/PAR-012_SECURITY_REVIEW.md` |
 | PAR-001 | `docs/evidence/PAR-001_SECURITY_REVIEW.md` |
+| PAR-013 | `docs/evidence/PAR-013_SECURITY_REVIEW.md` |
 | EXEC-005 | `docs/evidence/EXEC-005_SECURITY_REVIEW.md` |
 
 ## Residual-risk policy
@@ -885,7 +886,7 @@ the podman store identity is not yet pinned into launch and reap, implicit
 configuration, and `#`-prefixed environment names are not yet refused for
 container stages; plain process steps remain uncontained (`SEC-005`).
 
-## PAR-013 live log streaming review, ticket ACTIVE
+## PAR-013 live log streaming review (earned closure)
 
 A step's output reaches the controller while the step runs and a reader
 follows it by one global cursor. Boundaries touched: TM-003 (agent runtime:
@@ -945,9 +946,21 @@ coverage, stale authority, retirement, schema migration), the store follow
 read and both chunk bounds, and two shipped-binary gates: the first line
 visible while the step runs with the paged read agreeing with the follow,
 and a crash after the first acknowledged terminal chunk replayed under the
-journaled sequences with every chunk exactly once. Closure requires the
-reviewed merge, exact-main Foundation and native Windows runs, and a
-receipt in `docs/evidence/PAR-013_SECURITY_REVIEW.md`.
+journaled sequences with every chunk exactly once. Closed on PR #149
+(`0e2cf213`), exact-main Foundation `34636714250` and Windows Agent `34636714092`; receipt
+`docs/evidence/PAR-013_SECURITY_REVIEW.md`. The review added, before the
+merge, build-scoped follow positions stored at commit under the per-build
+lock with an ADR 0012 compatibility trigger for a pre-v39 writer, the
+executor's retention floors shared with the tail, recovery of an
+interrupted step's spool with access restored, the quota cut applied and
+an emptied stream with a reservation outstanding refused rather than
+dropped, the attempt's live log mode journaled (schema 7) so a session
+with an older peer defers its replay, and the follower writing exact bytes.
+Residuals carried as tickets: a spool the workload unlinks, renames,
+truncates or overwrites under a reservation strands or pins that sequence
+until reserved chunks are kept in agent custody (`AGENT-011`); the byte
+quota's per-append sum over prior chunks is cost, not exposure
+(`CTRL-005`).
 
 ## PAR-001 GitHub webhook receiver review (earned closure)
 
