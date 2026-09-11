@@ -1100,6 +1100,12 @@ pub struct LogQuery {
     pub after_sequence: Option<i64>,
     pub after_stream: Option<String>,
     pub limit: Option<u32>,
+    /// Follow mode (PAR-013): chunks after this global cursor in commit
+    /// order; zero from the start. Exclusive with the attempt cursor.
+    pub after_cursor: Option<i64>,
+    /// Follow mode: how long to wait for chunks when none are committed
+    /// after the cursor and the build is still live, at most 30 000.
+    pub wait_ms: Option<u64>,
 }
 
 async fn openapi() -> Json<Value> {
@@ -1335,13 +1341,15 @@ fn openapi_document() -> Value {
             "/api/v1/organizations/{organization_id}/projects/{project_id}/builds/{build_id}/logs": {
                 "parameters": [organization.clone(), project.clone(), build.clone()],
                 "get": api_operation(
-                    "listBuildLogs", "evidence", "Read fenced log chunks", "200",
+                    "listBuildLogs", "evidence", "Read fenced log chunks, paged by attempt cursor or followed by global cursor with a bounded wait", "200",
                     vec![
                         query_parameter("after_attempt_id", "uuid"),
                         query_parameter("after_fence", "integer"),
                         query_parameter("after_sequence", "integer"),
                         query_parameter("after_stream", "string"),
-                        query_parameter("limit", "integer")
+                        query_parameter("limit", "integer"),
+                        query_parameter("after_cursor", "integer"),
+                        query_parameter("wait_ms", "integer")
                     ],
                     None
                 )
@@ -3286,6 +3294,10 @@ pub struct LogResponse {
     pub attempt_id: Uuid,
     pub fence: i64,
     pub sequence: i64,
+    /// Global commit order of the chunk; a follower resumes after the last
+    /// one it saw. Defaulted so an older client still decodes.
+    #[serde(default)]
+    pub cursor: i64,
     /// Which step of a multi-step stage wrote the chunk; zero for a
     /// single-step stage. Defaulted so an older client still decodes.
     #[serde(default)]
@@ -3308,6 +3320,13 @@ pub struct LogCursor {
 pub struct LogPage {
     pub items: Vec<LogResponse>,
     pub next_after: Option<LogCursor>,
+    /// Follow mode: the cursor to continue from (the last chunk's, or the
+    /// request's own when nothing was committed) and whether the build was
+    /// still live when the page was cut, so a follower knows when to stop.
+    #[serde(default)]
+    pub next_cursor: Option<i64>,
+    #[serde(default)]
+    pub live: Option<bool>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -6150,15 +6169,12 @@ async fn logs(
         Action::LogRead,
     )
     .await?;
-    if state
+    let snapshot = state
         .store
         .build_snapshot(organization_id, project_id, build_id)
         .await
         .map_err(internal)?
-        .is_none()
-    {
-        return Err(not_found());
-    }
+        .ok_or_else(not_found)?;
     let limit = query.limit.unwrap_or(200);
     if limit == 0 || limit > 1_000 {
         return Err(ApiError::new(
@@ -6166,6 +6182,21 @@ async fn logs(
             "invalid_log_page",
             "log page limit must be between 1 and 1000",
         ));
+    }
+    let follow = query.after_cursor.is_some() || query.wait_ms.is_some();
+    if follow {
+        if query.after_attempt_id.is_some()
+            || query.after_fence.is_some()
+            || query.after_sequence.is_some()
+            || query.after_stream.is_some()
+        {
+            return Err(ApiError::new(
+                StatusCode::BAD_REQUEST,
+                "invalid_log_page",
+                "after_cursor and wait_ms are exclusive with the attempt cursor",
+            ));
+        }
+        return follow_logs(&state, organization_id, project_id, build_id, &query, limit).await;
     }
     let fetch_limit = limit.checked_add(1).unwrap_or(limit);
     let mut logs = state
@@ -6193,24 +6224,100 @@ async fn logs(
     } else {
         None
     };
-    let items = logs
-        .into_iter()
-        .map(|entry| {
-            let (text, content_hex) = encode_log_content(&entry.content);
-            LogResponse {
-                attempt_id: entry.attempt_id,
-                fence: entry.fence,
-                sequence: entry.sequence,
-                step_ordinal: entry.step_ordinal,
-                stream: entry.stream,
-                text,
-                content_hex,
-                sha256: hex(&entry.digest),
-            }
-        })
-        .collect();
-    Ok(Json(LogPage { items, next_after }))
+    let _ = snapshot;
+    Ok(Json(LogPage {
+        items: logs.into_iter().map(log_response).collect(),
+        next_after,
+        next_cursor: None,
+        live: None,
+    }))
 }
+
+fn log_response(entry: mcloving_controller_store::CommittedLog) -> LogResponse {
+    let (text, content_hex) = encode_log_content(&entry.content);
+    LogResponse {
+        attempt_id: entry.attempt_id,
+        fence: entry.fence,
+        sequence: entry.sequence,
+        cursor: entry.cursor,
+        step_ordinal: entry.step_ordinal,
+        stream: entry.stream,
+        text,
+        content_hex,
+        sha256: hex(&entry.digest),
+    }
+}
+
+/// Whether a build may still commit log chunks. Anything past queued or
+/// running is terminal for a follower's purposes.
+fn build_is_live(status: &str) -> bool {
+    matches!(status, "queued" | "running")
+}
+
+/// The follower's read (PAR-013): chunks after one global cursor in commit
+/// order. When none are committed yet and the build is still live, the
+/// request waits up to `wait_ms` (bounded) re-reading at a short interval,
+/// so a follower sees output within about one interval of its commit
+/// without polling the route in a tight loop. The answer always carries the
+/// cursor to continue from and whether the build was live when it was cut.
+async fn follow_logs(
+    state: &ApiState,
+    organization_id: Uuid,
+    project_id: Uuid,
+    build_id: Uuid,
+    query: &LogQuery,
+    limit: u32,
+) -> Result<Json<LogPage>, ApiError> {
+    let after_cursor = query.after_cursor.unwrap_or(0);
+    if after_cursor < 0 {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_log_page",
+            "after_cursor must be non-negative",
+        ));
+    }
+    let wait = query.wait_ms.unwrap_or(0);
+    if wait > mcloving_domain::live_logs::MAX_FOLLOW_WAIT_MS {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_log_page",
+            "wait_ms must be at most 30000",
+        ));
+    }
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(wait);
+    loop {
+        let logs = state
+            .store
+            .build_logs_after_cursor(organization_id, project_id, build_id, after_cursor, limit)
+            .await
+            .map_err(product_error)?;
+        // Read the status after the chunks, never before: a chunk committed
+        // between the two reads is then seen on this page or on the next
+        // one, and a build reported terminal has no chunk still to come.
+        let live = state
+            .store
+            .build_snapshot(organization_id, project_id, build_id)
+            .await
+            .map_err(internal)?
+            .is_some_and(|snapshot| build_is_live(&snapshot.build_status));
+        if !logs.is_empty() || !live || tokio::time::Instant::now() >= deadline {
+            let next_cursor = logs
+                .last()
+                .map(|entry| entry.cursor)
+                .unwrap_or(after_cursor);
+            return Ok(Json(LogPage {
+                items: logs.into_iter().map(log_response).collect(),
+                next_after: None,
+                next_cursor: Some(next_cursor),
+                live: Some(live),
+            }));
+        }
+        tokio::time::sleep(FOLLOW_POLL_INTERVAL.min(deadline - tokio::time::Instant::now())).await;
+    }
+}
+
+/// How often a waiting follow request re-reads the ledger.
+const FOLLOW_POLL_INTERVAL: Duration = Duration::from_millis(200);
 
 async fn cancel(
     State(state): State<Arc<ApiState>>,
@@ -7185,6 +7292,31 @@ impl Client {
             };
             after = Some(next_after);
         }
+    }
+
+    /// The follower's read (PAR-013): chunks after one global cursor, waiting
+    /// up to `wait_ms` for the first when the build is still live.
+    pub async fn logs_after_cursor(
+        &self,
+        organization_id: Uuid,
+        project_id: Uuid,
+        build_id: Uuid,
+        after_cursor: i64,
+        wait_ms: u64,
+        limit: Option<u32>,
+    ) -> Result<LogPage, ClientError> {
+        let mut request = self
+            .inner
+            .get(format!(
+                "{}/logs",
+                self.build_url(organization_id, project_id, build_id)
+            ))
+            .query(&[("after_cursor", after_cursor)])
+            .query(&[("wait_ms", wait_ms)]);
+        if let Some(limit) = limit {
+            request = request.query(&[("limit", limit)]);
+        }
+        self.send(request).await
     }
 
     pub async fn logs_page(

@@ -203,6 +203,14 @@ pub enum Command {
         after_stream: Option<String>,
         #[arg(long, default_value_t = 1_000)]
         limit: u32,
+        /// Print chunks as they are committed, from the global cursor, until
+        /// the build is terminal and its log is drained (PAR-013).
+        #[arg(long, conflicts_with_all = ["after_attempt", "after_fence", "after_sequence", "after_stream"])]
+        follow: bool,
+        /// Follow mode: cursor to resume after (the `next_cursor` of an
+        /// earlier follow).
+        #[arg(long, default_value_t = 0, requires = "follow")]
+        after_cursor: i64,
     },
     Cancel {
         build: Uuid,
@@ -484,11 +492,29 @@ pub async fn execute(arguments: &Arguments) -> Result<CommandOutput> {
         )?,
         Command::Logs {
             build,
+            follow: true,
+            after_cursor,
+            limit,
+            ..
+        } => {
+            follow_logs(
+                &client,
+                arguments.organization,
+                required_project(arguments.project)?,
+                *build,
+                *after_cursor,
+                *limit,
+            )
+            .await?
+        }
+        Command::Logs {
+            build,
             after_attempt,
             after_fence,
             after_sequence,
             after_stream,
             limit,
+            ..
         } => to_value(
             client
                 .logs_page(
@@ -675,6 +701,59 @@ fn parse_parameters(parameters: &[String]) -> Result<BTreeMap<String, Value>> {
         }
     }
     Ok(parsed)
+}
+
+/// Streams a build's log to stdout as chunks commit: each request waits up
+/// to ten seconds for new chunks, so a line shows within about a quarter
+/// second of its commit; the loop ends once the build is terminal and a
+/// read after that returns nothing more. The returned value summarizes the
+/// follow for the structured output.
+async fn follow_logs(
+    client: &Client,
+    organization_id: Uuid,
+    project_id: Uuid,
+    build_id: Uuid,
+    after_cursor: i64,
+    limit: u32,
+) -> Result<Value> {
+    use std::io::Write as _;
+    let mut cursor = after_cursor;
+    let mut chunks = 0_u64;
+    let mut stdout = std::io::stdout();
+    loop {
+        let page = client
+            .logs_after_cursor(
+                organization_id,
+                project_id,
+                build_id,
+                cursor,
+                10_000,
+                Some(limit),
+            )
+            .await?;
+        for item in &page.items {
+            chunks += 1;
+            match &item.text {
+                Some(text) => write!(stdout, "{text}")?,
+                None => writeln!(
+                    stdout,
+                    "[{} step {} binary {}]",
+                    item.stream, item.step_ordinal, item.content_hex
+                )?,
+            }
+        }
+        stdout.flush()?;
+        let drained = page.items.is_empty();
+        cursor = page.next_cursor.unwrap_or(cursor);
+        if drained && page.live == Some(false) {
+            break;
+        }
+    }
+    Ok(json!({
+        "build_id": build_id,
+        "chunks": chunks,
+        "next_cursor": cursor,
+    }))
 }
 
 fn cursor(

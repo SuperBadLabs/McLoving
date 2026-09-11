@@ -310,6 +310,9 @@ pub struct CommittedLog {
     pub stream: String,
     pub content: Vec<u8>,
     pub digest: [u8; 32],
+    /// Global commit order of the chunk (migration 0016); a follower resumes
+    /// after the last cursor it saw.
+    pub cursor: i64,
 }
 
 /// Fenced log publication from one agent attempt.
@@ -2671,10 +2674,11 @@ impl Store {
         project_id: Uuid,
         build_id: Uuid,
     ) -> Result<Vec<CommittedLog>, StoreError> {
-        type LogRow = (Uuid, i64, i64, String, Vec<u8>, Vec<u8>, i32);
+        type LogRow = (Uuid, i64, i64, String, Vec<u8>, Vec<u8>, i32, i64);
         let mut tx = self.tenant_transaction(organization_id).await?;
         let rows = sqlx::query_as::<_, LogRow>(
-            "SELECT l.attempt_id, l.fence, l.sequence, l.stream, l.content, l.digest, l.step_ordinal
+            "SELECT l.attempt_id, l.fence, l.sequence, l.stream, l.content, l.digest, l.step_ordinal,
+                    l.cursor_id
              FROM attempt_log_chunks AS l
              JOIN attempts AS a
                ON a.id = l.attempt_id AND a.organization_id = l.organization_id
@@ -2696,7 +2700,7 @@ impl Store {
         tx.commit().await?;
         rows.into_iter()
             .map(
-                |(attempt_id, fence, sequence, stream, content, digest, step_ordinal)| {
+                |(attempt_id, fence, sequence, stream, content, digest, step_ordinal, cursor)| {
                     let digest: [u8; 32] =
                         digest
                             .try_into()
@@ -2712,6 +2716,7 @@ impl Store {
                         stream,
                         content,
                         digest,
+                        cursor,
                     })
                 },
             )
@@ -2830,7 +2835,7 @@ impl Store {
                     .to_owned(),
             ));
         }
-        type LogRow = (Uuid, i64, i64, String, Vec<u8>, Vec<u8>, i32);
+        type LogRow = (Uuid, i64, i64, String, Vec<u8>, Vec<u8>, i32, i64);
         let mut tx = self.tenant_transaction(organization_id).await?;
         let rows = sqlx::query_as::<_, LogRow>(
             "WITH cursor AS (
@@ -2853,7 +2858,8 @@ impl Store {
                    AND l.sequence = $6
                    AND l.stream = $7
              )
-             SELECT l.attempt_id, l.fence, l.sequence, l.stream, l.content, l.digest, l.step_ordinal
+             SELECT l.attempt_id, l.fence, l.sequence, l.stream, l.content, l.digest, l.step_ordinal,
+                    l.cursor_id
              FROM attempt_log_chunks AS l
              JOIN attempts AS a
                ON a.id = l.attempt_id AND a.organization_id = l.organization_id
@@ -2888,7 +2894,7 @@ impl Store {
         tx.commit().await?;
         rows.into_iter()
             .map(
-                |(attempt_id, fence, sequence, stream, content, digest, step_ordinal)| {
+                |(attempt_id, fence, sequence, stream, content, digest, step_ordinal, cursor)| {
                     let digest: [u8; 32] =
                         digest
                             .try_into()
@@ -2904,6 +2910,76 @@ impl Store {
                         stream,
                         content,
                         digest,
+                        cursor,
+                    })
+                },
+            )
+            .collect()
+    }
+
+    /// The build's committed log chunks after one global cursor, in commit
+    /// order (PAR-013): the follower's read. Only chunks of each attempt's
+    /// current fence are visible, as for the paged read.
+    pub async fn build_logs_after_cursor(
+        &self,
+        organization_id: Uuid,
+        project_id: Uuid,
+        build_id: Uuid,
+        after_cursor: i64,
+        limit: u32,
+    ) -> Result<Vec<CommittedLog>, StoreError> {
+        if limit == 0 || limit > 1_001 || after_cursor < 0 {
+            return Err(StoreError::InvalidProductOperation(
+                "log follow requires a non-negative cursor and limit between 1 and 1001".to_owned(),
+            ));
+        }
+        type LogRow = (Uuid, i64, i64, String, Vec<u8>, Vec<u8>, i32, i64);
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        let rows = sqlx::query_as::<_, LogRow>(
+            "SELECT l.attempt_id, l.fence, l.sequence, l.stream, l.content, l.digest, l.step_ordinal,
+                    l.cursor_id
+             FROM attempt_log_chunks AS l
+             JOIN attempts AS a
+               ON a.id = l.attempt_id AND a.organization_id = l.organization_id
+             JOIN nodes AS n
+               ON n.id = a.node_id AND n.organization_id = a.organization_id
+             JOIN builds AS b
+               ON b.id = n.build_id AND b.organization_id = n.organization_id
+             WHERE l.organization_id = $1
+               AND b.project_id = $2
+               AND b.id = $3
+               AND l.fence = a.fence
+               AND l.cursor_id > $4
+             ORDER BY l.cursor_id
+             LIMIT $5",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(build_id)
+        .bind(after_cursor)
+        .bind(i64::from(limit))
+        .fetch_all(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        rows.into_iter()
+            .map(
+                |(attempt_id, fence, sequence, stream, content, digest, step_ordinal, cursor)| {
+                    let digest: [u8; 32] =
+                        digest
+                            .try_into()
+                            .map_err(|_| StoreError::CorruptLogDigest {
+                                attempt_id,
+                                sequence,
+                            })?;
+                    Ok(CommittedLog {
+                        attempt_id,
+                        fence,
+                        sequence,
+                        step_ordinal,
+                        stream,
+                        content,
+                        digest,
+                        cursor,
                     })
                 },
             )
@@ -2929,8 +3005,28 @@ impl Store {
         chunk: &NewLogChunk<'_>,
         session_epoch: Option<u64>,
     ) -> Result<bool, StoreError> {
-        if !log_sequence_is_bounded(chunk.sequence) {
+        if chunk.sequence < 0 {
             return Ok(false);
+        }
+        // The terminal bound stands for every session; a session that
+        // negotiated live streaming may number chunks up to the live bound,
+        // since a chunk there is one poll interval's output, not a whole
+        // stream. The byte quota below is the same for both.
+        if !log_sequence_is_bounded(chunk.sequence) {
+            let live = match session_epoch {
+                Some(epoch) => {
+                    self.agent_session_supports(
+                        chunk.agent_id,
+                        epoch,
+                        mcloving_domain::live_logs::LIVE_LOG_STREAM_FEATURE,
+                    )
+                    .await?
+                }
+                None => false,
+            };
+            if !live || chunk.sequence >= mcloving_domain::live_logs::MAX_LIVE_ATTEMPT_LOG_CHUNKS {
+                return Ok(false);
+            }
         }
         let mut tx = self.tenant_transaction(chunk.organization_id).await?;
         acquire_restore_fence_shared(&mut tx).await?;
