@@ -1,6 +1,8 @@
 # ADR 0016: Product parity before migration authority
 
-Status: Accepted (2026-09-10)
+Status: Accepted
+
+Accepted 2026-09-10.
 
 ## Context
 
