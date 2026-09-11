@@ -34,3 +34,49 @@ ALTER TABLE attempt_log_chunks
 ALTER TABLE attempt_log_chunks
     ADD CONSTRAINT attempt_log_chunks_build_position_unique
         UNIQUE (organization_id, build_id, build_position);
+
+-- ADR 0012: a pre-v39 controller admitted during the rolling-upgrade window
+-- still inserts chunks with the old column list. Derive the build and the
+-- next position for such a legacy write under the same build-scoped lock
+-- the v39 writer takes, so its chunk lands in the build's commit order
+-- instead of failing the NOT NULL constraints; a v39 writer supplies both
+-- and never enters the trigger body.
+CREATE FUNCTION attempt_log_chunks_fill_compatibility_position()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+    chunk_build_id uuid;
+BEGIN
+    SELECT n.build_id INTO chunk_build_id
+    FROM attempts AS a
+    JOIN nodes AS n
+      ON n.id = a.node_id AND n.organization_id = a.organization_id
+    WHERE a.organization_id = NEW.organization_id
+      AND a.id = NEW.attempt_id;
+    IF chunk_build_id IS NULL THEN
+        RAISE EXCEPTION 'log chunk for attempt % has no build', NEW.attempt_id
+            USING ERRCODE = 'foreign_key_violation';
+    END IF;
+    PERFORM pg_advisory_xact_lock(
+        hashtextextended(
+            'mcloving.log.build.' || NEW.organization_id::text || '.' || chunk_build_id::text,
+            0
+        )
+    );
+    NEW.build_id := chunk_build_id;
+    SELECT COALESCE(MAX(l.build_position), 0) + 1 INTO NEW.build_position
+    FROM attempt_log_chunks AS l
+    WHERE l.organization_id = NEW.organization_id
+      AND l.build_id = chunk_build_id;
+    RETURN NEW;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION attempt_log_chunks_fill_compatibility_position() FROM PUBLIC;
+CREATE TRIGGER attempt_log_chunks_fill_compatibility_position
+BEFORE INSERT ON attempt_log_chunks
+FOR EACH ROW
+WHEN (NEW.build_id IS NULL OR NEW.build_position IS NULL)
+EXECUTE FUNCTION attempt_log_chunks_fill_compatibility_position();

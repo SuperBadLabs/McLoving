@@ -373,7 +373,9 @@ EXECUTION_CLASSES = ("SERIAL", "BATCH", "PARALLEL")
 # the ten-round cap: same table, EXPECTED_TABLES does not move.
 # 140 -> 141 on 2026-09-11 with `CTRL-005`, filed from PAR-013 review past
 # the ten-round cap: same table, EXPECTED_TABLES does not move.
-MINIMUM_TICKET_ROWS = 141
+# 141 -> 142 on 2026-09-11 with `AGENT-011`, filed from PAR-013 review past
+# the ten-round cap: same table, EXPECTED_TABLES does not move.
+MINIMUM_TICKET_ROWS = 142
 
 # Pinning the row COUNT is not enough: an edit that adds one ticket while
 # making another unparsable holds the count at 104 and silently drops the

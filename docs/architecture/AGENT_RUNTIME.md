@@ -386,7 +386,8 @@ discharge a parked reconciliation).
   journaling, restoring the agent's own access to the spool chain first (the workload
   may have revoked it and the crashed session never reached the
   executor's restoration at exit; only a confirmed absence is an empty
-  stream, a permission or I/O failure is an error) and then applying the
+  stream, a permission or I/O failure is an error; a spool the workload
+  unlinked with a reservation outstanding is `AGENT-011`) and then applying the
   executor's aggregate quota cut to the pair with the journaled
   reservations as floors, since the crashed session never reached that
   cut and an orphan may have kept writing, so the output up to the quiesce is in the ledger; a failed publication keeps the
