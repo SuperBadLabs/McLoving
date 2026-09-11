@@ -1041,9 +1041,14 @@ bound needs a descriptor limit above the default 1 024, the controller
 finalizes a staging writer (its fsync) on a runtime worker thread, a set
 is published one object at a time, so a file that changes under a later
 upload fails the attempt by name with the earlier objects of the set already
-visible rather than none, and the digest pass does not check cancellation
+visible rather than none, the digest pass does not check cancellation
 between reads, so a cancellation that lands while a large file is hashed on
-a slow filesystem takes effect only after the read (`AGENT-012`). Closure requires the
+a slow filesystem takes effect only after the read, the client's upload
+deadline equals the server's receive budget with no headroom for the commit,
+the streaming reader's join is unbounded on a stalled read, the controller
+writes each frame on a runtime worker, and an upload's in-flight ledger
+charge overlaps its registered row until the stream ends, so two uploads
+that exactly fill the quota can see the second refused (`AGENT-012`). Closure requires the
 reviewed merge, exact-main Foundation and native Windows runs, and a
 receipt in `docs/evidence/PAR-014_SECURITY_REVIEW.md`.
 
