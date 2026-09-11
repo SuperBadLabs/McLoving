@@ -356,19 +356,22 @@ discharge a parked reconciliation).
   chunk, is reserved and sent; a send the controller does not accept stays
   reserved and is retried, a stale authority stops the tail without touching
   the step, the tail stops reserving 128 sequences below the live bound so
-  the terminal pass always has room for every stream's remainder, and it
-  never streams past the step's aggregate output limit. A step that exceeds
-  that limit has its spools cut by the executor (stdout preserved first,
-  stderr shortened) after the tail may have streamed past the cut; those
-  ranges stand as published rather than parking the already-failed attempt. The terminal pass then
+  the terminal pass always has room for every stream's remainder, it never
+  streams past the step's aggregate output limit, and it paces its flushes
+  (one second, stretched up to a minute) so the sequence budget lasts the
+  step's whole timeout. Each reservation also raises the stream's retention
+  floor the executor reads at its quota cut: a step that exceeds the
+  aggregate limit keeps every byte already published (stdout still
+  preserved first among the unpublished remainder), so the terminal pass's
+  strict coverage and digest checks hold for a quota-terminated step too. The terminal pass then
   verifies the executor's durable spool as before, checks every streamed
   range is contiguous from zero and still hashes to what was sent (a spool
   rewritten after streaming fails the attempt by name), sends only ranges
   without a receipt, reserves and sends the remainder from the next
   sequence, and lets a stream nothing was streamed from ride inline under a
   reservation like any other. Recovery replays from the same reservations.
-  A session with the feature may number chunks up to 65 536 per attempt; the
-  64 MiB byte quota is unchanged. A crash while a step runs leaves at most a
+  A session with the feature may number chunks up to 262 144 per attempt;
+  the 64 MiB byte quota is unchanged. A crash while a step runs leaves at most a
   reserved, unsent chunk; the interrupted attempt is reported as before and
   the chunks already accepted stay exactly once.
 - Once the controller acknowledges terminal truth and the local terminal

@@ -894,18 +894,19 @@ the same lease, fence, restore-epoch and session checks, redaction to a fixed
 point and idempotent append, so a stale or fenced-out agent cannot publish
 and a duplicate is a no-op; the per-attempt chunk bound rises to 8 192 only
 for a session that negotiated `live-log-stream-v1`, read from the durable
-session record, the live tail stops 128 sequences short of it so the
-terminal pass always has room, and the 64 MiB byte quota is unchanged,
-TM-018); TM-013 (a credential-bearing step is never tailed: its output is
+session record, the live tail stops 128 sequences short of it, paces its
+flushes so the budget lasts the step's timeout, and never streams past the
+aggregate output limit, and the 64 MiB byte quota is unchanged, TM-018); TM-013 (a credential-bearing step is never tailed: its output is
 captured and redacted after it exits, as before, so nothing unredacted
 leaves the agent early); TM-006
 (durable evidence: every chunk's sequence and byte range are journaled before the
 chunk is sent, so a crash at any point cannot renumber or duplicate a range;
 the terminal pass verifies the executor's durable spool and re-hashes every
 streamed range against its reservation, refusing by name a spool the
-workload rewrote after a range was streamed (a quota-terminated step is the
-one exception: ranges streamed past the executor's cut stand as published
-so the failed attempt still finalizes), and reads the live spool files
+workload rewrote after a range was streamed (the executor's quota cut keeps
+every streamed byte through per-stream retention floors, within the same
+aggregate limit, so a quota-terminated step passes the same checks), and
+reads the live spool files
 through descriptors opened without following links or blocking and judged
 regular files after the open, so a renamed, unlinked or swapped visible
 path cannot redirect or stall the tail; recovery replays from the same

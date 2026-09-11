@@ -127,7 +127,9 @@ empty page with `live: false` is the drained end of the log), and the page
 answers `next_cursor` to continue from and `live` so a follower stops after
 the terminal drain. An agent that negotiated
 `live-log-stream-v1` publishes a step's output while the step runs, so a
-follower sees a line within about a second of the step writing it; `mcloving
+follower sees a line within about a second of the step writing it (a step
+with a multi-day timeout is paced to a few seconds so its sequence budget
+lasts); `mcloving
 logs --follow` prints the stream and exits when the build is terminal (with
 `--output json` it prints one document carrying every chunk at the end
 instead), and refuses a controller that does not answer the follow fields.

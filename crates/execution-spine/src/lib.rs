@@ -446,6 +446,7 @@ pub async fn run_claim(
             .map(|(key, value)| (OsString::from(key), OsString::from(value)))
             .collect(),
         output_limit_bytes: Some(MAX_ATTEMPT_OUTPUT_BYTES),
+        retained_output_floors: None,
         timeout: Duration::from_secs(process.timeout_seconds.unwrap_or(3_600)),
         termination_grace: config.termination_grace,
     };

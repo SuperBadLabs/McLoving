@@ -78,8 +78,31 @@ pub struct ExecutionRequest {
     pub environment: BTreeMap<OsString, OsString>,
     /// Maximum combined durable stdout/stderr bytes for this execution.
     pub output_limit_bytes: Option<u64>,
+    /// Bytes of each stream already published while the step ran (PAR-013),
+    /// which the quota cut must keep: the cut still holds the aggregate to
+    /// `output_limit_bytes`, but takes it from the unpublished remainder.
+    /// The publisher keeps the floors' sum within the limit.
+    pub retained_output_floors: Option<std::sync::Arc<OutputFloors>>,
     pub timeout: Duration,
     pub termination_grace: Duration,
+}
+
+/// Per-stream byte counts a live publisher has already sent, read by the
+/// output-quota cut so it never removes a byte the controller already holds.
+#[derive(Debug, Default)]
+pub struct OutputFloors {
+    pub stdout: std::sync::atomic::AtomicU64,
+    pub stderr: std::sync::atomic::AtomicU64,
+}
+
+impl OutputFloors {
+    pub fn load(&self) -> (u64, u64) {
+        use std::sync::atomic::Ordering;
+        (
+            self.stdout.load(Ordering::SeqCst),
+            self.stderr.load(Ordering::SeqCst),
+        )
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

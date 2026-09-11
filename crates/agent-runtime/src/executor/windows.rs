@@ -217,9 +217,19 @@ where
         }
         write_redacted_output(&mut stdout_control, &captured.stdout, redactions)?;
         write_redacted_output(&mut stderr_control, &captured.stderr, redactions)?;
-        truncate_output_to_limit(&stdout_control, &stderr_control, request.output_limit_bytes)?;
+        truncate_output_to_limit(
+            &stdout_control,
+            &stderr_control,
+            request.output_limit_bytes,
+            request.retained_output_floors.as_deref(),
+        )?;
     } else if termination == Termination::OutputLimitExceeded {
-        truncate_output_to_limit(&stdout_control, &stderr_control, request.output_limit_bytes)?;
+        truncate_output_to_limit(
+            &stdout_control,
+            &stderr_control,
+            request.output_limit_bytes,
+            request.retained_output_floors.as_deref(),
+        )?;
     }
     ensure_original_workspace_root(&workspace_root_control, &request.workspace_root)?;
     stdout_control.sync_all()?;
@@ -260,14 +270,27 @@ fn truncate_output_to_limit(
     stdout: &File,
     stderr: &File,
     limit: Option<u64>,
+    floors: Option<&super::OutputFloors>,
 ) -> Result<(), std::io::Error> {
     let Some(limit) = limit else {
         return Ok(());
     };
     let stdout_bytes = stdout.metadata()?.len();
     let stderr_bytes = stderr.metadata()?.len();
-    let retained_stdout = stdout_bytes.min(limit);
-    let retained_stderr = stderr_bytes.min(limit - retained_stdout);
+    // stdout is preserved first, but never below what a live publisher
+    // already sent of either stream: those bytes are in the controller's
+    // ledger and the durable spool must keep vouching for them. The floors'
+    // sum stays within the limit by the publisher's own bound, so the
+    // aggregate still fits.
+    let (stdout_floor, stderr_floor) = floors.map(|floors| floors.load()).unwrap_or((0, 0));
+    let stdout_floor = stdout_floor.min(stdout_bytes).min(limit);
+    let stderr_floor = stderr_floor
+        .min(stderr_bytes)
+        .min(limit.saturating_sub(stdout_floor));
+    let retained_stdout = stdout_bytes
+        .min(limit.saturating_sub(stderr_floor))
+        .max(stdout_floor);
+    let retained_stderr = stderr_bytes.min(limit.saturating_sub(retained_stdout));
     stdout.set_len(retained_stdout)?;
     stderr.set_len(retained_stderr)
 }
@@ -555,6 +578,7 @@ mod tests {
             arguments,
             environment: BTreeMap::new(),
             output_limit_bytes: None,
+            retained_output_floors: None,
             // Hosted Windows runners can spend well over ten seconds starting
             // PowerShell while the test binary is exercising several Job
             // Objects concurrently. Keep the execution deadline above the

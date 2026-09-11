@@ -482,9 +482,19 @@ where
             write_redacted_output(&mut stdout_control, &captured.stdout, redactions)?;
             write_redacted_output(&mut stderr_control, &captured.stderr, redactions)?;
         }
-        truncate_output_to_limit(&stdout_control, &stderr_control, request.output_limit_bytes)?;
+        truncate_output_to_limit(
+            &stdout_control,
+            &stderr_control,
+            request.output_limit_bytes,
+            request.retained_output_floors.as_deref(),
+        )?;
     } else if termination.0 == Termination::OutputLimitExceeded || exceeded {
-        truncate_output_to_limit(&stdout_control, &stderr_control, request.output_limit_bytes)?;
+        truncate_output_to_limit(
+            &stdout_control,
+            &stderr_control,
+            request.output_limit_bytes,
+            request.retained_output_floors.as_deref(),
+        )?;
     }
     for directory in &directory_controls {
         restore_agent_permissions(directory, 0o700)?;
@@ -741,14 +751,27 @@ fn truncate_output_to_limit(
     stdout: &File,
     stderr: &File,
     limit: Option<u64>,
+    floors: Option<&super::OutputFloors>,
 ) -> Result<(), std::io::Error> {
     let Some(limit) = limit else {
         return Ok(());
     };
     let stdout_bytes = stdout.metadata()?.len();
     let stderr_bytes = stderr.metadata()?.len();
-    let retained_stdout = stdout_bytes.min(limit);
-    let retained_stderr = stderr_bytes.min(limit - retained_stdout);
+    // stdout is preserved first, but never below what a live publisher
+    // already sent of either stream: those bytes are in the controller's
+    // ledger and the durable spool must keep vouching for them. The floors'
+    // sum stays within the limit by the publisher's own bound, so the
+    // aggregate still fits.
+    let (stdout_floor, stderr_floor) = floors.map(|floors| floors.load()).unwrap_or((0, 0));
+    let stdout_floor = stdout_floor.min(stdout_bytes).min(limit);
+    let stderr_floor = stderr_floor
+        .min(stderr_bytes)
+        .min(limit.saturating_sub(stdout_floor));
+    let retained_stdout = stdout_bytes
+        .min(limit.saturating_sub(stderr_floor))
+        .max(stdout_floor);
+    let retained_stderr = stderr_bytes.min(limit.saturating_sub(retained_stdout));
     stdout.set_len(retained_stdout)?;
     stderr.set_len(retained_stderr)
 }
@@ -1239,6 +1262,7 @@ mod tests {
             ],
             environment: BTreeMap::new(),
             output_limit_bytes: None,
+            retained_output_floors: None,
             timeout,
             termination_grace: Duration::from_millis(100),
         }
@@ -1261,6 +1285,7 @@ mod tests {
             ],
             environment: BTreeMap::new(),
             output_limit_bytes: None,
+            retained_output_floors: None,
             timeout: Duration::from_secs(30),
             termination_grace: Duration::from_millis(100),
         }
@@ -1487,6 +1512,7 @@ mod tests {
             arguments: vec![OsString::from("-c"), OsString::from("printf mcloving")],
             environment: BTreeMap::new(),
             output_limit_bytes: None,
+            retained_output_floors: None,
             timeout: Duration::from_secs(5),
             termination_grace: Duration::from_millis(100),
         };
@@ -1517,6 +1543,7 @@ mod tests {
             ],
             environment: BTreeMap::new(),
             output_limit_bytes: None,
+            retained_output_floors: None,
             timeout: Duration::from_secs(10),
             termination_grace: Duration::from_millis(100),
         };
@@ -1551,6 +1578,7 @@ mod tests {
             ],
             environment: BTreeMap::new(),
             output_limit_bytes: None,
+            retained_output_floors: None,
             timeout: Duration::from_secs(5),
             termination_grace: Duration::from_millis(100),
         };
@@ -1587,6 +1615,7 @@ mod tests {
                 OsString::from("allowed"),
             )]),
             output_limit_bytes: None,
+            retained_output_floors: None,
             timeout: Duration::from_secs(5),
             termination_grace: Duration::from_millis(100),
         };
@@ -1621,6 +1650,7 @@ mod tests {
             ],
             environment: BTreeMap::new(),
             output_limit_bytes: Some(65_536),
+            retained_output_floors: None,
             timeout: Duration::from_secs(5),
             termination_grace: Duration::from_millis(50),
         };
@@ -1645,6 +1675,42 @@ mod tests {
         );
     }
 
+    #[test]
+    fn the_quota_cut_keeps_every_published_byte_within_the_limit() {
+        use std::io::Write as _;
+        let directory = tempfile::tempdir().unwrap();
+        let write = |name: &str, bytes: usize| {
+            let path = directory.path().join(name);
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(true)
+                .read(true)
+                .write(true)
+                .open(&path)
+                .unwrap();
+            file.write_all(&vec![b'x'; bytes]).unwrap();
+            file
+        };
+        // stderr was published first (10 bytes), then stdout grew past the
+        // aggregate limit of 16: without floors stdout would keep 16 and
+        // stderr nothing; with floors the published 10 stderr bytes stay and
+        // stdout gives way.
+        let stdout = write("stdout.log", 20);
+        let stderr = write("stderr.log", 12);
+        let floors = super::super::OutputFloors::default();
+        floors.stderr.store(10, std::sync::atomic::Ordering::SeqCst);
+        floors.stdout.store(4, std::sync::atomic::Ordering::SeqCst);
+        truncate_output_to_limit(&stdout, &stderr, Some(16), Some(&floors)).unwrap();
+        assert_eq!(stdout.metadata().unwrap().len(), 6);
+        assert_eq!(stderr.metadata().unwrap().len(), 10);
+        // Without floors the historical rule stands.
+        let stdout = write("stdout2.log", 20);
+        let stderr = write("stderr2.log", 12);
+        truncate_output_to_limit(&stdout, &stderr, Some(16), None).unwrap();
+        assert_eq!(stdout.metadata().unwrap().len(), 16);
+        assert_eq!(stderr.metadata().unwrap().len(), 0);
+    }
+
     #[tokio::test]
     async fn output_limit_terminates_and_caps_the_durable_spool() {
         let root = tempfile::tempdir().unwrap();
@@ -1662,6 +1728,7 @@ mod tests {
             ],
             environment: BTreeMap::new(),
             output_limit_bytes: Some(4_096),
+            retained_output_floors: None,
             timeout: Duration::from_secs(30),
             termination_grace: Duration::from_millis(50),
         };
@@ -1692,6 +1759,7 @@ mod tests {
             ],
             environment: BTreeMap::new(),
             output_limit_bytes: Some(4_096),
+            retained_output_floors: None,
             timeout: Duration::from_secs(30),
             termination_grace: Duration::from_millis(50),
         };
@@ -1727,6 +1795,7 @@ mod tests {
             arguments: Vec::new(),
             environment: BTreeMap::new(),
             output_limit_bytes: None,
+            retained_output_floors: None,
             timeout: Duration::from_secs(1),
             termination_grace: Duration::from_millis(10),
         };
@@ -1786,6 +1855,7 @@ mod tests {
                 (OsString::from("OUTSIDE"), outside.as_os_str().to_owned()),
             ]),
             output_limit_bytes: None,
+            retained_output_floors: None,
             timeout: Duration::from_secs(5),
             termination_grace: Duration::from_millis(100),
         };
@@ -1829,6 +1899,7 @@ mod private_io_tests {
             arguments: vec!["-c".into(), script.into()],
             environment: BTreeMap::new(),
             output_limit_bytes: Some(262_144),
+            retained_output_floors: None,
             timeout: Duration::from_secs(3),
             termination_grace: Duration::from_millis(50),
         }

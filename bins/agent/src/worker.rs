@@ -17,6 +17,7 @@ use mcloving_agent_protocol::wire::{
     CredentialRequest, InlineLogChunk, WorkAssignment, WorkAuthority, WorkCompletion,
     WorkLeaseRenewal, WorkLogChunk, WorkOutcome, WorkPoll, WorkReceipt,
 };
+use mcloving_agent_runtime::executor::OutputFloors;
 use mcloving_agent_runtime::executor::{
     ExecutionError, ExecutionMode, ExecutionRequest, Termination,
     execute_with_spawn_hook_and_redactions, is_link_or_reparse_point, sync_boundaries,
@@ -55,6 +56,9 @@ const LIVE_TAIL_INTERVAL: Duration = Duration::from_millis(250);
 /// about a second without a chunk per line.
 const LIVE_CHUNK_TARGET_BYTES: u64 = 64 * 1024;
 const LIVE_FLUSH_INTERVAL: Duration = Duration::from_secs(1);
+/// The tail stretches its flush interval, up to this, so the live sequence
+/// budget lasts the step's whole timeout.
+const LIVE_MAX_FLUSH_INTERVAL: Duration = Duration::from_secs(60);
 const MAX_RESULT_SPOOL_BYTES: u64 = 65_536;
 const MAX_EXECUTION_TIMEOUT_SECONDS: u64 = 7 * 24 * 60 * 60;
 const WORK_POLL_RPC_WINDOW: Duration = Duration::from_secs(25);
@@ -618,7 +622,6 @@ async fn replay_finalization(
         fence_token: attempt.fence_token,
         session_epoch: attempt.session_epoch,
         chunk_bound: log_chunk_bound(live_log_stream),
-        quota_truncated: result.termination == termination_name(Termination::OutputLimitExceeded),
     };
     for entry in &attempt.logs {
         let (stream, step_ordinal) = spool_stream(entry)?;
@@ -1925,6 +1928,9 @@ async fn run_assignment(
                 });
                 break;
             }
+            // Where the executor's quota cut learns what the live tail has
+            // already published of this step (PAR-013).
+            let output_floors = Arc::new(OutputFloors::default());
             let request = ExecutionRequest {
                 workspace_seed: if index == 0 {
                     assignment
@@ -1959,6 +1965,7 @@ async fn run_assignment(
                 // The per-attempt output quota is shared by every step, so a
                 // later step may only spend what earlier steps left.
                 output_limit_bytes: Some(step_output_limit),
+                retained_output_floors: Some(output_floors.clone()),
                 timeout: Duration::from_secs(process.timeout_seconds.unwrap_or(3_600)),
                 termination_grace: config.termination_grace,
             };
@@ -2052,6 +2059,8 @@ async fn run_assignment(
                             session_epoch,
                             step_ordinal: ordinal,
                             output_limit: step_output_limit,
+                            deadline: step_deadline,
+                            floors: output_floors.clone(),
                         },
                         live_spool.clone(),
                     )?;
@@ -2434,7 +2443,6 @@ async fn run_assignment(
             fence_token: fence,
             session_epoch,
             chunk_bound: log_chunk_bound(features.live_log_stream),
-            quota_truncated: outcome.termination == Termination::OutputLimitExceeded,
         };
         for entry in &logs {
             let (stream, step_ordinal) = spool_stream(entry)?;
@@ -3109,13 +3117,6 @@ struct SpoolPublisher<'a> {
     fence_token: u64,
     session_epoch: u64,
     chunk_bound: u64,
-    /// The step ended by exceeding the output quota, so the executor cut the
-    /// durable spools to the limit (stdout preserved first, stderr shortened)
-    /// after the tail may already have streamed bytes past the cut. Those
-    /// ranges stand as published: the bytes were the step's output when
-    /// sent, they cannot be re-read or re-sent, and refusing them would park
-    /// an attempt that has already failed for its output.
-    quota_truncated: bool,
 }
 
 impl SpoolPublisher<'_> {
@@ -3146,27 +3147,18 @@ impl SpoolPublisher<'_> {
             .collect();
         let mut covered = 0_u64;
         for reservation in &reservations {
-            let end = reservation.offset.checked_add(reservation.bytes);
-            if reservation.offset != covered || end.is_none() {
+            // The executor's quota cut keeps every streamed byte (the tail
+            // publishes its floors), so a reservation past the durable spool
+            // is a rewritten or replaced spool, never a cut.
+            if reservation.offset != covered
+                || reservation
+                    .offset
+                    .checked_add(reservation.bytes)
+                    .is_none_or(|end| end > entry.bytes)
+            {
                 return Err(AgentError::InvalidAssignment(
                     "streamed log reservations do not cover the durable spool".to_owned(),
                 ));
-            }
-            if end.is_some_and(|end| end > entry.bytes) {
-                if !self.quota_truncated {
-                    return Err(AgentError::InvalidAssignment(
-                        "streamed log reservations do not cover the durable spool".to_owned(),
-                    ));
-                }
-                if !reservation.acknowledged {
-                    eprintln!(
-                        "log chunk {} of {stream} step {step_ordinal} was streamed past the \
-                         quota cut and never acknowledged; it cannot be sent again",
-                        reservation.sequence
-                    );
-                }
-                covered = entry.bytes;
-                continue;
             }
             let content =
                 read_spool_range(&mut file, reservation.offset, reservation.bytes).await?;
@@ -3305,6 +3297,10 @@ struct LiveTailScope<'a> {
     session_epoch: u64,
     step_ordinal: u32,
     output_limit: u64,
+    /// The step's deadline: the sequence budget is paced to last until it.
+    deadline: tokio::time::Instant,
+    /// Where the executor's quota cut learns what was already published.
+    floors: Arc<OutputFloors>,
 }
 
 struct LiveStream {
@@ -3333,6 +3329,8 @@ struct LiveTail {
     /// The step's aggregate output limit: the tail never streams past it in
     /// total, since the executor retains nothing beyond it.
     output_limit: u64,
+    deadline: tokio::time::Instant,
+    floors: Arc<OutputFloors>,
 }
 
 impl LiveTail {
@@ -3349,6 +3347,8 @@ impl LiveTail {
             session_epoch,
             step_ordinal,
             output_limit,
+            deadline,
+            floors,
         } = scope;
         Ok(Self {
             journal: Journal::open(&config.journal_path)?,
@@ -3374,7 +3374,25 @@ impl LiveTail {
             pending: None,
             stopped: false,
             output_limit,
+            deadline,
+            floors,
         })
+    }
+
+    /// How long a stream with a small amount of unpublished output waits
+    /// before it is flushed: one second, stretched so that the remaining
+    /// sequence budget (two streams) lasts until the step's deadline.
+    fn flush_interval(&self, next_sequence: u64) -> Duration {
+        let remaining = live_tail_sequence_ceiling()
+            .saturating_sub(next_sequence)
+            .max(1);
+        let left = self
+            .deadline
+            .saturating_duration_since(tokio::time::Instant::now());
+        let paced = left
+            .checked_div(u32::try_from(remaining / 2).unwrap_or(u32::MAX).max(1))
+            .unwrap_or(LIVE_FLUSH_INTERVAL);
+        paced.clamp(LIVE_FLUSH_INTERVAL, LIVE_MAX_FLUSH_INTERVAL)
     }
 
     /// Runs the tail as its own task until it is aborted or stops itself:
@@ -3446,6 +3464,11 @@ impl LiveTail {
                 }
             }
         }
+        let flush_interval = self.flush_interval(self.journal.next_log_sequence(
+            &self.organization_id,
+            &self.attempt_id,
+            self.fence_token,
+        )?);
         let Some(spool) = self.spool.as_mut() else {
             return Ok(());
         };
@@ -3460,7 +3483,7 @@ impl LiveTail {
             let available = length.saturating_sub(stream.offset);
             if available == 0
                 || (available < LIVE_CHUNK_TARGET_BYTES
-                    && stream.last_flush.elapsed() < LIVE_FLUSH_INTERVAL)
+                    && stream.last_flush.elapsed() < flush_interval)
             {
                 continue;
             }
@@ -3511,6 +3534,13 @@ impl LiveTail {
             )?;
             stream.offset += bytes;
             stream.last_flush = tokio::time::Instant::now();
+            // The executor's quota cut keeps everything reserved so far.
+            let floor = if index == 0 {
+                &self.floors.stdout
+            } else {
+                &self.floors.stderr
+            };
+            floor.store(stream.offset, std::sync::atomic::Ordering::SeqCst);
             match publish_reserved_chunk(
                 publication,
                 &mut self.journal,
