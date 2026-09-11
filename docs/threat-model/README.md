@@ -724,3 +724,71 @@ No process escape is claimed observed, no profile or process-group authority is
 changed, and retained-root/retention ownership remains separate future work.
 SCM-001's historical isolated boundary and frozen JCOMP-003 evidence are not
 recertified or expanded by this prerequisite.
+
+## EXEC-005 pure source receipt authentication review
+
+TM-001/TM-002/TM-014/TM-016 are reviewed for receipt reuse across acquisition, tenant, build,
+attempt, repository, trust, generation, grant and audit context. Pure verification
+commits the complete original request and separately compares repeated fields,
+exact repository/submodule graph and acquisition-derived output identity before
+native replay can accept stored evidence. A valid HMAC from the configured key
+is necessary but insufficient for a context match. Strict bounded stored-frame
+parsing rejects duplicate/unknown/trailing data (TM-008/TM-018). Historical authentication checks
+the original acquisition/publication window; present-time native admission is
+preserved and remains separate from historical evidence authentication.
+
+TM-013/TM-016 are reviewed for verifier authority construction: explicit config,
+implementation, key and marker snapshots reuse native pure shape/hash validation
+without runtime-path or provider IO. Native runtime canonicalization remains in
+the native constructor. Key-bearing verifier state has no debug formatter and
+markers are not retained. Seven focused pure-verifier tests cover signed-field,
+complete-request, repository/submodule/time, frame and authority substitution.
+They are unit evidence, separate from the actual native acquisition fixture.
+
+Residual risks remain the trusted native issuer/key/configuration and kernel,
+size-controlled typed authority inputs, writable same-UID retained contents,
+pathname-based tree traversal, unbounded aggregate retention and unwired product
+source dispatch. This review does not close EXEC-005 or recertify historical
+SCM-001/JCOMP-003 claims. Held-directory custody, retention ownership and actual
+submitted-job crash/replay proof remain required before source product support.
+
+
+## EXEC-005 closed standalone source lifetime review
+
+TM-006/TM-007 are reviewed for independently grouped source descendants,
+outer cancellation/death, lost caller identity and premature success. The fixed
+source-only launcher uses a namespace PID1 lifetime boundary while preserving
+native process-group cancellation. Private staged admission withholds the worker
+until the caller pins the exact init identity. The caller must join that init
+pidfd after outer death; a snapshot of observed descendants or an empty outer
+process group is insufficient. Restarted agents have no retained kernel FD and
+must park unresolved work, with no reused-PID signaling or refetch shortcut.
+These are standalone protocol obligations; agent durable adoption remains open.
+
+TM-013/TM-016 are reviewed for the fixed profile/image/runtime handoff. The named
+profile is explicitly unconfined and grants user-namespace creation; it is not a
+filesystem/network sandbox. The fixed source image selects the exact label,
+clears internal child environments and closes unrelated descriptors. Runtime
+root ownership is checked in the original full UID/GID identity context before
+namespace UID translation. Bounded same-opened files and a sealed manifest are
+consumed through verified live parent pidfds, exact sealed parent/child image
+identity, unique initial containment modes and parent-held manifest identity.
+Ordinary native construction retains its root-owner check. An unsigned claim,
+sealed manifest alone, remapped namespace-root identity or generic environment
+flag cannot authorize the exception.
+
+TM-008/TM-018 are reviewed for bounded setup and authority parsing: monotonic
+lifetime deadlines, bounded config/manifest/runtime totals and complete native
+resource checks remain. Held proc-root/task descriptors with same-mount
+`openat2` reads reject static proc bind overlays used to fake UID maps, parent
+identity or environment. Genuine final proc magic links are checked before and
+after following; active same-UID mount substitution between those checks is not
+claimed prevented. A trusted operator launcher must clear the first loader
+environment before execution; checking it after `main` cannot repair injected
+code. Compromised same-UID ptrace/mount actors, privileged host administrators
+and the trusted kernel/issuer remain residual authorities.
+
+Actual fixture outcomes are recorded in the ACTIVE EXEC-005 security receipt.
+No result here closes source product support, held retained-tree custody, finite
+retention/crash reconciliation, general workload containment or EXEC-005 itself.
+The source/native and frozen compatibility denominators remain separate.

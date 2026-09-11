@@ -1850,6 +1850,7 @@ dependencies = [
  "caseless",
  "hmac",
  "nix",
+ "rustix",
  "serde",
  "serde-saphyr",
  "serde_json",
