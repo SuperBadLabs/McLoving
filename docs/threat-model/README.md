@@ -1116,6 +1116,43 @@ ticket closes on ten consecutive matching verdicts recorded in
 reviewed merge, exact-main Foundation and native Windows runs, and a
 receipt in `docs/evidence/PAR-005_SECURITY_REVIEW.md`.
 
+## PAR-003 human role grants review, ticket ACTIVE
+
+Human project roles are granted and revoked at runtime: the offline
+identity admin tool bootstraps a project's first Owner and manages any
+role; a project principal manages roles through
+`PUT`/`DELETE /projects/{project_id}/memberships/{identity_id}` under
+`ProjectConfigure`. Boundaries touched: TM-001 (cross-tenant substitution:
+memberships stay under the forced tenant policy from `0002`, every write
+runs in a tenant transaction and the identity and the project are both
+required in the caller's organization before a row is written); TM-027 and
+TM-028 (session fencing and the admin boundary: a revocation or a demotion
+bumps the identity's lifecycle generation inside the same transaction, the
+fence a lifecycle transition applies, so every bearer issued under the
+earlier generation answers 401 at once; the runtime role gained column
+`UPDATE` on `identities.lifecycle_generation` and row writes on
+`project_memberships` in migration `0041`, pinned in the least-privilege
+matrix, and the store's rules are tested as that role); TM-030 (ACL
+broadening: the API cannot mint a project's first Owner, only an Owner
+grants Owner or changes or revokes an Owner, an Admin manages the roles
+below, a Developer or Viewer manages nothing, and the last Owner of a
+project cannot be revoked or demoted by either authority, so a project
+never loses its Owner and an Admin never becomes one through the API; a
+service principal or a mapped-policy principal that passed
+`ProjectConfigure` acts as an Admin, never as an Owner); every change is one
+`identity` audit record (`project_role_granted`, `project_role_changed`,
+`project_role_revoked`) naming the authority, the actor's role, the
+previous role, the reason and the fenced generation. Residual: a promotion
+does not fence, so a session issued before it carries the new role at its
+next authentication without re-login, which is the intended direction; the
+Owner count is read under a per-project advisory lock, so two concurrent
+revocations cannot both see a second Owner; memberships written before
+`0041` carry `granted_by = 'unrecorded'`. Closure requires the reviewed
+merge, exact-main Foundation and native Windows runs, the HeMan proof in
+the pull request body, and a receipt in
+`docs/evidence/PAR-003_SECURITY_REVIEW.md`.
+
+
 ## PAR-004 build notification review (earned closure)
 
 A build's terminal outcome is delivered to the targets its pipeline names: a

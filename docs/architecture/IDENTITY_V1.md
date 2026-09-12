@@ -63,7 +63,17 @@ gain public API authority.
 Human provisioning, lifecycle transitions, identity-provider enable/disable, and service-credential revocation
 are intentionally absent from the public API. The shipped
 `mcloving-identity-admin` binary performs those audited operations offline with
-`MCLOVING_MIGRATION_DATABASE_URL`. It requires explicit organization,
+`MCLOVING_MIGRATION_DATABASE_URL`. Project roles are the one identity
+operation the API carries (PAR-003): `PUT` and `DELETE` on
+`/projects/{project_id}/memberships/{identity_id}` under `ProjectConfigure`
+grant, change and revoke a human's role, with the store applying the role
+rules whichever authority writes: a project's first Owner is bootstrapped
+only by the admin tool's `grant-role`, Owner is needed to grant Owner or to
+change or revoke an Owner, an Admin manages the roles below, the last Owner
+cannot be revoked or demoted, and a revocation or demotion bumps the
+identity's lifecycle generation so its live sessions stop authenticating at
+once. Each write is one `identity` audit record naming the authority, the
+actor's role, the previous role, the reason and the fenced generation. It requires explicit organization,
 identity/provider or credential UUIDs, immutable source/provenance SHA-256
 digests, compare-and-swap lifecycle/provider generations, actor, and reason fields. Provider
 status changes advance the provider configuration generation, immediately fencing existing

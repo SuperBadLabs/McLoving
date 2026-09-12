@@ -84,7 +84,7 @@ async fn every_tenant_route_denies_missing_and_cross_tenant_authority() {
         node_id,
         &digest,
     );
-    assert_eq!(cases.len(), 37, "route matrix must track the public API");
+    assert_eq!(cases.len(), 40, "route matrix must track the public API");
     for case in cases {
         let unauthenticated = app
             .clone()
@@ -1327,6 +1327,19 @@ fn route_cases(
             Method::POST,
             format!("{project}/pipelines/plan"),
             source,
+            json,
+        ),
+        case(Method::GET, format!("{project}/memberships")),
+        body_case(
+            Method::PUT,
+            format!("{project}/memberships/{node_id}"),
+            r#"{"role":"viewer","reason":"route contract"}"#,
+            json,
+        ),
+        body_case(
+            Method::DELETE,
+            format!("{project}/memberships/{node_id}"),
+            r#"{"reason":"route contract"}"#,
             json,
         ),
         case(Method::GET, format!("{project}/pipelines")),
