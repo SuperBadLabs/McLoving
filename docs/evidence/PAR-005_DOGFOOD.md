@@ -39,5 +39,5 @@ moved past before its build ran fails its checkout as `revision_mismatch`
 pushed commit); such a row is a mismatch, not a match, until `AGENT-013`
 fetches the exact object.
 
-| # | Commit | Committed (UTC) | Foundation | McLoving build | McLoving | Match |
+| # | Commit | Build created (UTC) | Foundation | McLoving build | McLoving | Match |
 |---|---|---|---|---|---|---|

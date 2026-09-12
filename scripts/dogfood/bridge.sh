@@ -1,19 +1,20 @@
 #!/usr/bin/env bash
 # Webhook bridge for the dogfood deployment (PAR-005). A host without public
-# ingress cannot receive GitHub's deliveries, so this loop asks GitHub for
-# the branch head and posts each new head to the controller's own public
-# webhook route as a push delivery, signed with the trigger's derived secret
-# exactly as GitHub would sign it: the receiver, the trigger filter, the
-# idempotency on the delivery id and the admission path are the ones GitHub
-# exercises. When Tailscale Funnel (or any public ingress) reaches the
-# controller, the hook route is registered at GitHub instead and this loop
-# is not run; the two never run together, since a delivery id is the commit
-# id and the receiver acknowledges a repeat without a second build.
+# ingress cannot receive GitHub's deliveries, so this loop reads the
+# repository's push events for the branch and posts each one to the
+# controller's own public webhook route as a push delivery, signed with the
+# trigger's derived secret exactly as GitHub would sign it: the receiver, the
+# trigger filter, the idempotency on the delivery id and the admission path
+# are the ones GitHub exercises. The delivery id is the push event's own id,
+# so a branch pushed away from a commit and back to it is two deliveries and
+# two builds, as at GitHub. When Tailscale Funnel (or any public ingress)
+# reaches the controller, the hook route is registered at GitHub instead and
+# this loop is not run; the two never run together.
 #
-# usage: bridge.sh <state-dir> [interval-seconds]
+# usage: bridge.sh <state-dir> [interval-seconds|once]
 #   state-dir holds hook.json (path + secret, written by heman-up.sh) and
-#   the last head delivered; MCLOVING_URL and MCLOVING_DOGFOOD_REPOSITORY
-#   (owner/name) come from the environment.
+#   the id of the last delivered push event; MCLOVING_URL and
+#   MCLOVING_DOGFOOD_REPOSITORY (owner/name) come from the environment.
 set -euo pipefail
 state="$1"
 interval="${2:-60}"
@@ -21,12 +22,17 @@ repository="${MCLOVING_DOGFOOD_REPOSITORY:?owner/name}"
 branch="${MCLOVING_DOGFOOD_BRANCH:-main}"
 hook_path="$(jq -r .path "${state}/hook.json")"
 secret="$(jq -r .secret "${state}/hook.json")"
-last_file="${state}/last-delivered"
+last_file="${state}/last-delivered-event"
+log() { printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
 
 sign() { printf 'sha256=%s' "$(openssl dgst -sha256 -hmac "${secret}" <"$1" | sed 's/^.* //')"; }
 
+# Delivers one push: event id and head. Answers non-zero unless the route
+# acknowledged it (admitted, replayed or filtered), so a failed delivery is
+# retried on the next pass and never recorded as done.
 deliver() {
-  local sha="$1" body="${state}/delivery-${1}.json" answer="${state}/answer-${1}.json" commit="${state}/commit-${1}.json" code
+  local event="$1" sha="$2"
+  local body="${state}/delivery-${event}.json" answer="${state}/answer-${event}.json" commit="${state}/commit-${sha}.json" code
   gh api "repos/${repository}/commits/${sha}" \
     --jq '{sha, message: .commit.message, timestamp: .commit.committer.date, files: [.files[]?.filename]}' \
     >"${commit}"
@@ -48,60 +54,72 @@ body = {
 open(out, "w").write(json.dumps(body, separators=(",", ":")))
 PY
   code="$(curl -sS -o "${answer}" -w '%{http_code}' -X POST "${MCLOVING_URL}${hook_path}" \
-    -H 'Content-Type: application/json' -H "X-GitHub-Delivery: ${sha}" \
+    -H 'Content-Type: application/json' -H "X-GitHub-Delivery: ${event}" \
     -H 'X-GitHub-Event: push' -H "X-Hub-Signature-256: $(sign "${body}")" --data-binary "@${body}")"
-  printf '%s %s -> %s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${sha}" "${code}" "$(jq -c '{build_id: .admission.build_id, status: .status}' "${answer}" 2>/dev/null || true)"
-  # Only an acknowledged delivery (admitted, replayed or filtered) is
-  # recorded as delivered; anything else is retried on the next pass.
+  # The bridge's own record of which build a commit got, for verdicts.sh.
+  [ -f "${answer}" ] && cp "${answer}" "${state}/answer-${sha}.json"
+  log "push ${event} ${sha} -> ${code} $(jq -c '{build_id: .admission.build_id, status: .status}' "${answer}" 2>/dev/null || true)"
   case "${code}" in 2*) return 0 ;; *) return 1 ;; esac
 }
 
-# The heads pushed since the last delivered one, oldest first: one per
-# push event on the branch, as GitHub would deliver them (a merge that
-# advances the branch by several commits is one push and one head), so two
-# pushes inside one polling interval are two deliveries. The repository's
-# push events are paged newest first until the watermark is found; if the
-# watermark is older than the events GitHub still lists (an outage longer
-# than its event window), the current head alone is delivered and the gap
-# is logged, since the heads between cannot be known. Without a record
-# yet, only the current head is delivered.
-pending_heads() {
-  local last page heads found
+# The pushes to the branch since the last delivered one, oldest first, as
+# "<event id> <head>" lines: GitHub's push events, paged newest first until
+# the watermark is found. A page request that fails aborts the pass (answer
+# 1) rather than being read as the end of the events, so nothing is skipped
+# on a transient error. Without a record yet, only the newest push (or the
+# branch head, if the events list none) is delivered. If the watermark is
+# older than the events GitHub still lists (an outage longer than its event
+# window), the newest push alone is delivered and the gap is logged, since
+# the pushes between cannot be known.
+pending_pushes() {
+  local last page events batch pushes found
   last="$(cat "${last_file}" 2>/dev/null || true)"
-  if [ -z "${last}" ]; then
-    gh api "repos/${repository}/branches/${branch}" --jq .commit.sha 2>/dev/null || true
-    return
-  fi
-  heads=""
+  pushes=""
   found=""
   for page in 1 2 3 4 5 6 7 8 9 10; do
-    local events batch
-    # Paging stops when GitHub returns no events at all, not when a page
-    # happens to hold no push to this branch.
-    events="$(gh api "repos/${repository}/events?per_page=100&page=${page}" 2>/dev/null || true)"
-    [ -z "${events}" ] || [ "$(printf '%s' "${events}" | jq 'length')" = "0" ] && break
+    if ! events="$(gh api "repos/${repository}/events?per_page=100&page=${page}")"; then
+      log "events page ${page} failed; retrying this pass later" >&2
+      return 1
+    fi
+    [ "$(printf '%s' "${events}" | jq 'length')" = "0" ] && break
     batch="$(printf '%s' "${events}" \
-      | jq -r ".[] | select(.type == \"PushEvent\" and .payload.ref == \"refs/heads/${branch}\") | .payload.head")"
-    heads="${heads}${batch}
+      | jq -r ".[] | select(.type == \"PushEvent\" and .payload.ref == \"refs/heads/${branch}\") | \"\\(.id) \\(.payload.head)\"")"
+    pushes="${pushes}${batch}
 "
-    if printf '%s' "${batch}" | rg -q -x "${last}"; then found=yes; break; fi
+    if [ -z "${last}" ]; then
+      [ -n "${batch}" ] && break
+      continue
+    fi
+    if printf '%s' "${batch}" | rg -q "^${last} "; then found=yes; break; fi
   done
-  if [ -z "${found}" ]; then
-    printf '%s watermark %s is older than the push events GitHub lists; delivering the current head only\n' \
-      "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${last}" >&2
-    gh api "repos/${repository}/branches/${branch}" --jq .commit.sha 2>/dev/null || true
-    return
+  if [ -z "${last}" ]; then
+    if [ -n "$(printf '%s' "${pushes}" | head -1)" ]; then
+      printf '%s' "${pushes}" | awk 'NF { print; exit }'
+    else
+      local head
+      head="$(gh api "repos/${repository}/branches/${branch}" --jq .commit.sha)" || return 1
+      printf 'branch-%s %s\n' "${head}" "${head}"
+    fi
+    return 0
   fi
-  printf '%s' "${heads}" | awk -v last="${last}" '$0 == last { exit } NF && !seen[$0]++ { print }' | tac
+  if [ -z "${found}" ]; then
+    log "watermark ${last} is older than the push events GitHub lists; delivering the newest push only" >&2
+    printf '%s' "${pushes}" | awk 'NF { print; exit }'
+    return 0
+  fi
+  printf '%s' "${pushes}" | awk -v last="${last}" '$1 == last { exit } NF && !seen[$1]++ { print }' | tac
 }
 
 while :; do
   # The watermark is contiguous: a failed delivery stops this pass, so the
-  # next one starts again at that head rather than skipping it.
-  for head in $(pending_heads); do
-    deliver "${head}" || break
-    printf '%s\n' "${head}" >"${last_file}"
-  done
+  # next one starts again at that push rather than skipping it.
+  if pending="$(pending_pushes)"; then
+    while read -r event sha; do
+      [ -z "${event}" ] && continue
+      deliver "${event}" "${sha}" || break
+      printf '%s\n' "${event}" >"${last_file}"
+    done <<<"${pending}"
+  fi
   [ "${interval}" = "once" ] && exit 0
   sleep "${interval}"
 done
