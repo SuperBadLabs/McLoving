@@ -1135,7 +1135,11 @@ not examined, since only the well-known prefix is decodable without
 configuration (`CTRL-007` lets the operator name the deployment's
 prefixes); the destination's certificate is
 checked against the system roots, so a private authority is not supported
-(the ticket's CA pin is not shipped); a 4xx that will never succeed is retried to the
+(the ticket's CA pin is not shipped); the status-key fence is
+tenant-partitioned like every store read, so two organizations of one
+deployment that map the same repository, commit and context race at GitHub
+(an operator gives each organization its own context, or maps a repository
+in one organization); a 4xx that will never succeed is retried to the
 attempt bound rather than abandoned at once; GitHub's answer to the commit
 status is trusted as delivery; the `revision` a status is written for comes
 from the pipeline's parameter, so a pipeline can report on any commit of the
