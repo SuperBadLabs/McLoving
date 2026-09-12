@@ -33,7 +33,11 @@ Foundation's whole-run conclusion against the dogfood build's status.
 Recorded by `scripts/dogfood/verdicts.sh`, newest last. `Foundation` is
 `gh run list --workflow Foundation --branch main` for the commit;
 `McLoving` is `mcloving builds` for the dogfood pipeline's build of that
-commit. The count of consecutive matches is the acceptance.
+commit. The count of consecutive matches is the acceptance. A push the branch
+moved past before its build ran fails its checkout as `revision_mismatch`
+(the acquirer fetches the branch and requires it to still resolve to the
+pushed commit); such a row is a mismatch, not a match, until `AGENT-013`
+fetches the exact object.
 
 | # | Commit | Committed (UTC) | Foundation | McLoving build | McLoving | Match |
 |---|---|---|---|---|---|---|
