@@ -75,10 +75,13 @@ pending_heads() {
   heads=""
   found=""
   for page in 1 2 3 4 5 6 7 8 9 10; do
-    local batch
-    batch="$(gh api "repos/${repository}/events?per_page=100&page=${page}" \
-      --jq ".[] | select(.type == \"PushEvent\" and .payload.ref == \"refs/heads/${branch}\") | .payload.head" 2>/dev/null || true)"
-    [ -z "${batch}" ] && break
+    local events batch
+    # Paging stops when GitHub returns no events at all, not when a page
+    # happens to hold no push to this branch.
+    events="$(gh api "repos/${repository}/events?per_page=100&page=${page}" 2>/dev/null || true)"
+    [ -z "${events}" ] || [ "$(printf '%s' "${events}" | jq 'length')" = "0" ] && break
+    batch="$(printf '%s' "${events}" \
+      | jq -r ".[] | select(.type == \"PushEvent\" and .payload.ref == \"refs/heads/${branch}\") | .payload.head")"
     heads="${heads}${batch}
 "
     if printf '%s' "${batch}" | rg -q -x "${last}"; then found=yes; break; fi
