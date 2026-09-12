@@ -3560,6 +3560,7 @@ impl Store {
         sqlx::query(
             "UPDATE notification_deliveries
              SET state = 'abandoned',
+                 in_flight = false,
                  last_error = COALESCE(last_error, 'attempts exhausted')
              WHERE organization_id = $1
                AND state = 'pending'
@@ -3711,7 +3712,10 @@ impl Store {
                          + make_interval(secs => LEAST(power(2, attempts), $7))
                  END,
                  repost_required = false,
-                 in_flight = CASE WHEN $5::text IS NULL THEN false ELSE in_flight END,
+                 in_flight = CASE
+                     WHEN $5::text IS NULL OR attempts >= $6 THEN false
+                     ELSE in_flight
+                 END,
                  last_error = $5
              WHERE organization_id = $1
                AND build_id = $2

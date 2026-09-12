@@ -1126,9 +1126,12 @@ and signing key are owner-private secret-class files opened without
 following links, never logged, never in a link, and the public base URL is
 the only thing a notification carries about the controller; the UI reads
 the linked organization, project and build from the query and still asks
-for the token). Residual: the destination's certificate is checked against
-the system roots, so a private authority is not supported (the ticket's CA
-pin is not shipped); a 4xx that will never succeed is retried to the
+for the token). Residual: a request the target applies after the local deadline can
+still become the latest status, since the quiet interval bounds the
+worker's wait and not the target's (`CTRL-007` reconciles the status
+against the target after the interval); the destination's certificate is
+checked against the system roots, so a private authority is not supported
+(the ticket's CA pin is not shipped); a 4xx that will never succeed is retried to the
 attempt bound rather than abandoned at once; GitHub's answer to the commit
 status is trusted as delivery; the `revision` a status is written for comes
 from the pipeline's parameter, so a pipeline can report on any commit of the

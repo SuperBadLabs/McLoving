@@ -12945,6 +12945,22 @@ async fn a_terminal_build_records_its_notification_deliveries_once() {
         last[0].attempts,
         mcloving_domain::notifications::MAX_DELIVERY_ATTEMPTS
     );
+    // The last attempt is marked in flight and fails: abandonment drops
+    // the mark, so later builds for the same status are not delayed by a
+    // row that will never post again.
+    assert_eq!(
+        store
+            .mark_notification_in_flight(
+                organization_id,
+                admission.build_id,
+                1,
+                1,
+                last[0].attempts
+            )
+            .await
+            .expect("mark the last attempt in flight"),
+        InFlightMark::Marked
+    );
     assert!(
         store
             .settle_notification(
@@ -12963,6 +12979,16 @@ async fn a_terminal_build_records_its_notification_deliveries_once() {
         .await
         .expect("read the ledger after abandoning");
     assert_eq!(ledger[1].3, "abandoned");
+    let abandoned_mark = sqlx::query_scalar::<_, bool>(
+        "SELECT in_flight FROM notification_deliveries
+         WHERE organization_id = $1 AND build_id = $2 AND target_index = 1",
+    )
+    .bind(organization_id)
+    .bind(admission.build_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("read the mark after abandonment");
+    assert!(!abandoned_mark, "an abandoned row keeps no in-flight mark");
     // A row claimed for its last attempt by a worker that died is abandoned
     // by the next scan once its lease is over, never claimed a thirteenth
     // time.
