@@ -3601,7 +3601,6 @@ impl Store {
              claimed AS (
                  UPDATE notification_deliveries AS d
                  SET attempts = d.attempts + 1,
-                     in_flight = false,
                      next_attempt_at = clock_timestamp() + make_interval(secs => $3)
                  FROM due
                  WHERE d.organization_id = due.organization_id
@@ -3669,8 +3668,9 @@ impl Store {
     /// posted once more and the latest outcome is the last write. A failed
     /// attempt keeps its in-flight mark: a request that timed out after its
     /// body was sent may still be applied by the target, so a later outcome
-    /// recorded meanwhile stays delayed past the deadline; the next claim of
-    /// the row clears the mark before its own request is marked.
+    /// recorded meanwhile stays delayed past the deadline; the mark stands
+    /// until a settlement succeeds, the row is superseded or abandoned, or
+    /// the build becomes terminal again, so a reclaim leaves it in place.
     pub async fn settle_notification(
         &self,
         organization_id: Uuid,
