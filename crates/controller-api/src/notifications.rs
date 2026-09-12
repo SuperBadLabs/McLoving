@@ -493,7 +493,10 @@ async fn post_pinned(
     let mut answer = Vec::new();
     while answer.len() < MAX_RESPONSE_BYTES {
         match response.chunk().await {
-            Ok(Some(chunk)) => answer.extend_from_slice(&chunk),
+            Ok(Some(chunk)) => {
+                let room = MAX_RESPONSE_BYTES - answer.len();
+                answer.extend_from_slice(&chunk[..chunk.len().min(room)]);
+            }
             Ok(None) => break,
             Err(error) => {
                 if status.is_success() {

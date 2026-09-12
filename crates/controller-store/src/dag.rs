@@ -1392,6 +1392,7 @@ pub(crate) fn normalized_dag_contract(input: &NewDagBuild) -> Value {
 /// Validates the complete bounded DAG contract without requiring a database.
 pub fn validate_dag_contract(input: &NewDagBuild) -> Result<(), DagContractError> {
     validate_text("$.idempotency_key", &input.idempotency_key)?;
+    validate_notify_targets(&input.notify_targets)?;
     if input.nodes.is_empty() || input.nodes.len() > MAX_DAG_NODES {
         return Err(DagContractError::new(
             DagContractErrorCode::NodeLimit,
@@ -1554,6 +1555,49 @@ pub fn validate_dag_contract(input: &NewDagBuild) -> Result<(), DagContractError
     Ok(())
 }
 
+/// The resolved notification targets a build carries: an array of at most
+/// `MAX_NOTIFY_TARGETS` objects, each naming a known `kind` and a canonical
+/// `mapping_id`, so the terminal transaction can record one delivery per
+/// entry rather than fail on a malformed one.
+fn validate_notify_targets(targets: &Value) -> Result<(), DagContractError> {
+    let invalid = |message: &str| {
+        DagContractError::new(
+            DagContractErrorCode::InvalidNotifyTargets,
+            "$.notify_targets",
+            message,
+        )
+    };
+    let Some(entries) = targets.as_array() else {
+        return Err(invalid("notification targets must be an array"));
+    };
+    if entries.len() > mcloving_domain::notifications::MAX_NOTIFY_TARGETS {
+        return Err(invalid("too many notification targets"));
+    }
+    for entry in entries {
+        let Some(object) = entry.as_object() else {
+            return Err(invalid("notification target must be an object"));
+        };
+        if !matches!(
+            object.get("kind").and_then(Value::as_str),
+            Some("github_status" | "webhook")
+        ) {
+            return Err(invalid(
+                "notification target kind must be github_status or webhook",
+            ));
+        }
+        if !object
+            .get("mapping_id")
+            .and_then(Value::as_str)
+            .is_some_and(mcloving_domain::cache_intent::canonical_mapping_id)
+        {
+            return Err(invalid(
+                "notification target must name a canonical mapping id",
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_text(path: &str, value: &str) -> Result<(), DagContractError> {
     if value.is_empty()
         || value.len() > MAX_DAG_TEXT_BYTES
@@ -1606,6 +1650,7 @@ pub enum DagContractErrorCode {
     CapabilityLimit,
     DuplicateCapability,
     ExecutionSpecLimit,
+    InvalidNotifyTargets,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
