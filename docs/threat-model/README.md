@@ -1096,7 +1096,10 @@ public ingress the host cannot receive GitHub's deliveries, so
 own public hook route as a push delivery signed with the trigger's derived
 secret, so the receiver, filter, idempotency on the delivery id and the
 admission path are the ones GitHub exercises, and a delivery id is the
-commit id so the bridge and GitHub can never mint two builds for one push);
+GitHub push event's own id, so one push is one build whichever side
+delivers it and a branch pushed away from a commit and back is two pushes
+and two builds, as at GitHub; the bridge records every delivery with its
+event and build so the evidence pairs each build with its own push);
 TM-052 (verification integrity: `scripts/dogfood/verify-lanes.py` names the
 commands each lane mirrors and fails when Foundation or the lane stops
 carrying one, and the evidence table is written by
