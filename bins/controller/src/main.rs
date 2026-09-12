@@ -27,7 +27,7 @@ use mcloving_controller_api::{
     ApiState, CacheMappingCatalog, ConnectorMappingCatalog, InputMappingCatalog,
     InsecureLoopbackPolicy, MAX_OIDC_CLOCK_SKEW_SECONDS, MAX_OIDC_JWKS_BYTES,
     MAX_OIDC_REFRESH_TTL_SECONDS, MAX_OIDC_REQUEST_TIMEOUT_SECONDS, MAX_OIDC_SESSION_TTL_SECONDS,
-    OidcClientConfig, SourceMappingCatalog, router,
+    NotificationMappingCatalog, OidcClientConfig, SourceMappingCatalog, router,
 };
 use mcloving_controller_store::{
     AgentCancellationCompletion, AgentCancellationDisposition, AgentCancellationOutcome,
@@ -134,6 +134,11 @@ async fn main() -> Result<()> {
     let input_mapping_catalog = input_mapping_catalog_from_environment()?;
     let source_mapping_catalog = source_mapping_catalog_from_environment()?;
     let webhook_key = webhook_key_from_environment()?;
+    let notification_mapping_catalog = notification_mapping_catalog_from_environment()?;
+    let github_token = github_token_from_environment()?;
+    let notification_key =
+        secret_file_from_environment("MCLOVING_NOTIFICATION_KEY_FILE", 32, 4096)?;
+    let public_base_url = environment_string(&process_environment, "MCLOVING_PUBLIC_BASE_URL")?;
     validate_effect_mapping_configuration(
         worker.config.effect_plan.as_ref().map(|plan| {
             (
@@ -234,6 +239,26 @@ async fn main() -> Result<()> {
             .with_webhook_key(key)
             .context("configure the controller webhook key")?;
     }
+    if let Some(catalog) = notification_mapping_catalog {
+        state = state
+            .with_notification_mapping_catalog(catalog)
+            .context("configure notification mapping admission catalog")?;
+    }
+    if let Some(token) = github_token {
+        state = state
+            .with_github_token(&token)
+            .context("configure the GitHub commit-status token")?;
+    }
+    if let Some(key) = notification_key {
+        state = state
+            .with_notification_signing_key(key)
+            .context("configure the notification signing key")?;
+    }
+    if let Some(base) = public_base_url {
+        state = state
+            .with_public_base_url(&base)
+            .context("configure MCLOVING_PUBLIC_BASE_URL")?;
+    }
     if let Some(oidc) = &oidc {
         state = state
             .with_oidc_client(oidc.client.clone())
@@ -311,6 +336,7 @@ async fn main() -> Result<()> {
         .with_staged_upload_ttl(staged_upload_ttl);
     let trigger_retry_state = state.clone();
     let trigger_retry_organization = worker.organization_id;
+    let notification_delivery_state = state.clone();
     let server = async {
         axum::serve(
             listener,
@@ -344,12 +370,16 @@ async fn main() -> Result<()> {
     let trigger_retry_loop =
         run_trigger_retry_worker(trigger_retry_state, trigger_retry_organization);
     tokio::pin!(trigger_retry_loop);
+    let notification_delivery_loop =
+        run_notification_delivery_worker(notification_delivery_state, trigger_retry_organization);
+    tokio::pin!(notification_delivery_loop);
     tokio::select! {
         result = &mut server => result,
         result = &mut agent_server => result,
         result = &mut notification_loop => result,
         result = &mut worker_loop => result,
         result = &mut trigger_retry_loop => result,
+        result = &mut notification_delivery_loop => result,
         result = &mut outbox_reaper_loop => result,
     }
 }
@@ -2810,6 +2840,30 @@ async fn run_trigger_retry_worker(state: ApiState, organization_id: Uuid) -> Res
     }
 }
 
+/// Delivers a terminal build's notifications (PAR-004): each scan claims
+/// due ledger rows under `SKIP LOCKED`, so several controllers on one
+/// database each deliver a disjoint set, and a claim's backoff keeps a
+/// failed row off the next scan until it is due again.
+async fn run_notification_delivery_worker(state: ApiState, organization_id: Uuid) -> Result<()> {
+    const POLL_INTERVAL: Duration = Duration::from_secs(1);
+    loop {
+        match state
+            .process_due_notifications(
+                organization_id,
+                mcloving_controller_api::notifications::DELIVERY_SCAN_LIMIT,
+            )
+            .await
+        {
+            Ok(0) => tokio::time::sleep(POLL_INTERVAL).await,
+            Ok(_) => {}
+            Err(error) => {
+                eprintln!("notification delivery scan failed: {error}");
+                tokio::time::sleep(POLL_INTERVAL).await;
+            }
+        }
+    }
+}
+
 /// Default outbox retention horizon: seven days.
 const DEFAULT_OUTBOX_RETENTION_HOURS: u64 = 168;
 /// Upper retention bound: ten years, which also keeps the horizon within the
@@ -3174,6 +3228,147 @@ fn load_source_mapping_catalog(
     _expected: &str,
 ) -> Result<SourceMappingCatalog> {
     bail!("source catalog is supported only on Linux controllers")
+}
+
+/// An optional owner-private secret file named by `name`: a regular file of
+/// `min` to `max` bytes, opened without following a link, unreadable by
+/// group and others. Absent means the feature it serves is off.
+fn secret_file_from_environment(name: &str, min: u64, max: u64) -> Result<Option<Vec<u8>>> {
+    let path = match std::env::var(name) {
+        Ok(path) if !path.is_empty() => PathBuf::from(path),
+        Ok(_) => bail!("{name} must not be empty"),
+        Err(std::env::VarError::NotPresent) => return Ok(None),
+        Err(error) => return Err(error).with_context(|| format!("read {name}")),
+    };
+    if !path.is_absolute() {
+        bail!("{name} must be absolute");
+    }
+    use std::io::Read as _;
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let file = options
+        .open(&path)
+        .with_context(|| format!("open {name}"))?;
+    let metadata = file.metadata().with_context(|| format!("inspect {name}"))?;
+    if !metadata.is_file() || metadata.len() < min || metadata.len() > max {
+        bail!("{name} must be a regular file of {min} to {max} bytes");
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        if metadata.mode() & 0o077 != 0 {
+            bail!("{name} must not be readable by group or other users");
+        }
+    }
+    let mut bytes = Vec::new();
+    file.take(max + 1)
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("read {name}"))?;
+    if (bytes.len() as u64) < min || (bytes.len() as u64) > max {
+        bail!("{name} changed size while being read");
+    }
+    Ok(Some(bytes))
+}
+
+/// `MCLOVING_GITHUB_TOKEN_FILE` (PAR-004): the token commit statuses are
+/// written with, one line; a trailing newline is tolerated, nothing else
+/// outside printable ASCII is.
+fn github_token_from_environment() -> Result<Option<String>> {
+    let Some(bytes) = secret_file_from_environment("MCLOVING_GITHUB_TOKEN_FILE", 1, 4096)? else {
+        return Ok(None);
+    };
+    let token = String::from_utf8(bytes)
+        .context("MCLOVING_GITHUB_TOKEN_FILE must contain UTF-8")?
+        .trim_end_matches(['\r', '\n'])
+        .to_owned();
+    if token.is_empty() || !token.bytes().all(|byte| (0x21..0x7f).contains(&byte)) {
+        bail!("MCLOVING_GITHUB_TOKEN_FILE must hold one token of printable ASCII");
+    }
+    Ok(Some(token))
+}
+
+fn notification_mapping_catalog_from_environment() -> Result<Option<NotificationMappingCatalog>> {
+    let path = match std::env::var("MCLOVING_NOTIFICATION_MAPPING_CATALOG") {
+        Ok(path) if !path.is_empty() => PathBuf::from(path),
+        Ok(_) => bail!("MCLOVING_NOTIFICATION_MAPPING_CATALOG must not be empty"),
+        Err(std::env::VarError::NotPresent) => {
+            if std::env::var_os("MCLOVING_NOTIFICATION_MAPPING_CATALOG_SHA256").is_some() {
+                bail!("notification catalog digest requires catalog path");
+            }
+            return Ok(None);
+        }
+        Err(error) => return Err(error).context("read notification mapping catalog path"),
+    };
+    let expected = required("MCLOVING_NOTIFICATION_MAPPING_CATALOG_SHA256")?;
+    load_notification_mapping_catalog(&path, &expected).map(Some)
+}
+
+#[cfg(target_os = "linux")]
+fn load_notification_mapping_catalog(
+    path: &std::path::Path,
+    expected: &str,
+) -> Result<NotificationMappingCatalog> {
+    use std::io::Read as _;
+    if !path.is_absolute() || !mcloving_domain::cache_intent::canonical_sha256(expected) {
+        bail!("notification catalog needs absolute path and canonical SHA-256");
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let file = options
+        .open(path)
+        .context("open pinned notification mapping catalog")?;
+    let metadata = file
+        .metadata()
+        .context("inspect opened notification catalog")?;
+    if !metadata.is_file() || metadata.len() > 1024 * 1024 {
+        bail!("notification catalog must be bounded regular file");
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        if metadata.mode() & 0o022 != 0 {
+            bail!("notification catalog must not be writable by group or other users");
+        }
+    }
+    let mut bytes = Vec::new();
+    file.take(1024 * 1024 + 1)
+        .read_to_end(&mut bytes)
+        .context("read opened notification catalog")?;
+    if bytes.len() > 1024 * 1024 {
+        bail!("notification catalog grew beyond bound");
+    }
+    let actual = Sha256::digest(&bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
+    if actual != expected {
+        bail!("notification catalog digest mismatch");
+    }
+    let catalog: NotificationMappingCatalog =
+        mcloving_external_connector::parse_json_no_duplicates(&bytes)
+            .context("parse strict notification catalog")?;
+    catalog
+        .validate()
+        .context("validate notification catalog")?;
+    Ok(catalog)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn load_notification_mapping_catalog(
+    _path: &std::path::Path,
+    _expected: &str,
+) -> Result<NotificationMappingCatalog> {
+    bail!("notification catalog is supported only on Linux controllers")
 }
 
 fn connector_mapping_catalog_from_environment() -> Result<Option<ConnectorMappingCatalog>> {

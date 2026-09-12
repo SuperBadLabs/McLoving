@@ -492,12 +492,15 @@ deployment_contract_path_variables() {
         "secret follow MCLOVING_AGENT_IDENTITY_BINDINGS_PATH file" \
         "secret nofollow MCLOVING_EFFECT_RUNTIME_PLAN file" \
         "secret nofollow MCLOVING_WEBHOOK_KEY_FILE file" \
+        "secret nofollow MCLOVING_GITHUB_TOKEN_FILE file" \
+        "secret nofollow MCLOVING_NOTIFICATION_KEY_FILE file" \
         "trust follow MCLOVING_AGENT_SERVER_CERT_PATH file" \
         "trust follow MCLOVING_AGENT_CLIENT_CA_PATH file" \
         "trust nofollow MCLOVING_EFFECT_MAPPING_CATALOG file" \
         "trust nofollow MCLOVING_CACHE_MAPPING_CATALOG file" \
         "trust nofollow MCLOVING_INPUT_MAPPING_CATALOG file" \
         "trust nofollow MCLOVING_SOURCE_MAPPING_CATALOG file" \
+        "trust nofollow MCLOVING_NOTIFICATION_MAPPING_CATALOG file" \
         "state follow MCLOVING_OBJECT_ROOT directory" \
         "state follow MCLOVING_WORKSPACE_ROOT directory" \
         "state follow MCLOVING_AGENT_JOURNAL file"

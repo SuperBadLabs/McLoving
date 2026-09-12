@@ -149,6 +149,16 @@ impl VersionedComponent {
                 error.message,
             )
         })?;
+        // Expansion folds stages, not a pipeline's notification targets
+        // (PAR-004): a component that declared them would be accepted and
+        // digest-bound and then silently notify nobody, so it is refused.
+        if !self.pipeline.notify.is_empty() {
+            return Err(ComponentError::new(
+                ComponentErrorCode::InvalidDefinition,
+                "$.pipeline.notify",
+                "a component cannot declare notification targets; expansion carries none",
+            ));
+        }
         if self
             .pipeline
             .stages
@@ -585,6 +595,7 @@ pub fn expand_component(
         parameter_values: BTreeMap::new(),
         expressions: Vec::new(),
         stages: state.stages,
+        notify: Vec::new(),
         provenance: Provenance {
             source_id: root_component.provenance.source_id.clone(),
             source_sha256: root_component.provenance.source_sha256,

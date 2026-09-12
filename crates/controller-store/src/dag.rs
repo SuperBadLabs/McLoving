@@ -85,6 +85,10 @@ pub struct NewDagBuild {
     pub pipeline_digest: [u8; 32],
     pub priority: i32,
     pub nodes: Vec<NewDagNode>,
+    /// Notification targets the pipeline named (PAR-004), as a JSON array of
+    /// `mcloving_domain::notifications::NotifyTarget` values already resolved
+    /// against the deployment's mapping catalog; empty for none.
+    pub notify_targets: Value,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -362,9 +366,9 @@ pub(crate) async fn admit_dag_contract_transaction(
                  pipeline_id, pipeline_revision, pipeline_operational_generation,
                  pipeline_revision_digest,
                  idempotency_key, pipeline_digest, status, priority,
-                 dag_mode, dag_contract
+                 dag_mode, dag_contract, notify_targets
              )
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'queued', $10, true, $11)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'queued', $10, true, $11, $12)
              ON CONFLICT (project_id, idempotency_key) DO NOTHING
              RETURNING id",
     )
@@ -379,6 +383,7 @@ pub(crate) async fn admit_dag_contract_transaction(
     .bind(input.pipeline_digest.as_slice())
     .bind(input.priority)
     .bind(&contract)
+    .bind(&input.notify_targets)
     .fetch_optional(&mut **tx)
     .await?;
 
@@ -1067,8 +1072,8 @@ async fn derive_build_outcome(
     let reconciliation_required: i64 = counts.try_get("reconciliation_required")?;
     let node_cancelled: Option<bool> = counts.try_get("node_cancelled")?;
     if pending == 0 {
-        let owner_cancelled = sqlx::query_scalar::<_, bool>(
-            "SELECT cancellation_requested_at IS NOT NULL
+        let (owner_cancelled, previous_status) = sqlx::query_as::<_, (bool, String)>(
+            "SELECT cancellation_requested_at IS NOT NULL, status
              FROM builds
              WHERE organization_id = $1 AND id = $2",
         )
@@ -1095,6 +1100,16 @@ async fn derive_build_outcome(
         .bind(status)
         .execute(&mut **tx)
         .await?;
+        // The build's terminal transition (PAR-004): once per transition into
+        // a terminal status, never on the re-derivations the retry paths make
+        // while the build stays terminal or non-terminal, the terminal event
+        // is appended and one delivery per named target is recorded under
+        // this same commit, so a terminal build has its deliveries or is not
+        // terminal. A build re-opened by a retry and terminal again with a
+        // new status resets its deliveries for redelivery.
+        if !matches!(previous_status.as_str(), "succeeded" | "failed" | "aborted") {
+            record_terminal_notifications(tx, organization_id, build_id, status).await?;
+        }
     } else {
         let status = if reconciliation_required > 0 {
             "reconciliation_required"
@@ -1114,6 +1129,125 @@ async fn derive_build_outcome(
         .execute(&mut **tx)
         .await?;
     }
+    Ok(())
+}
+
+/// Appends the terminal event and records the build's notification
+/// deliveries from the targets it carried since admission.
+pub(crate) async fn record_terminal_notifications(
+    tx: &mut Transaction<'_, Postgres>,
+    organization_id: Uuid,
+    build_id: Uuid,
+    status: &str,
+) -> Result<(), StoreError> {
+    // Status keys are locked before any delivery row is touched, in key
+    // order: the same order an attempt marking itself in flight uses (key
+    // lock, then its row), so the two never wait on each other.
+    let statuses = sqlx::query_as::<_, (Value,)>(
+        "SELECT t.target
+         FROM builds AS b
+         CROSS JOIN LATERAL jsonb_array_elements(b.notify_targets) AS t(target)
+         WHERE b.organization_id = $1 AND b.id = $2 AND t.target->>'kind' = 'github_status'
+         ORDER BY t.target->>'repository', t.target->>'commit', t.target->>'context'",
+    )
+    .bind(organization_id)
+    .bind(build_id)
+    .fetch_all(&mut **tx)
+    .await?;
+    for (target,) in &statuses {
+        crate::lock_status_key(tx, organization_id, target).await?;
+    }
+    let recorded = sqlx::query_scalar::<_, i64>(
+        "WITH inserted AS (
+             INSERT INTO notification_deliveries (
+                 organization_id, build_id, target_index, kind, mapping_id, target,
+                 build_status
+             )
+             SELECT b.organization_id, b.id, (t.ordinality - 1)::integer,
+                    t.target->>'kind', t.target->>'mapping_id', t.target, $3
+             FROM builds AS b
+             CROSS JOIN LATERAL jsonb_array_elements(b.notify_targets)
+                 WITH ORDINALITY AS t(target, ordinality)
+             WHERE b.organization_id = $1 AND b.id = $2
+             ON CONFLICT (organization_id, build_id, target_index) DO UPDATE
+             SET build_status = EXCLUDED.build_status,
+                 terminal_generation = notification_deliveries.terminal_generation + 1,
+                 state = 'pending',
+                 attempts = 0,
+                 next_attempt_at = CASE
+                     WHEN notification_deliveries.in_flight
+                         THEN clock_timestamp() + make_interval(secs => $4)
+                     ELSE clock_timestamp()
+                 END,
+                 in_flight = false,
+                 repost_required = false,
+                 last_error = NULL,
+                 delivered_at = NULL
+             RETURNING 1
+         )
+         SELECT count(*) FROM inserted",
+    )
+    .bind(organization_id)
+    .bind(build_id)
+    .bind(status)
+    .bind(mcloving_domain::notifications::STALE_WRITE_QUIET_SECONDS as f64)
+    .fetch_one(&mut **tx)
+    .await?;
+    // A commit status this build names may be held in flight by an earlier
+    // build's attempt: under the status key's lock taken above, this
+    // build's first post is delayed past that attempt's deadline so the
+    // earlier write cannot land after this build's whether or not its
+    // controller lives to settle.
+    let status_rows = sqlx::query_as::<_, (i32,)>(
+        "SELECT target_index FROM notification_deliveries
+         WHERE organization_id = $1 AND build_id = $2 AND kind = 'github_status'
+         ORDER BY target_index",
+    )
+    .bind(organization_id)
+    .bind(build_id)
+    .fetch_all(&mut **tx)
+    .await?;
+    for (target_index,) in status_rows {
+        sqlx::query(
+            "UPDATE notification_deliveries AS d
+             SET next_attempt_at = clock_timestamp() + make_interval(secs => $4)
+             WHERE d.organization_id = $1 AND d.build_id = $2 AND d.target_index = $3
+               AND EXISTS (
+                   SELECT 1
+                   FROM notification_deliveries AS o
+                   JOIN builds AS b
+                     ON b.organization_id = o.organization_id AND b.id = o.build_id
+                   WHERE o.organization_id = $1
+                     AND o.build_id <> $2
+                     AND o.kind = 'github_status'
+                     AND o.in_flight
+                     AND o.target->>'repository' = d.target->>'repository'
+                     AND o.target->>'commit' = d.target->>'commit'
+                     AND o.target->>'context' = d.target->>'context'
+                     AND (b.created_at, b.id) < (
+                         SELECT created_at, id FROM builds
+                         WHERE organization_id = $1 AND id = $2
+                     )
+               )",
+        )
+        .bind(organization_id)
+        .bind(build_id)
+        .bind(target_index)
+        .bind(mcloving_domain::notifications::STALE_WRITE_QUIET_SECONDS as f64)
+        .execute(&mut **tx)
+        .await?;
+    }
+    crate::append_event_and_outbox(
+        tx,
+        organization_id,
+        build_id,
+        "dag.build_terminal",
+        json!({
+            "status": status,
+            "notifications": recorded,
+        }),
+    )
+    .await?;
     Ok(())
 }
 
@@ -1252,16 +1386,29 @@ pub(crate) fn normalized_dag_contract(input: &NewDagBuild) -> Value {
             })
         })
         .collect::<Vec<_>>();
-    json!({
+    let mut contract = json!({
         "version": 1,
         "priority": input.priority,
         "nodes": nodes,
-    })
+    });
+    // The resolved targets are part of what a replay must repeat: two
+    // controllers whose catalogs resolve one mapping id differently must
+    // conflict rather than let the race pick where a credential acts. A
+    // build without targets keeps the contract older builds recorded.
+    if input
+        .notify_targets
+        .as_array()
+        .is_some_and(|targets| !targets.is_empty())
+    {
+        contract["notify_targets"] = input.notify_targets.clone();
+    }
+    contract
 }
 
 /// Validates the complete bounded DAG contract without requiring a database.
 pub fn validate_dag_contract(input: &NewDagBuild) -> Result<(), DagContractError> {
     validate_text("$.idempotency_key", &input.idempotency_key)?;
+    validate_notify_targets(&input.notify_targets)?;
     if input.nodes.is_empty() || input.nodes.len() > MAX_DAG_NODES {
         return Err(DagContractError::new(
             DagContractErrorCode::NodeLimit,
@@ -1424,6 +1571,105 @@ pub fn validate_dag_contract(input: &NewDagBuild) -> Result<(), DagContractError
     Ok(())
 }
 
+/// The resolved notification targets a build carries: an array of at most
+/// `MAX_NOTIFY_TARGETS` objects, each naming a known `kind` and a canonical
+/// `mapping_id`, so the terminal transaction can record one delivery per
+/// entry rather than fail on a malformed one.
+fn validate_notify_targets(targets: &Value) -> Result<(), DagContractError> {
+    let invalid = |message: &str| {
+        DagContractError::new(
+            DagContractErrorCode::InvalidNotifyTargets,
+            "$.notify_targets",
+            message,
+        )
+    };
+    let Some(entries) = targets.as_array() else {
+        return Err(invalid("notification targets must be an array"));
+    };
+    if entries.len() > mcloving_domain::notifications::MAX_NOTIFY_TARGETS {
+        return Err(invalid("too many notification targets"));
+    }
+    for entry in entries {
+        let Some(object) = entry.as_object() else {
+            return Err(invalid("notification target must be an object"));
+        };
+        let field = |name: &str| object.get(name).and_then(Value::as_str);
+        if !field("mapping_id").is_some_and(mcloving_domain::cache_intent::canonical_mapping_id) {
+            return Err(invalid(
+                "notification target must name a canonical mapping id",
+            ));
+        }
+        // The resolved shape is closed per kind: what delivery needs, and
+        // nothing a pipeline or a caller could smuggle past the catalog.
+        let expected: &[&str] = match field("kind") {
+            Some("github_status") => {
+                use mcloving_domain::notifications::{
+                    is_commit_id, is_repository_identity, is_status_context,
+                };
+                // The repository is one status key however it is spelled:
+                // admission stores it lowercased, so the store accepts only
+                // that spelling.
+                if !field("commit").is_some_and(is_commit_id)
+                    || !field("context").is_some_and(is_status_context)
+                    || !field("repository").is_some_and(|repository| {
+                        is_repository_identity(repository)
+                            && repository.bytes().all(|byte| !byte.is_ascii_uppercase())
+                    })
+                {
+                    return Err(invalid(
+                        "github_status target needs a commit, a context and a lowercase repository",
+                    ));
+                }
+                &["kind", "mapping_id", "commit", "context", "repository"]
+            }
+            Some("webhook") => {
+                // A debug build also admits a plain-HTTP loopback destination,
+                // the shape the controller's debug-only delivery seam admits
+                // from its catalog for tests against a local sink; a release
+                // build admits `https` only.
+                if !field("destination_url").is_some_and(webhook_destination_is_well_formed) {
+                    return Err(invalid("webhook target needs an https destination"));
+                }
+                &["kind", "mapping_id", "destination_url"]
+            }
+            _ => {
+                return Err(invalid(
+                    "notification target kind must be github_status or webhook",
+                ));
+            }
+        };
+        if object.keys().any(|key| !expected.contains(&key.as_str())) {
+            return Err(invalid("notification target carries an unknown field"));
+        }
+    }
+    Ok(())
+}
+
+/// The destination shape delivery will accept, parsed as delivery parses
+/// it: `https` (a debug build also admits plain-HTTP loopback, the shape
+/// the controller's debug-only delivery seam admits for tests against a
+/// local sink), a host, no credentials, no fragment, bounded, untrimmed.
+fn webhook_destination_is_well_formed(value: &str) -> bool {
+    if value.len() > 2048 || value.trim() != value {
+        return false;
+    }
+    let Ok(url) = url::Url::parse(value) else {
+        return false;
+    };
+    let scheme_ok = url.scheme() == "https"
+        || (cfg!(debug_assertions)
+            && url.scheme() == "http"
+            && url
+                .host_str()
+                .and_then(|host| host.parse::<std::net::Ipv4Addr>().ok())
+                .is_some_and(|ip| ip.is_loopback()));
+    scheme_ok
+        && url.host_str().is_some_and(|host| !host.is_empty())
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.fragment().is_none()
+}
+
 fn validate_text(path: &str, value: &str) -> Result<(), DagContractError> {
     if value.is_empty()
         || value.len() > MAX_DAG_TEXT_BYTES
@@ -1476,6 +1722,7 @@ pub enum DagContractErrorCode {
     CapabilityLimit,
     DuplicateCapability,
     ExecutionSpecLimit,
+    InvalidNotifyTargets,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

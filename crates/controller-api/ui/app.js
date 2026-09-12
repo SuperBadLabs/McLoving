@@ -23,6 +23,16 @@ byId("idempotency-key").value = newUuid();
 byId("pipeline-id").value = newUuid();
 byId("pipeline-state-idempotency").value = newUuid();
 
+// A notification links here with the organization, project and build in
+// the query (PAR-004); the token is never in a link. The linked build is
+// opened as soon as the token is supplied.
+const linked = new URLSearchParams(window.location.search);
+for (const [param, id] of [["organization", "organization"], ["project", "project"], ["build", "build-id"]]) {
+  const value = linked.get(param);
+  if (value) byId(id).value = value;
+}
+let openLinkedBuild = Boolean(linked.get("build"));
+
 function projectPath() {
   requireContext();
   return `/api/v1/organizations/${encodeURIComponent(context.organization)}/projects/${encodeURIComponent(context.project)}`;
@@ -297,6 +307,15 @@ byId("context-form").addEventListener("submit", (event) => {
   context.project = byId("project").value.trim();
   context.token = byId("token").value;
   byId("connection-state").textContent = "Context active";
+  if (openLinkedBuild) {
+    // The intent outlives a wrong token or a failed load: it is dropped
+    // only once the linked build has actually been shown.
+    showView("build");
+    action(loadBuild).then((loaded) => {
+      if (loaded !== undefined) openLinkedBuild = false;
+    });
+    return;
+  }
   action(refreshBuilds);
 });
 

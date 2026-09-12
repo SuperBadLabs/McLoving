@@ -379,7 +379,7 @@ EXECUTION_CLASSES = ("SERIAL", "BATCH", "PARALLEL")
 # the ten-round cap: same table, EXPECTED_TABLES does not move.
 # 143 -> 144 on 2026-09-11 with `CTRL-006`, filed from PAR-014 review past
 # the ten-round cap: same table, EXPECTED_TABLES does not move.
-MINIMUM_TICKET_ROWS = 144
+MINIMUM_TICKET_ROWS = 145
 
 # Pinning the row COUNT is not enough: an edit that adds one ticket while
 # making another unparsable holds the count at 104 and silently drops the
@@ -404,7 +404,7 @@ CLOSED_TICKETS = frozenset({
     "MIG-003", "MIG-004", "MIG-005", "MIG-005A", "MIG-006", "MIG-007",
     "OBS-001", "OPS-001", "OPS-002", "OPS-003", "OUTBOX-001",
     "PROV-001", "REL-001", "SCM-001", "SEC-001", "SEC-002", "SEC-003",
-    "PAR-000", "PAR-001", "PAR-010", "PAR-011", "PAR-012", "PAR-013", "SECRET-001", "SHADOW-001", "TEST-001", "TRIG-001", "UI-001", "UI-002",
+    "PAR-000", "PAR-001", "PAR-010", "PAR-011", "PAR-012", "PAR-013", "PAR-014", "SECRET-001", "SHADOW-001", "TEST-001", "TRIG-001", "UI-001", "UI-002",
     "UX-001", "UX-002", "WIN-001", "WIN-002", "WIN-003", "WIN-004"
 })
 

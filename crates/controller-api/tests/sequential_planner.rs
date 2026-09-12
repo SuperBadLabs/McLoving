@@ -138,7 +138,7 @@ fn unsupported_process_and_parameter_shapes_are_refused() {
 #[test]
 fn independent_store_constructor_rejects_forged_layout_and_policy() {
     let original = plan_sequential_build(&pipeline(2, 2, ":"), binding()).unwrap();
-    for mutation in 0..16 {
+    for mutation in 0..17 {
         let mut dag = original.dag().clone();
         let mut layout = original.layout().to_vec();
         match mutation {
@@ -162,6 +162,13 @@ fn independent_store_constructor_rejects_forged_layout_and_policy() {
             12 => dag.nodes[0].execution_spec["steps"][0]["extra"] = json!(true),
             13 => dag.priority = 1,
             14 => dag.pipeline_operational_generation = 0,
+            15 => {
+                dag.notify_targets = json!([{
+                    "kind": "webhook",
+                    "mapping_id": "hooks.team",
+                    "destination_url": "https://hooks.example.test/x"
+                }])
+            }
             _ => {
                 layout.pop();
             }

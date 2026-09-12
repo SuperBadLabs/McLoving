@@ -7,10 +7,13 @@ use input_intent::validate_input_mappings;
 pub use input_intent::{INPUT_MAPPING_CATALOG_V1, InputMappingCatalog, InputMappingRecord};
 mod github_webhook;
 pub use github_webhook::GithubWebhookResponse;
+pub mod notifications;
 mod oidc;
 mod source_intent;
 use cache_intent::validate_cache_mappings;
 pub use cache_intent::{CACHE_MAPPING_CATALOG_V1, CacheMappingCatalog, CacheMappingRecord};
+use notifications::resolve_notification_targets;
+pub use notifications::{NotificationMappingCatalog, NotificationMappingRecord};
 use source_intent::validate_source_mappings;
 pub use source_intent::{SOURCE_MAPPING_CATALOG_V1, SourceMappingCatalog, SourceMappingRecord};
 #[doc(hidden)]
@@ -93,6 +96,20 @@ pub struct ApiState {
     cache_mapping_catalog: CacheMappingCatalog,
     input_mapping_catalog: InputMappingCatalog,
     source_mapping_catalog: SourceMappingCatalog,
+    /// Notification mappings (PAR-004): the deployment's catalog of where a
+    /// build's terminal outcome may be delivered; a pipeline names a mapping
+    /// and never a destination.
+    notification_mapping_catalog: NotificationMappingCatalog,
+    /// Token GitHub commit statuses are written with; absent means no
+    /// `github_status` target is admitted.
+    notification_github_token: Option<String>,
+    /// Key webhook notifications are signed with; absent means no `webhook`
+    /// target is admitted.
+    notification_signing_key: Option<Vec<u8>>,
+    /// Where this controller is reachable by people, for the links a
+    /// notification carries; absent means notifications carry no link.
+    public_base_url: Option<reqwest::Url>,
+    notification_policy: notifications::DeliveryPolicy,
     /// Controller webhook key (PAR-001): per-trigger GitHub hook secrets are
     /// derived from it and never stored. Absent means no public webhook route
     /// answers.
@@ -211,6 +228,11 @@ impl ApiState {
             cache_mapping_catalog: CacheMappingCatalog::deny_all(),
             input_mapping_catalog: InputMappingCatalog::deny_all(),
             source_mapping_catalog: SourceMappingCatalog::deny_all(),
+            notification_mapping_catalog: NotificationMappingCatalog::deny_all(),
+            notification_github_token: None,
+            notification_signing_key: None,
+            public_base_url: None,
+            notification_policy: notifications::DeliveryPolicy::default(),
             webhook_key: None,
             webhook_deliveries: Arc::new(tokio::sync::Semaphore::new(
                 github_webhook::MAX_CONCURRENT_DELIVERIES,
@@ -238,6 +260,11 @@ impl ApiState {
             cache_mapping_catalog: CacheMappingCatalog::deny_all(),
             input_mapping_catalog: InputMappingCatalog::deny_all(),
             source_mapping_catalog: SourceMappingCatalog::deny_all(),
+            notification_mapping_catalog: NotificationMappingCatalog::deny_all(),
+            notification_github_token: None,
+            notification_signing_key: None,
+            public_base_url: None,
+            notification_policy: notifications::DeliveryPolicy::default(),
             webhook_key: None,
             webhook_deliveries: Arc::new(tokio::sync::Semaphore::new(
                 github_webhook::MAX_CONCURRENT_DELIVERIES,
@@ -441,6 +468,87 @@ impl ApiState {
     ) -> Result<Self, ApiError> {
         catalog.validate()?;
         self.source_mapping_catalog = catalog;
+        Ok(self)
+    }
+
+    pub fn with_notification_mapping_catalog(
+        mut self,
+        catalog: NotificationMappingCatalog,
+    ) -> Result<Self, ApiError> {
+        catalog.validate_for(self.notification_policy.allow_loopback)?;
+        self.notification_mapping_catalog = catalog;
+        Ok(self)
+    }
+
+    /// The token GitHub commit statuses are written with (PAR-004): one
+    /// line of printable ASCII, as a fine-grained or classic token is.
+    pub fn with_github_token(mut self, token: &str) -> Result<Self, ApiError> {
+        if token.is_empty()
+            || token.len() > 4096
+            || !token.bytes().all(|byte| (0x21..0x7f).contains(&byte))
+        {
+            return Err(ApiError::configuration(
+                "GitHub token must be 1 to 4096 bytes of printable ASCII without whitespace",
+            ));
+        }
+        self.notification_github_token = Some(token.to_owned());
+        Ok(self)
+    }
+
+    /// The key webhook notifications are signed with (PAR-004).
+    pub fn with_notification_signing_key(mut self, key: Vec<u8>) -> Result<Self, ApiError> {
+        if key.len() < 32 || key.len() > 4096 {
+            return Err(ApiError::configuration(
+                "notification signing key must be 32 to 4096 bytes",
+            ));
+        }
+        self.notification_signing_key = Some(key);
+        Ok(self)
+    }
+
+    /// Where people reach this controller, for the link a notification
+    /// carries: an `http` or `https` origin and nothing else, since the UI
+    /// requests its API from the root of that origin.
+    pub fn with_public_base_url(mut self, base: &str) -> Result<Self, ApiError> {
+        let invalid = || {
+            ApiError::configuration(
+                "public base URL must be an http or https origin with no path, query or fragment",
+            )
+        };
+        let url = reqwest::Url::parse(base).map_err(|_| invalid())?;
+        if !matches!(url.scheme(), "http" | "https")
+            || url.host_str().is_none_or(str::is_empty)
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || !matches!(url.path(), "" | "/")
+            || !matches!(url.path(), "" | "/")
+            || url.query().is_some()
+            || url.fragment().is_some()
+            || base.len() > 2048
+        {
+            return Err(invalid());
+        }
+        self.public_base_url = Some(url);
+        Ok(self)
+    }
+
+    /// Delivery seams for a debug build's tests: a resolver that answers
+    /// what the test says, loopback destinations over plain HTTP, and a
+    /// local stand-in for the GitHub API. A shipped controller is a release
+    /// build and has no such seam.
+    #[cfg(debug_assertions)]
+    pub fn with_notification_delivery_seams(
+        mut self,
+        resolver: std::sync::Arc<dyn notifications::DestinationResolver>,
+        allow_loopback: bool,
+        github_api_base: Option<&str>,
+    ) -> Result<Self, ApiError> {
+        self.notification_policy.resolver = resolver;
+        self.notification_policy.allow_loopback = allow_loopback;
+        if let Some(base) = github_api_base {
+            self.notification_policy.github_api_base = reqwest::Url::parse(base)
+                .map_err(|_| ApiError::configuration("GitHub API base must be a URL"))?;
+        }
         Ok(self)
     }
 
@@ -2666,6 +2774,7 @@ async fn validate_pipeline(
         request.pipeline_id,
         &headers,
     )?;
+    resolve_notification_targets(&state, &pipeline, organization_id, project_id)?;
     let digest = pipeline.semantic_digest().map_err(pipeline_rejected)?;
     Ok(Json(ValidationResponse {
         valid: true,
@@ -2714,6 +2823,7 @@ async fn plan_pipeline(
         request.pipeline_id,
         &headers,
     )?;
+    resolve_notification_targets(&state, &pipeline, organization_id, project_id)?;
     Ok(Json(pipeline_plan(&pipeline)?))
 }
 
@@ -2759,6 +2869,7 @@ async fn put_pipeline(
         Some(pipeline_id),
         &headers,
     )?;
+    resolve_notification_targets(&state, &pipeline, organization_id, project_id)?;
     let semantic_digest = pipeline.semantic_digest().map_err(pipeline_rejected)?;
     let source_sha256 = Sha256::digest(request.source.as_bytes()).into();
     let parameter_schema = parameter_schema(&pipeline);
@@ -4674,6 +4785,8 @@ async fn admit_pipeline_parameters(
         &required_platform,
         &required_trust_pool,
     )?;
+    let notify_targets =
+        resolve_notification_targets(state, &pipeline, organization_id, project_id)?;
     // Revalidated here, not only at ingress. A delivery captured by an earlier
     // release can carry a platform outside the closed set, and every admission
     // path — header submission, claimed processing, and replay — funnels
@@ -4724,6 +4837,7 @@ async fn admit_pipeline_parameters(
         idempotency_key: idempotency_key.to_owned(),
         pipeline_digest: digest,
         priority: 0,
+        notify_targets: serde_json::Value::Array(notify_targets),
         nodes,
     };
     let (admission, trigger_delivery) = match trigger_claim {

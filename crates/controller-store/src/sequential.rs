@@ -38,6 +38,18 @@ impl SequentialDagBuild {
         mut layout: Vec<SequentialStepLayout>,
     ) -> Result<Self, StoreError> {
         validate_dag_contract(&dag).map_err(|error| invalid(error.to_string()))?;
+        // The sequential contract reader restores no notification targets
+        // (PAR-004), so a build carrying them is refused here, as the
+        // controller's planner refuses a pipeline that names them.
+        if dag
+            .notify_targets
+            .as_array()
+            .is_some_and(|targets| !targets.is_empty())
+        {
+            return Err(invalid(
+                "sequential admission carries no notification targets",
+            ));
+        }
         if dag
             .idempotency_key
             .starts_with(TRIGGER_DAG_IDEMPOTENCY_PREFIX)

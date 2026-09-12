@@ -478,6 +478,13 @@ jobs:
           -p mcloving-controller-api
           --test route_denials
           -- --test-threads=1
+      - name: Run GitHub webhook receiver and build notification tests
+        run: >-
+          cargo +1.97.1 test --locked
+          -p mcloving-controller-api
+          --test scm_webhook
+          --test notifications
+          -- --test-threads=1
       - name: Run durable identity lifecycle and tenant-isolation tests
         run: cargo +1.97.1 test --locked -p mcloving-controller-store --test identity_lifecycle
       - name: Run immutable authorization mapping and rollback tests

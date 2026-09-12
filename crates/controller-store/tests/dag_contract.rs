@@ -73,6 +73,7 @@ fn matrix_order_is_presentation_independent_and_bounded() {
             idempotency_key: "matrix-contract".to_owned(),
             pipeline_digest: [1; 32],
             priority: 1,
+            notify_targets: serde_json::json!([]),
             nodes: vec![matrix_node],
         })
         .is_ok()
@@ -129,6 +130,7 @@ fn dag_public_types_preserve_explicit_semantics() {
         idempotency_key: "contract".to_owned(),
         pipeline_digest: [1; 32],
         priority: 1,
+        notify_targets: serde_json::json!([]),
         nodes: vec![NewDagNode {
             node_key: "post".to_owned(),
             kind: DagNodeKind::Post,
@@ -175,6 +177,7 @@ fn capabilities_are_canonical_and_bounded() {
         idempotency_key: "capability-contract".to_owned(),
         pipeline_digest: [1; 32],
         priority: 1,
+        notify_targets: serde_json::json!([]),
         nodes: vec![node],
     };
 
@@ -192,4 +195,46 @@ fn capabilities_are_canonical_and_bounded() {
     let invalid =
         validate_dag_contract(&build(node(vec!["bad capability".to_owned()]))).unwrap_err();
     assert_eq!(invalid.code, DagContractErrorCode::InvalidText);
+
+    // Resolved notification targets are checked at admission, not first
+    // discovered by the terminal transaction: an array of at most eight
+    // objects naming a known kind and a canonical mapping id.
+    for targets in [
+        serde_json::json!({}),
+        serde_json::json!([1]),
+        serde_json::json!([{"kind": "email", "mapping_id": "a"}]),
+        serde_json::json!([{"kind": "webhook"}]),
+        serde_json::json!([{"kind": "webhook", "mapping_id": "not canonical"}]),
+        serde_json::json!([{"kind": "webhook", "mapping_id": "a"}]),
+        serde_json::json!([{"kind": "webhook", "mapping_id": "a", "destination_url": "http://h.test/"}]),
+        serde_json::json!([{"kind": "webhook", "mapping_id": "a", "destination_url": "https://"}]),
+        serde_json::json!([{"kind": "webhook", "mapping_id": "a", "destination_url": "https://user@h.test/"}]),
+        serde_json::json!([{"kind": "webhook", "mapping_id": "a", "destination_url": "https://h.test/#frag"}]),
+        serde_json::json!([{"kind": "webhook", "mapping_id": "a", "destination_url": " https://h.test/"}]),
+        serde_json::json!([{"kind": "webhook", "mapping_id": "a", "destination_url": "https://hooks.example:abc/path"}]),
+        serde_json::json!([{"kind": "webhook", "mapping_id": "a", "destination_url": "https://h.test/", "token": "x"}]),
+        serde_json::json!([{"kind": "github_status", "mapping_id": "a", "commit": "abc1234"}]),
+        serde_json::json!([{"kind": "github_status", "mapping_id": "a", "commit": "ABC", "context": "c", "repository": "o/r"}]),
+        serde_json::json!([{"kind": "github_status", "mapping_id": "a", "commit": "abc1234", "context": "c", "repository": "o/r", "extra": 1}]),
+        serde_json::json!([{"kind": "github_status", "mapping_id": "a", "commit": "abc1234", "context": "c", "repository": "Owner/Repo"}]),
+        serde_json::Value::Array(vec![
+            serde_json::json!({"kind": "webhook", "mapping_id": "a", "destination_url": "https://h.test/"});
+            9
+        ]),
+    ] {
+        let mut malformed = build(node(vec!["shell".to_owned()]));
+        malformed.notify_targets = targets.clone();
+        let refused = validate_dag_contract(&malformed).unwrap_err();
+        assert_eq!(
+            refused.code,
+            DagContractErrorCode::InvalidNotifyTargets,
+            "{targets}"
+        );
+    }
+    let mut well_formed = build(node(vec!["shell".to_owned()]));
+    well_formed.notify_targets = serde_json::json!([
+        {"kind": "github_status", "mapping_id": "github.main", "commit": "abc1234", "context": "mcloving", "repository": "superbadlabs/cljest"},
+        {"kind": "webhook", "mapping_id": "hooks.main", "destination_url": "https://hooks.example.test/x"}
+    ]);
+    validate_dag_contract(&well_formed).unwrap();
 }

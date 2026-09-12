@@ -126,6 +126,7 @@ resource controls. They are not treated as hostile multi-tenant isolation.
 | TM-051 | A pipeline bypasses the certified connector through a native process, supplies its own endpoint or credential, dispatches before durable intent/grant state, substitutes the observer's pre-action predecessor, loses ambiguity or evidence-completion authority across lease loss or restart, accepts a substituted connector/observer outcome, duplicates an effect, or releases downstream work before independent observation and shadow replay are durable | Typed connector-intent IR with no arbitrary command, endpoint, or credential fields; controller-owned fenced state machine; immutable deployment-selected EXT-001/OBS-001 identities and configuration; four pairwise-distinct signing roles; durable prepared/applied/uncertain/confirmed transitions in PostgreSQL; fresh one-action grant and runtime freeze before dispatch; exact frozen-predecessor validation before dispatch; fail-closed ambiguity and write-once receipt completion only while the exact effect is explicitly fenced for reconciliation without an execution lease; exact signed outcome/observer/shadow joins before downstream release; native-process network, credential, and connector-RPC denial | Canonical/mutation tests; real-PostgreSQL frozen-predecessor, restore-epoch substitution, no-lease receipt-completion, lease-loss, cancellation, crash-point, restart, duplicate-delivery, timeout, configuration-drift, response-substitution, reconciliation, and zero-duplicate-effect integration tests; effect-free Mario fixture rehearsal; architecture contract in `docs/architecture/RUNTIME_EFFECT_INTEGRATION_V1.md` | CTRL/AGENT/EXT/MIG/SEC | Trusted controller/deployment operator, database, signing authorities, connector, observer, shadow replayer, and external destination remain in the TCB. No production action is authorized by EXT-002; the first action still requires complete CANARY-001 gates and fresh owner authority |
 | TM-052 | Branch protection accepts a partial, skipped, cancelled, stale, or spoofable check set; a Foundation child or required Windows lane reports failure without blocking merge; classifier failure or missing output becomes an implicit Windows waiver; or a workflow edit silently omits a child from aggregation | Stable `Foundation` aggregate with `if: always()` and literal-success checks over every reported terminal Foundation job conclusion; stable `Windows` aggregate enforcing the exact successful-classification/executed-or-explicitly-skipped truth table; six granular Foundation checks plus exact GitHub-Actions-bound `Foundation` and `Windows` aggregates; strict branch synchronization; admin enforcement and conversation resolution; one shared fail-closed verifier; exact aggregate-job schema and fail-open mutation tests; version- and digest-verified hosted actionlint; independent exact-head source review | Exhaustive 390,625-state Foundation decision test; complete Windows result matrix; malformed, missing, duplicate, and unexpected-field denial; exact workflow membership, dependency, `always()`, environment, and invocation assertions; actionlint; before/after live protection documents; exact-head and protected-main aggregate runs; closure review in `docs/evidence/CI-003_SECURITY_REVIEW.md` | FOUND/SEC | GitHub and GitHub Actions control-plane compromise; an authorized writer weakening candidate-controlled merge-authority workflows, classifier, verifier, or their oracles, including skipping or softening a child step before GitHub computes its job conclusion; or an authorized administrator mutating external protection settings. App binding authenticates the reporter, not its workflow definition; this single-member repository cannot enforce a second human approval without deadlocking owner-authored changes, so authority-sensitive merges must re-read the live rule and independently review every exact merge-authority workflow, classifier, verifier, and oracle change |
 | TM-053 | An interface claim closes against a check that cannot observe what it asserts: console cleanliness, rendered layout, focus behaviour or accessible structure asserted by reading served HTML as text, or validation asserted against a fixture whose validator always accepts | Executing browser gate over a pinned, digest-verified engine in a contained namespace; the assertion count is pinned and a mismatch fails; every assertion is mutation-proved to turn a named test red; the strict-YAML refusal is driven through the production compiler rather than a stubbed verdict; the pre-repair baseline is retained so a repaired successor cannot be read as the original passing | `scripts/test-ui-browser.sh` and `scripts/test-ui-browser-mutations.py` in the `ui-browser` Foundation lane, scoped by `scripts/ui-browser-impact.py` and admitted by `require_foundation` only as an executed success or a literal classified skip, never an implicit one (TM-052); `scripts/verify-ui-browser-gate.py` runs unconditionally and refuses drift between the pinned count, the emitted assertions, the mutation set and the paths the classifier watches | UX/CTRL | One rendering engine is the whole population; assistive-technology announcement is not observed and is recorded as a manual convention rather than a gate |
+| TM-054 | A build notification credential acts outside its mapping: a pipeline steers the GitHub token to another repository or the signing key to an internal or attacker-chosen destination through a name that resolves privately, a redirect or a rebinding between attempts; or a terminal outcome is delivered never, twice, or by two controllers at once | Deployment-owned digest-pinned mapping catalog resolved at admission (kind, organization, project, repository or destination), the pipeline naming only a mapping id and the resolved target recorded with the build; resolve-check-bind on every attempt against the loopback, private, link-local, shared, benchmarking, documentation, multicast, reserved and IPv6 embedded ranges with the connection pinned to the checked addresses, no redirects, no proxy; ledger rows written in the terminal transaction, claimed `FOR UPDATE SKIP LOCKED` under a lease past the delivery deadline, backoff scheduled at settlement, settled by attempt count, bounded attempts | `crates/controller-api/tests/notifications.rs`, `crates/controller-api/src/notifications.rs` unit tests, `postgres_truth` terminal-ledger test, PAR-004 HeMan proof | CTRL/SEC | Network routes a public address privately after the check; system roots trusted; a pipeline reports on any commit of its mapping's repository |
 | TM-021 | Malformed protocol message crashes controller or agent | Protobuf contract and fail-closed major/minor negotiation; message bounds at transport integration | Version/range tests now; protocol fuzzing and oversize E2E next | AGENT/CTRL | Runtime-library vulnerability |
 | TM-022 | Audit history is silently altered | Append-only API, hash segments, external export | Mutation denial and export verification | SEC/OPS | DB and external sink collusion |
 | TM-023 | Unauthorized tool version enters validation or release | Versioned downloads, SHA-256 verification, OCI digests | Empty-cache validation and manifest check | FOUND/REL | Compromised upstream plus digest update |
@@ -607,6 +608,7 @@ had never claimed one.
 | PAR-012 | `docs/evidence/PAR-012_SECURITY_REVIEW.md` |
 | PAR-001 | `docs/evidence/PAR-001_SECURITY_REVIEW.md` |
 | PAR-013 | `docs/evidence/PAR-013_SECURITY_REVIEW.md` |
+| PAR-014 | `docs/evidence/PAR-014_SECURITY_REVIEW.md` |
 | EXEC-005 | `docs/evidence/EXEC-005_SECURITY_REVIEW.md` |
 
 ## Residual-risk policy
@@ -962,7 +964,7 @@ until reserved chunks are kept in agent custody (`AGENT-011`); the byte
 quota's per-append sum over prior chunks is cost, not exposure
 (`CTRL-005`).
 
-## PAR-014 artifact upload review, ticket ACTIVE
+## PAR-014 artifact upload review (earned closure)
 
 A stage declares the files it publishes and the agent uploads them after its
 steps over its own channel. Boundaries touched: TM-003 (agent runtime: the
@@ -1056,9 +1058,100 @@ as a session error rather than a named refusal, and an exact retry of a
 so near the store's total quota such a retry cannot recover the pending
 metadata (`AGENT-012`); the sequential planner, which no pipeline with declarations reaches today,
 would plan such a stage with its declarations dropped rather than refuse it
-(`CTRL-006`). Closure requires the
-reviewed merge, exact-main Foundation and native Windows runs, and a
-receipt in `docs/evidence/PAR-014_SECURITY_REVIEW.md`.
+(`CTRL-006`). Closed on PR #150 (`9208e4e2`), exact-main Foundation `34652565336` and
+Windows Agent `34652565410`; receipt `docs/evidence/PAR-014_SECURITY_REVIEW.md`.
+The review added, before the merge, the workspace root and the attempt
+workspace resolved component by component without following a link, the
+matchers as bounded tables, one object per matching declaration with its
+own file description, non-UTF-8 and control-character names refused,
+entries the walk cannot read and a workspace the step made unreadable
+refused by name, a file that runs short, grows or is rewritten under either
+read refused by name, cancellation ending collection, the session epoch
+re-checked inside registration and availability, an attempt-scoped
+registration lock with byte and object quotas, an in-flight ledger of
+streams charged before staging, header and receive deadlines, exact retries
+answered from the ledger, and the Windows admission refusal. The residuals
+above are carried as `AGENT-012` and `CTRL-006`.
+
+## PAR-004 build notification review, ticket ACTIVE
+
+A build's terminal outcome is delivered to the targets its pipeline names: a
+GitHub commit status under the deployment's token, or a signed HTTPS
+webhook. Boundaries touched: TM-054 (a notification credential acting
+outside its mapping: the pipeline names only a mapping id; the deployment's
+startup-frozen, digest-pinned catalog binds each mapping to one repository
+or one `https` destination and to one organization and project; admission
+resolves every target against it at save, validate, plan and submission and
+records the resolved target with the build, so the worker never chooses
+where a credential acts, a named repository must be the mapping's, and a
+kind whose credential the deployment lacks is refused rather than queued
+undeliverable; at delivery the destination host is resolved, every address
+is checked against loopback, private, link-local, shared, benchmarking,
+documentation, multicast and reserved ranges, IPv6 allowed only inside
+global unicast less the IETF protocol-assignment, documentation and
+segment-routing blocks with 6to4, well-known NAT64 and IPv4-mapped forms
+decided by the embedded address and local-use NAT64 refused, the connection
+is pinned to
+exactly those addresses with the name kept for TLS and `Host`, redirects are
+not followed and no proxy is used, and the sequence is repeated on every
+attempt so a name that changes its answer between attempts is re-decided;
+the answer is read to a bound and kept printable and bounded in the
+ledger); TM-039 (terminal delivery: the deliveries are inserted in the
+transaction that derives the terminal status with one `dag.build_terminal`
+event, re-derivation on the retry paths inserts nothing new, rows are
+claimed `FOR UPDATE SKIP LOCKED` under a lease longer than the delivery
+deadline so two controllers hold disjoint rows even after the lock is
+released, the backoff scheduled when a failed attempt is settled so the row
+is off every scan until due, settlement is keyed on the claim's terminal
+generation and attempt count so an overtaken worker's answer, or one from
+before an operator retry made the build terminal again, is dropped and the
+newer generation is posted once more (re-queued if delivered, marked for a
+re-post if in flight) so its outcome is written last, and an attempt is
+recorded in flight before its request is sent and stays recorded through a
+failed settlement (a request that timed out after its body was sent may
+still be applied), so a build that becomes terminal again meanwhile delays
+its new outcome past that attempt's deadline whether or not the controller
+lives to settle it, the resolved targets are part of
+the build's replay contract so catalog drift between controllers is an
+idempotency conflict rather than a race, a commit status is held by the
+latest build for its repository, commit and context so an earlier build's
+delayed delivery is abandoned as superseded rather than written over it, the
+in-flight mark and the later build's terminal record are serialized under
+the status key's lock so the later build delays its first post past an
+in-flight earlier attempt's deadline (durably, before any request), a scan
+abandons a pending row whose attempts are spent rather than claiming it
+again, and attempts are bounded at twelve per generation with the backoff
+capped at an hour); TM-013 (credentials and host exposure: the token
+and signing key are owner-private secret-class files opened without
+following links, never logged, never in a link, and the public base URL is
+the only thing a notification carries about the controller; the UI reads
+the linked organization, project and build from the query and still asks
+for the token). Residual: a request the target applies after the local deadline can
+still become the latest status, since the quiet interval bounds the
+worker's wait and not the target's (`CTRL-007` reconciles the status
+against the target after the interval); a network-specific NAT64 prefix
+inside global unicast synthesizes addresses whose embedded IPv4 address is
+not examined, since only the well-known prefix is decodable without
+configuration (`CTRL-007` lets the operator name the deployment's
+prefixes); the destination's certificate is
+checked against the system roots, so a private authority is not supported
+(the ticket's CA pin is not shipped); the status-key fence is
+tenant-partitioned like every store read, so two organizations of one
+deployment that map the same repository, commit and context race at GitHub
+(an operator gives each organization its own context, or maps a repository
+in one organization); a 4xx that will never succeed is retried to the
+attempt bound rather than abandoned at once; GitHub's answer to the commit
+status is trusted as delivery; the `revision` a status is written for comes
+from the pipeline's parameter, so a pipeline can report on any commit of the
+mapping's repository. Tests cover catalog validation, the address policy
+across every range and embedded form, destination URL shape, the terminal
+ledger and its idempotence under a second terminal, admission refusals for
+unknown, foreign, mismatched and uncredentialed mappings, a sink that
+refuses twice then accepts with the error kept and cleared, a signed webhook
+verified under the key, two concurrent workers claiming one row once, and a
+private-resolving destination refused before any connection. Closure
+requires the reviewed merge, exact-main Foundation and native Windows runs,
+and a receipt in `docs/evidence/PAR-004_SECURITY_REVIEW.md`.
 
 ## PAR-001 GitHub webhook receiver review (earned closure)
 

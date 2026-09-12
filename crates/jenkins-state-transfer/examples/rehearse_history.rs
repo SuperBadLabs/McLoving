@@ -147,6 +147,7 @@ async fn main() -> Result<(), AnyError> {
         idempotency_key: format!("mig005a-corpus052-build-{}", continuation.build_number),
         pipeline_digest: forward_receipt.bundle_digest,
         priority: 0,
+        notify_targets: serde_json::json!([]),
         nodes: vec![NewDagNode {
             node_key: "build".to_owned(),
             kind: DagNodeKind::Work,

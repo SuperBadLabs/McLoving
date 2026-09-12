@@ -199,6 +199,7 @@ pub const BUILD_WORKSPACE_V36: &str = include_str!("../migrations/0036_build_wor
 pub const STEP_ORDINAL_V37: &str = include_str!("../migrations/0037_step_ordinal.sql");
 pub const WEBHOOK_RECEIPTS_V38: &str = include_str!("../migrations/0038_webhook_receipts.sql");
 pub const LOG_BUILD_POSITION_V39: &str = include_str!("../migrations/0039_log_build_position.sql");
+pub const NOTIFICATIONS_V40: &str = include_str!("../migrations/0040_notifications.sql");
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AgentReconciliationDisposition {
@@ -366,6 +367,94 @@ pub struct AttemptExecution {
     pub pipeline_id: Option<Uuid>,
     pub execution_spec: Value,
     pub cancellation_requested: bool,
+}
+
+/// One notification delivery a build's terminal transaction recorded
+/// (PAR-004): the target as the pipeline named it, resolved against the
+/// mapping catalog at admission, and the build's terminal status.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NotificationDelivery {
+    pub organization_id: Uuid,
+    pub project_id: Uuid,
+    pub pipeline_id: Option<Uuid>,
+    pub build_id: Uuid,
+    pub target_index: i32,
+    pub kind: String,
+    pub mapping_id: String,
+    pub target: Value,
+    pub build_status: String,
+    /// Which of the build's terminal outcomes this row carries; a retried
+    /// build that becomes terminal again starts the next generation.
+    pub terminal_generation: i32,
+    /// Attempts made so far in this generation, this claim included.
+    pub attempts: i32,
+}
+
+/// Serializes every decision about one commit status (repository, commit,
+/// context) within an organization: an attempt marking itself in flight and
+/// a terminal transaction recording a later build's rows take this lock, so
+/// one of them sees the other's record.
+pub(crate) async fn lock_status_key(
+    tx: &mut Transaction<'_, Postgres>,
+    organization_id: Uuid,
+    target: &Value,
+) -> Result<(), StoreError> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
+        .bind(format!(
+            "mcloving.notification.status.{organization_id}.{}.{}.{}",
+            target["repository"].as_str().unwrap_or_default(),
+            target["commit"].as_str().unwrap_or_default(),
+            target["context"].as_str().unwrap_or_default()
+        ))
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+pub(crate) async fn later_github_status_holder_in(
+    tx: &mut Transaction<'_, Postgres>,
+    organization_id: Uuid,
+    build_id: Uuid,
+    target: &Value,
+) -> Result<Option<(Uuid, i32)>, StoreError> {
+    let holder = sqlx::query_as::<_, (Uuid, i32)>(
+        "SELECT d.build_id, d.target_index
+         FROM notification_deliveries AS d
+         JOIN builds AS b
+           ON b.organization_id = d.organization_id AND b.id = d.build_id
+         WHERE d.organization_id = $1
+           AND d.kind = 'github_status'
+           AND d.build_id <> $2
+           AND d.target->>'repository' = $3
+           AND d.target->>'commit' = $4
+           AND d.target->>'context' = $5
+           AND (b.created_at, b.id) > (
+               SELECT created_at, id FROM builds
+               WHERE organization_id = $1 AND id = $2
+           )
+         ORDER BY b.created_at DESC, b.id DESC
+         LIMIT 1",
+    )
+    .bind(organization_id)
+    .bind(build_id)
+    .bind(target["repository"].as_str().unwrap_or_default())
+    .bind(target["commit"].as_str().unwrap_or_default())
+    .bind(target["context"].as_str().unwrap_or_default())
+    .fetch_optional(&mut **tx)
+    .await?;
+    Ok(holder)
+}
+
+/// What marking a claimed notification attempt in flight found.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InFlightMark {
+    /// The attempt may send its request.
+    Marked,
+    /// The claim was overtaken; nothing must be sent.
+    Overtaken,
+    /// A later build holds this commit status; nothing must be sent, and the
+    /// row is to be settled as superseded by that build.
+    Superseded { by: Uuid },
 }
 
 /// One transactionally published outbox record.
@@ -894,6 +983,9 @@ impl Store {
                    ('trigger_schedule_watermarks', 'INSERT'),
                    ('trigger_schedule_watermarks', 'UPDATE'),
                    ('webhook_receipts', 'SELECT'), ('webhook_receipts', 'INSERT'),
+                   ('notification_deliveries', 'SELECT'),
+                   ('notification_deliveries', 'INSERT'),
+                   ('notification_deliveries', 'UPDATE'),
                    ('discovery_parent_definitions', 'SELECT'),
                    ('discovery_parent_definitions', 'INSERT'),
                    ('discovery_parent_definitions', 'UPDATE'),
@@ -1224,6 +1316,7 @@ impl Store {
                    ('pipeline_trigger_definitions'),
                    ('pipeline_trigger_versions'), ('trigger_deliveries'),
                    ('trigger_schedule_watermarks'), ('webhook_receipts'),
+                   ('notification_deliveries'),
                    ('discovery_parent_definitions'),
                    ('discovery_parent_versions'), ('discovery_scans'),
                    ('discovery_scan_results'), ('discovery_child_identities'),
@@ -1270,7 +1363,7 @@ impl Store {
                    FROM relations AS relation
                    JOIN pg_policy AS policy ON policy.polrelid = relation.oid
              )
-             SELECT COUNT(*) = 61
+             SELECT COUNT(*) = 62
                     AND BOOL_AND(
                         relrowsecurity
                         AND relforcerowsecurity
@@ -1299,7 +1392,7 @@ impl Store {
                                 relation.tenant_column
                             )
                     )
-                    AND (SELECT COUNT(*) FROM policies) = 61
+                    AND (SELECT COUNT(*) FROM policies) = 62
                FROM relations",
         )
         .fetch_one(&mut *tx)
@@ -1419,6 +1512,7 @@ impl Store {
         apply_migration(&mut tx, 37, STEP_ORDINAL_V37).await?;
         apply_migration(&mut tx, 38, WEBHOOK_RECEIPTS_V38).await?;
         apply_migration(&mut tx, 39, LOG_BUILD_POSITION_V39).await?;
+        apply_migration(&mut tx, 40, NOTIFICATIONS_V40).await?;
         tx.commit().await?;
         Ok(())
     }
@@ -3440,6 +3534,406 @@ impl Store {
     }
 
     /// Publishes a bounded outbox batch exactly once.
+    /// Claims the notification deliveries that are due, at most `limit`,
+    /// skipping rows another worker holds: each claim counts an attempt and
+    /// leases the row past the delivery deadline, so a worker that dies
+    /// mid-delivery leaves the row for a later claim and two workers never
+    /// hold one row at once, not even across the lock's release; the
+    /// exponential backoff is scheduled when a failed attempt is settled.
+    /// Only rows of the given `kinds` are claimed, so a controller that holds
+    /// no credential for a kind never charges an attempt another controller
+    /// could have delivered.
+    pub async fn claim_due_notifications(
+        &self,
+        organization_id: Uuid,
+        limit: i64,
+        kinds: &[&str],
+    ) -> Result<Vec<NotificationDelivery>, StoreError> {
+        if !(1..=1_000).contains(&limit) || kinds.is_empty() {
+            return Ok(Vec::new());
+        }
+        let kinds: Vec<String> = kinds.iter().map(|kind| (*kind).to_owned()).collect();
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        // A row whose attempts are spent but is still pending was claimed
+        // for its last attempt by a worker that never settled it; once its
+        // lease is over it is abandoned here rather than claimed again.
+        sqlx::query(
+            "UPDATE notification_deliveries
+             SET state = 'abandoned',
+                 in_flight = false,
+                 last_error = COALESCE(last_error, 'attempts exhausted')
+             WHERE organization_id = $1
+               AND state = 'pending'
+               AND attempts >= $2
+               AND next_attempt_at <= clock_timestamp()",
+        )
+        .bind(organization_id)
+        .bind(mcloving_domain::notifications::MAX_DELIVERY_ATTEMPTS)
+        .execute(&mut *tx)
+        .await?;
+        let rows = sqlx::query_as::<
+            _,
+            (
+                Uuid,
+                Option<Uuid>,
+                Uuid,
+                i32,
+                String,
+                String,
+                Value,
+                String,
+                i32,
+                i32,
+            ),
+        >(
+            "WITH due AS (
+                 SELECT organization_id, build_id, target_index
+                 FROM notification_deliveries
+                 WHERE organization_id = $1
+                   AND state = 'pending'
+                   AND attempts < $4
+                   AND kind = ANY($5)
+                   AND next_attempt_at <= clock_timestamp()
+                 ORDER BY next_attempt_at, build_id, target_index
+                 LIMIT $2
+                 FOR UPDATE SKIP LOCKED
+             ),
+             claimed AS (
+                 UPDATE notification_deliveries AS d
+                 SET attempts = d.attempts + 1,
+                     next_attempt_at = clock_timestamp() + make_interval(secs => $3)
+                 FROM due
+                 WHERE d.organization_id = due.organization_id
+                   AND d.build_id = due.build_id
+                   AND d.target_index = due.target_index
+                 RETURNING d.organization_id, d.build_id, d.target_index, d.kind,
+                           d.mapping_id, d.target, d.build_status,
+                           d.terminal_generation, d.attempts
+             )
+             SELECT b.project_id, b.pipeline_id, c.build_id, c.target_index, c.kind,
+                    c.mapping_id, c.target, c.build_status, c.terminal_generation,
+                    c.attempts
+             FROM claimed AS c
+             JOIN builds AS b
+               ON b.organization_id = c.organization_id AND b.id = c.build_id
+             ORDER BY c.build_id, c.target_index",
+        )
+        .bind(organization_id)
+        .bind(limit)
+        .bind(mcloving_domain::notifications::CLAIM_LEASE_SECONDS as f64)
+        .bind(mcloving_domain::notifications::MAX_DELIVERY_ATTEMPTS)
+        .bind(&kinds)
+        .fetch_all(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(rows
+            .into_iter()
+            .map(
+                |(
+                    project_id,
+                    pipeline_id,
+                    build_id,
+                    target_index,
+                    kind,
+                    mapping_id,
+                    target,
+                    build_status,
+                    terminal_generation,
+                    attempts,
+                )| {
+                    NotificationDelivery {
+                        organization_id,
+                        project_id,
+                        pipeline_id,
+                        build_id,
+                        target_index,
+                        kind,
+                        mapping_id,
+                        target,
+                        build_status,
+                        terminal_generation,
+                        attempts,
+                    }
+                },
+            )
+            .collect())
+    }
+
+    /// Records a claimed delivery's outcome: delivered, or failed with the
+    /// error the next attempt will see, abandoned once the attempts are
+    /// spent. A row another claim moved on, or one that carries a later
+    /// terminal generation than the claim, is left alone. A row marked for a
+    /// re-post (an older generation's write may have landed after this
+    /// one's) goes back to pending on success instead of resting, so it is
+    /// posted once more and the latest outcome is the last write. A failed
+    /// attempt keeps its in-flight mark: a request that timed out after its
+    /// body was sent may still be applied by the target, so a later outcome
+    /// recorded meanwhile stays delayed past the deadline; the mark stands
+    /// until a settlement succeeds, the row is superseded or abandoned, or
+    /// the build becomes terminal again, so a reclaim leaves it in place.
+    pub async fn settle_notification(
+        &self,
+        organization_id: Uuid,
+        build_id: Uuid,
+        target_index: i32,
+        terminal_generation: i32,
+        attempts: i32,
+        error: Option<&str>,
+    ) -> Result<bool, StoreError> {
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        let error = error.map(|error| {
+            let mut bounded = error.trim().to_owned();
+            bounded.truncate(1024);
+            if bounded.is_empty() {
+                "delivery failed".to_owned()
+            } else {
+                bounded
+            }
+        });
+        let settled = sqlx::query_scalar::<_, i32>(
+            "UPDATE notification_deliveries
+             SET state = CASE
+                     WHEN $5::text IS NULL AND repost_required THEN 'pending'
+                     WHEN $5::text IS NULL THEN 'delivered'
+                     WHEN attempts >= $6 THEN 'abandoned'
+                     ELSE 'pending'
+                 END,
+                 attempts = CASE
+                     WHEN $5::text IS NULL AND repost_required THEN 0
+                     ELSE attempts
+                 END,
+                 delivered_at = CASE
+                     WHEN $5::text IS NULL AND NOT repost_required THEN clock_timestamp()
+                 END,
+                 next_attempt_at = CASE
+                     WHEN $5::text IS NULL AND repost_required THEN clock_timestamp()
+                     WHEN $5::text IS NULL THEN next_attempt_at
+                     ELSE clock_timestamp()
+                         + make_interval(secs => LEAST(power(2, attempts), $7))
+                 END,
+                 repost_required = false,
+                 in_flight = CASE
+                     WHEN $5::text IS NULL OR attempts >= $6 THEN false
+                     ELSE in_flight
+                 END,
+                 last_error = $5
+             WHERE organization_id = $1
+               AND build_id = $2
+               AND target_index = $3
+               AND state = 'pending'
+               AND terminal_generation = $8
+               AND attempts = $4
+             RETURNING attempts",
+        )
+        .bind(organization_id)
+        .bind(build_id)
+        .bind(target_index)
+        .bind(attempts)
+        .bind(error.as_deref())
+        .bind(mcloving_domain::notifications::MAX_DELIVERY_ATTEMPTS)
+        .bind(mcloving_domain::notifications::MAX_DELIVERY_BACKOFF_SECONDS as f64)
+        .bind(terminal_generation)
+        .fetch_optional(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(settled.is_some())
+    }
+
+    /// After a settlement was refused as stale, arranges for the row's newer
+    /// terminal generation to be posted once more: the stale attempt's
+    /// external write may have landed after the newer one's. A delivered
+    /// row is re-queued; a row that is claimed or waiting (its next attempt
+    /// in the future) is marked so its next successful settlement re-queues
+    /// it instead of resting; a due, unclaimed row needs nothing, since its
+    /// claim posts after the stale write by construction.
+    pub async fn requeue_after_stale_settlement(
+        &self,
+        organization_id: Uuid,
+        build_id: Uuid,
+        target_index: i32,
+        stale_generation: i32,
+    ) -> Result<bool, StoreError> {
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        let requeued = sqlx::query_scalar::<_, i32>(
+            "UPDATE notification_deliveries
+             SET attempts = CASE WHEN state = 'delivered' THEN 0 ELSE attempts END,
+                 next_attempt_at = CASE
+                     WHEN state = 'delivered' THEN clock_timestamp()
+                     ELSE next_attempt_at
+                 END,
+                 last_error = CASE WHEN state = 'delivered' THEN NULL ELSE last_error END,
+                 repost_required = state <> 'delivered',
+                 in_flight = CASE WHEN state = 'delivered' THEN false ELSE in_flight END,
+                 delivered_at = NULL,
+                 state = 'pending'
+             WHERE organization_id = $1
+               AND build_id = $2
+               AND target_index = $3
+               AND terminal_generation > $4
+               AND (state = 'delivered'
+                    OR (state = 'pending' AND next_attempt_at > clock_timestamp()))
+             RETURNING terminal_generation",
+        )
+        .bind(organization_id)
+        .bind(build_id)
+        .bind(target_index)
+        .bind(stale_generation)
+        .fetch_optional(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(requeued.is_some())
+    }
+
+    /// Records, before its request is sent, that a claimed attempt may write
+    /// at its target from now on: a build that becomes terminal again while
+    /// this stands, and a later build for the same commit status, delay
+    /// their outcome's first post past this attempt's deadline, so this
+    /// write cannot land after theirs even if the controller dies between
+    /// the write and its settlement. For a commit status the mark and the
+    /// later-holder check are one step under the status key's lock, the
+    /// same lock the terminal transaction takes, so either this attempt is
+    /// marked before the later build records its rows (and that build is
+    /// delayed) or the later build is visible here (and this attempt is
+    /// superseded, sending nothing).
+    pub async fn mark_notification_in_flight(
+        &self,
+        organization_id: Uuid,
+        build_id: Uuid,
+        target_index: i32,
+        terminal_generation: i32,
+        attempts: i32,
+    ) -> Result<InFlightMark, StoreError> {
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        let row = sqlx::query_as::<_, (String, Value)>(
+            "SELECT kind, target FROM notification_deliveries
+             WHERE organization_id = $1 AND build_id = $2 AND target_index = $3
+               AND state = 'pending' AND terminal_generation = $4 AND attempts = $5",
+        )
+        .bind(organization_id)
+        .bind(build_id)
+        .bind(target_index)
+        .bind(terminal_generation)
+        .bind(attempts)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some((kind, target)) = row else {
+            tx.rollback().await?;
+            return Ok(InFlightMark::Overtaken);
+        };
+        if kind == "github_status" {
+            lock_status_key(&mut tx, organization_id, &target).await?;
+            if let Some((by, _)) =
+                later_github_status_holder_in(&mut tx, organization_id, build_id, &target).await?
+            {
+                tx.rollback().await?;
+                return Ok(InFlightMark::Superseded { by });
+            }
+        }
+        let marked = sqlx::query_scalar::<_, i32>(
+            "UPDATE notification_deliveries
+             SET in_flight = true
+             WHERE organization_id = $1
+               AND build_id = $2
+               AND target_index = $3
+               AND state = 'pending'
+               AND terminal_generation = $4
+               AND attempts = $5
+             RETURNING attempts",
+        )
+        .bind(organization_id)
+        .bind(build_id)
+        .bind(target_index)
+        .bind(terminal_generation)
+        .bind(attempts)
+        .fetch_optional(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(if marked.is_some() {
+            InFlightMark::Marked
+        } else {
+            InFlightMark::Overtaken
+        })
+    }
+
+    /// The later build, if any, whose `github_status` delivery names the same
+    /// repository, commit and context as `target`: its outcome is the one
+    /// that stands at that status, so the older build's is not posted, or,
+    /// if it already was, the later build's is posted again. Later means
+    /// created later; a build's ledger row exists only once it is terminal.
+    pub async fn later_github_status_holder(
+        &self,
+        organization_id: Uuid,
+        build_id: Uuid,
+        target: &Value,
+    ) -> Result<Option<(Uuid, i32)>, StoreError> {
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        let holder =
+            later_github_status_holder_in(&mut tx, organization_id, build_id, target).await?;
+        tx.commit().await?;
+        Ok(holder)
+    }
+
+    /// Settles a claimed delivery as superseded: a later build's outcome for
+    /// the same target is the one that stands, so this one is abandoned
+    /// unposted with the superseding build recorded as the reason.
+    pub async fn supersede_notification(
+        &self,
+        organization_id: Uuid,
+        build_id: Uuid,
+        target_index: i32,
+        terminal_generation: i32,
+        attempts: i32,
+        superseded_by: Uuid,
+    ) -> Result<bool, StoreError> {
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        let settled = sqlx::query_scalar::<_, i32>(
+            "UPDATE notification_deliveries
+             SET state = 'abandoned',
+                 repost_required = false,
+                 in_flight = false,
+                 last_error = 'superseded by build ' || $6::text
+             WHERE organization_id = $1
+               AND build_id = $2
+               AND target_index = $3
+               AND state = 'pending'
+               AND terminal_generation = $4
+               AND attempts = $5
+             RETURNING attempts",
+        )
+        .bind(organization_id)
+        .bind(build_id)
+        .bind(target_index)
+        .bind(terminal_generation)
+        .bind(attempts)
+        .bind(superseded_by)
+        .fetch_optional(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(settled.is_some())
+    }
+
+    /// Every delivery recorded for a build, in target order, with its state,
+    /// attempts and last error: the ledger a reader or a test inspects.
+    pub async fn build_notifications(
+        &self,
+        organization_id: Uuid,
+        build_id: Uuid,
+    ) -> Result<Vec<(i32, String, String, String, i32, Option<String>)>, StoreError> {
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        let rows = sqlx::query_as::<_, (i32, String, String, String, i32, Option<String>)>(
+            "SELECT target_index, kind, mapping_id, state, attempts, last_error
+             FROM notification_deliveries
+             WHERE organization_id = $1 AND build_id = $2
+             ORDER BY target_index",
+        )
+        .bind(organization_id)
+        .bind(build_id)
+        .fetch_all(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(rows)
+    }
+
     pub async fn publish_outbox(
         &self,
         organization_id: Uuid,
@@ -7511,7 +8005,7 @@ async fn lock_build_pipeline_truth(
     Ok((pipeline_id, admitted_generation, current_generation, state))
 }
 
-async fn append_event_and_outbox(
+pub(crate) async fn append_event_and_outbox(
     tx: &mut Transaction<'_, Postgres>,
     organization_id: Uuid,
     build_id: Uuid,
@@ -7586,7 +8080,7 @@ async fn terminalize_dead_lettered_reconciliation(
     node_id: Uuid,
     build_id: Uuid,
     reason: &str,
-) -> Result<(), sqlx::Error> {
+) -> Result<(), StoreError> {
     let terminalized = sqlx::query_scalar::<_, Uuid>(
         "UPDATE attempts
          SET status = 'failed',
@@ -7614,15 +8108,24 @@ async fn terminalize_dead_lettered_reconciliation(
     .bind(node_id)
     .execute(&mut **tx)
     .await?;
-    sqlx::query(
+    let transitioned = sqlx::query_scalar::<_, Uuid>(
         "UPDATE builds
          SET status = 'failed', completed_at = clock_timestamp()
-         WHERE organization_id = $1 AND id = $2",
+         WHERE organization_id = $1 AND id = $2
+           AND status NOT IN ('succeeded', 'failed', 'aborted')
+         RETURNING id",
     )
     .bind(organization_id)
     .bind(build_id)
-    .execute(&mut **tx)
+    .fetch_optional(&mut **tx)
     .await?;
+    // This is a terminal transition like any other: the build's mapped
+    // notifications are owed here too (PAR-004), once, on the transition;
+    // a second dead-lettered attempt of an already terminal build records
+    // nothing new.
+    if transitioned.is_some() {
+        dag::record_terminal_notifications(tx, organization_id, build_id, "failed").await?;
+    }
     Ok(())
 }
 

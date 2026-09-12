@@ -259,6 +259,23 @@ fn component_names_reserve_space_for_the_expansion_prefix() {
 }
 
 #[test]
+fn a_component_cannot_declare_notification_targets() {
+    // Expansion carries no targets, so a component declaring them is
+    // refused at construction rather than digest-bound and then silent.
+    let source = "version: 1\nname: notifying\nnotify:\n  - webhook:\n      mapping_id: hooks.team\nstages:\n  - id: build\n    name: Build\n    steps:\n      - process:\n          program: /bin/true\n";
+    let rejected = VersionedComponent::new(
+        "notifying",
+        compile_strict_yaml("fixture://component", source, ParseLimits::default()).unwrap(),
+        BTreeMap::new(),
+        Vec::new(),
+        provenance(1),
+    )
+    .unwrap_err();
+    assert_eq!(rejected.code, ComponentErrorCode::InvalidDefinition);
+    assert_eq!(rejected.path, "$.pipeline.notify");
+}
+
+#[test]
 fn component_stage_ids_reserve_space_for_the_longest_expansion_prefix() {
     let mut template = component(TEMPLATE_A, 1);
     template.pipeline.stages[0].id = "x".repeat(16 * 1024 - "c127.".len());

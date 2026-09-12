@@ -108,6 +108,73 @@ registers and commits each object exactly as the commit route does, under the
 attempt's fenced work authority, and the listing and download routes serve
 them like any other artifact.
 
+Build notifications (PAR-004). A pipeline's `notify` targets (Pipeline IR
+v1.9) are admitted, at save, validate, plan and submission, only against the
+controller's startup-frozen notification mapping catalog
+(`MCLOVING_NOTIFICATION_MAPPING_CATALOG`, digest-pinned by
+`MCLOVING_NOTIFICATION_MAPPING_CATALOG_SHA256`, trust-class and nofollow in
+the deployment contract, a JSON record of `mapping_id`, `kind`,
+`organization_id`, `project_id` and either `repository` or
+`destination_url`): each target must name a mapping of its kind that belongs
+to the pipeline's organization and project, a `github_status` target that
+names a repository must name the mapping's, and a kind whose credential the
+controller does not hold (`MCLOVING_GITHUB_TOKEN_FILE` for commit statuses,
+`MCLOVING_NOTIFICATION_KEY_FILE` for webhooks, both secret-class
+owner-private files) is refused with 422 `notification_mapping_denied`. The
+resolved targets are recorded with the build at admission and are part of
+its replay contract, so two controllers whose catalogs resolve one mapping
+differently answer an idempotency conflict rather than letting the race
+choose; the transaction
+that makes the build terminal records one delivery per target and appends
+one `dag.build_terminal` event, so a terminal build has its deliveries or is
+not terminal. Every controller on the database runs a delivery worker that claims only
+the kinds it holds a credential for (so a controller without the token or
+the key never charges an attempt another controller could deliver),
+claims due rows under `FOR UPDATE SKIP LOCKED` and leases each past the
+delivery deadline, so a row is delivered by one worker at a time even after
+the lock is released, retries with exponential backoff scheduled when the
+failed attempt is settled (2, 4, 8 ... seconds,
+capped at an hour) and abandons after twelve attempts, the last error kept in
+the ledger. A commit status is `POST /repos/{owner}/{name}/statuses/{commit}`
+at `api.github.com`, `success`, `failure` or `error` for a succeeded, failed
+or aborted build, under the target's context, with a `target_url` that opens
+the build in the controller UI when `MCLOVING_PUBLIC_BASE_URL` (an origin,
+no path) is set. A later build for the same repository, commit and context
+holds that status: an earlier build's delayed delivery is recorded as
+abandoned, superseded by the later build, and not written; every attempt
+marks itself in flight under the status key's lock before sending, and a
+later build's terminal transaction takes the same lock and delays its first
+post past an in-flight earlier attempt's deadline, so the later build's
+outcome is the last write even across a controller crash. A webhook is a JSON record (`mcloving.build-notification/v1`: organization,
+project, pipeline, build, status, mapping, target index, terminal generation,
+attempt, build URL)
+POSTed to the mapping's `https` destination with `X-McLoving-Signature-256:
+sha256=<HMAC-SHA256 of the exact body under the notification key>`,
+`X-McLoving-Delivery: <build>:<index>:<terminal generation>` (a retried
+build that becomes terminal again starts a new generation, so a receiver
+can tell its outcomes apart; a delivery from an older generation that lands
+while or after the newer generation delivers makes the newer one post once
+more, and an attempt recorded in flight when the build becomes terminal
+again delays the new outcome's first post past that attempt's deadline, so
+the last write at a target is the latest outcome even across a controller
+crash),
+`X-McLoving-Attempt` and
+`X-McLoving-Event: build.terminal`. Before either connects, the destination
+host is resolved and every address is checked against the loopback,
+private, link-local, shared, benchmarking, documentation, multicast and
+reserved ranges; an IPv6 address is allowed only inside global unicast
+`2000::/3` less the IETF protocol-assignments block (Teredo, benchmarking,
+ORCHID), documentation and segment-routing prefixes, with 6to4, NAT64 and
+IPv4-mapped forms decided by the embedded IPv4 address and local-use NAT64
+refused outright; the connection is
+then pinned to exactly those addresses with the host name kept for TLS and
+`Host`, redirects are not followed, proxies are not used, a request is
+bounded at five seconds to connect and twenty in all, the answer is read to
+at most 64 KiB, and the whole check is repeated on every attempt. A 2xx
+answer is a delivery; anything else is the attempt's error. Certificates
+are checked against the system roots; a destination under a private
+authority is not supported.
+
 Cancellation is a durable request. Queued work becomes terminal immediately;
 owned work becomes `cancelling` until the fenced agent proves process-tree
 termination. Status reports both build and attempt state plus the cancellation
