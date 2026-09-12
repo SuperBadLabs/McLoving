@@ -1129,7 +1129,11 @@ the linked organization, project and build from the query and still asks
 for the token). Residual: a request the target applies after the local deadline can
 still become the latest status, since the quiet interval bounds the
 worker's wait and not the target's (`CTRL-007` reconciles the status
-against the target after the interval); the destination's certificate is
+against the target after the interval); a network-specific NAT64 prefix
+inside global unicast synthesizes addresses whose embedded IPv4 address is
+not examined, since only the well-known prefix is decodable without
+configuration (`CTRL-007` lets the operator name the deployment's
+prefixes); the destination's certificate is
 checked against the system roots, so a private authority is not supported
 (the ticket's CA pin is not shipped); a 4xx that will never succeed is retried to the
 attempt bound rather than abandoned at once; GitHub's answer to the commit

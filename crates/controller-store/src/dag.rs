@@ -1140,6 +1140,23 @@ pub(crate) async fn record_terminal_notifications(
     build_id: Uuid,
     status: &str,
 ) -> Result<(), StoreError> {
+    // Status keys are locked before any delivery row is touched, in key
+    // order: the same order an attempt marking itself in flight uses (key
+    // lock, then its row), so the two never wait on each other.
+    let statuses = sqlx::query_as::<_, (Value,)>(
+        "SELECT t.target
+         FROM builds AS b
+         CROSS JOIN LATERAL jsonb_array_elements(b.notify_targets) AS t(target)
+         WHERE b.organization_id = $1 AND b.id = $2 AND t.target->>'kind' = 'github_status'
+         ORDER BY t.target->>'repository', t.target->>'commit', t.target->>'context'",
+    )
+    .bind(organization_id)
+    .bind(build_id)
+    .fetch_all(&mut **tx)
+    .await?;
+    for (target,) in &statuses {
+        crate::lock_status_key(tx, organization_id, target).await?;
+    }
     let recorded = sqlx::query_scalar::<_, i64>(
         "WITH inserted AS (
              INSERT INTO notification_deliveries (
@@ -1177,21 +1194,20 @@ pub(crate) async fn record_terminal_notifications(
     .fetch_one(&mut **tx)
     .await?;
     // A commit status this build names may be held in flight by an earlier
-    // build's attempt: under the status key's lock (taken in key order, the
-    // same lock that attempt took to mark itself), this build's first post
-    // is delayed past that attempt's deadline so the earlier write cannot
-    // land after this build's whether or not its controller lives to settle.
-    let statuses = sqlx::query_as::<_, (i32, Value)>(
-        "SELECT target_index, target FROM notification_deliveries
+    // build's attempt: under the status key's lock taken above, this
+    // build's first post is delayed past that attempt's deadline so the
+    // earlier write cannot land after this build's whether or not its
+    // controller lives to settle.
+    let status_rows = sqlx::query_as::<_, (i32,)>(
+        "SELECT target_index FROM notification_deliveries
          WHERE organization_id = $1 AND build_id = $2 AND kind = 'github_status'
-         ORDER BY target->>'repository', target->>'commit', target->>'context', target_index",
+         ORDER BY target_index",
     )
     .bind(organization_id)
     .bind(build_id)
     .fetch_all(&mut **tx)
     .await?;
-    for (target_index, target) in statuses {
-        crate::lock_status_key(tx, organization_id, &target).await?;
+    for (target_index,) in status_rows {
         sqlx::query(
             "UPDATE notification_deliveries AS d
              SET next_attempt_at = clock_timestamp() + make_interval(secs => $4)
@@ -1605,12 +1621,7 @@ fn validate_notify_targets(targets: &Value) -> Result<(), DagContractError> {
                 // the shape the controller's debug-only delivery seam admits
                 // from its catalog for tests against a local sink; a release
                 // build admits `https` only.
-                if !field("destination_url").is_some_and(|url| {
-                    url.len() <= 2048
-                        && url.trim() == url
-                        && (url.starts_with("https://")
-                            || (cfg!(debug_assertions) && url.starts_with("http://127.")))
-                }) {
+                if !field("destination_url").is_some_and(webhook_destination_is_well_formed) {
                     return Err(invalid("webhook target needs an https destination"));
                 }
                 &["kind", "mapping_id", "destination_url"]
@@ -1626,6 +1637,32 @@ fn validate_notify_targets(targets: &Value) -> Result<(), DagContractError> {
         }
     }
     Ok(())
+}
+
+/// The destination shape delivery will accept: `https://` (a debug build
+/// also admits plain-HTTP loopback, the shape the controller's debug-only
+/// delivery seam admits for tests against a local sink), a non-empty
+/// authority without credentials, no fragment, bounded, untrimmed.
+fn webhook_destination_is_well_formed(url: &str) -> bool {
+    let rest = if let Some(rest) = url.strip_prefix("https://") {
+        rest
+    } else if cfg!(debug_assertions) {
+        match url.strip_prefix("http://") {
+            Some(rest) if rest.starts_with("127.") => rest,
+            _ => return false,
+        }
+    } else {
+        return false;
+    };
+    let authority = rest.split(['/', '?']).next().unwrap_or_default();
+    url.len() <= 2048
+        && url.trim() == url
+        && !url.contains('#')
+        && !authority.is_empty()
+        && !authority.contains('@')
+        && authority.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b':' | b'[' | b']')
+        })
 }
 
 fn validate_text(path: &str, value: &str) -> Result<(), DagContractError> {
