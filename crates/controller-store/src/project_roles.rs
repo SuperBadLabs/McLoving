@@ -13,12 +13,13 @@
 //! transition applies. Every change is one audit record.
 
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{Value, json};
 use sqlx::{Postgres, Transaction};
 use uuid::Uuid;
 
 use super::audit::append_audit_record;
 use super::authz::ProjectRole;
+use super::identity::lock_identity_provider;
 use super::{Store, StoreError};
 
 /// The durable credential a caller authenticated with: its identity, the
@@ -118,10 +119,11 @@ impl MembershipAuthority {
 
 impl DurableCaller {
     /// With the caller's identity row held by this transaction (the row a
-    /// lifecycle transition, a fence, a session revocation and a credential
-    /// revocation also lock), requires the identity active at the
-    /// authenticated generation, the session not revoked and the service
-    /// credential not revoked.
+    /// lifecycle transition, a fence, a group-generation change, a session
+    /// revocation and a credential revocation also lock), requires the
+    /// identity active at the authenticated generation, the session valid
+    /// under authentication's whole predicate (with the provider's lock
+    /// held) and the service credential not revoked.
     async fn revalidate(
         self,
         tx: &mut Transaction<'_, Postgres>,
@@ -142,16 +144,49 @@ impl DurableCaller {
             );
         }
         if let Some(session_id) = self.session_id {
+            // The session is valid under the predicate authentication applies:
+            // unrevoked, issued under the identity's current lifecycle and
+            // group generations, and under the provider's current enabled
+            // state, configuration generation and JWKS generation. The
+            // provider's lock is taken first so a disable or a rotation has a
+            // defined order against this write; the identity row is already
+            // held, so a group-generation change (which locks it) has too.
+            let provider_id = sqlx::query_scalar::<_, Uuid>(
+                "SELECT i.provider_id FROM identity_sessions s
+                 JOIN identities i ON i.organization_id = s.organization_id AND i.id = s.identity_id
+                 WHERE s.organization_id = $1 AND s.session_id = $2 AND s.identity_id = $3",
+            )
+            .bind(organization_id)
+            .bind(session_id)
+            .bind(self.identity_id)
+            .fetch_optional(&mut **tx)
+            .await?;
+            let Some(provider_id) = provider_id else {
+                return denied("the caller's session is unknown");
+            };
+            lock_identity_provider(tx, organization_id, provider_id).await?;
             let live = sqlx::query_scalar::<_, i32>(
-                "SELECT 1 FROM identity_sessions
-                 WHERE organization_id = $1 AND session_id = $2 AND revoked_at_unix_ms IS NULL",
+                "SELECT 1 FROM identity_sessions s
+                 JOIN identities i ON i.organization_id = s.organization_id AND i.id = s.identity_id
+                 JOIN identity_providers p ON p.organization_id = i.organization_id
+                                          AND p.provider_id = i.provider_id
+                 WHERE s.organization_id = $1 AND s.session_id = $2
+                   AND s.revoked_at_unix_ms IS NULL
+                   AND i.lifecycle_state = 'active'
+                   AND s.identity_lifecycle_generation = i.lifecycle_generation
+                   AND s.group_generation = i.group_generation
+                   AND p.enabled
+                   AND s.provider_configuration_generation = p.configuration_generation
+                   AND s.provider_jwks_generation = p.jwks_generation",
             )
             .bind(organization_id)
             .bind(session_id)
             .fetch_optional(&mut **tx)
             .await?;
             if live.is_none() {
-                return denied("the caller's session was revoked after it authenticated");
+                return denied(
+                    "the caller's session was revoked or fenced after it authenticated; sign in again",
+                );
             }
         }
         if let Some(credential_id) = self.service_credential_id {
@@ -428,6 +463,8 @@ impl Store {
                     json!({
                         "project_id": grant.project_id,
                         "role": grant.role,
+                        "previous_role": Value::Null,
+                        "fenced_generation": Value::Null,
                         "authority": authority.kind,
                         "actor_role": authority.role,
                         "actor_identity_id": authority.identity_id,

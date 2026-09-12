@@ -138,10 +138,16 @@ fn external_subject(identity_id: Uuid) -> String {
 }
 
 /// Issues a bearer for the human through the runtime role and answers the
-/// token digest the API authenticates with.
-async fn session(runtime: &Store, tenant: &Tenant, identity_id: Uuid, label: &str) -> [u8; 32] {
+/// token digest the API authenticates with and the session id.
+async fn session(
+    runtime: &Store,
+    tenant: &Tenant,
+    identity_id: Uuid,
+    label: &str,
+) -> ([u8; 32], Uuid) {
     let external_subject = external_subject(identity_id);
     let token = digest(label);
+    let session_id = Uuid::new_v4();
     runtime
         .issue_human_session(
             &OidcIdentityClaims {
@@ -155,7 +161,7 @@ async fn session(runtime: &Store, tenant: &Tenant, identity_id: Uuid, label: &st
                 id_token_digest: digest(&format!("{label}-id-token")),
             },
             &SessionIssue {
-                session_id: Uuid::new_v4(),
+                session_id,
                 token_digest: token,
                 refresh_token_digest: Some(digest(&format!("{label}-refresh"))),
                 issued_at_unix_ms: 10_000,
@@ -165,7 +171,7 @@ async fn session(runtime: &Store, tenant: &Tenant, identity_id: Uuid, label: &st
         )
         .await
         .expect("issue human session");
-    token
+    (token, session_id)
 }
 
 fn grant<'a>(
@@ -519,7 +525,7 @@ async fn revocation_and_demotion_fence_the_identity_sessions_at_once() {
         ))
         .await
         .unwrap();
-    let token = session(&runtime, &tenant, viewer, "viewer-session-1").await;
+    let (token, _) = session(&runtime, &tenant, viewer, "viewer-session-1").await;
     let authenticated = runtime
         .authenticate_api_token(tenant.organization_id, token, 20_000)
         .await
@@ -562,7 +568,7 @@ async fn revocation_and_demotion_fence_the_identity_sessions_at_once() {
             .is_err(),
         "a bearer issued before the demotion no longer authenticates"
     );
-    let token = session(&runtime, &tenant, viewer, "viewer-session-2").await;
+    let (token, _) = session(&runtime, &tenant, viewer, "viewer-session-2").await;
     assert_eq!(
         runtime
             .authenticate_api_token(tenant.organization_id, token, 22_000)
@@ -611,7 +617,7 @@ async fn revocation_and_demotion_fence_the_identity_sessions_at_once() {
             .is_err(),
         "the revoked identity's bearer no longer authenticates"
     );
-    let token = session(&runtime, &tenant, viewer, "viewer-session-3").await;
+    let (token, _) = session(&runtime, &tenant, viewer, "viewer-session-3").await;
     assert!(
         runtime
             .authenticate_api_token(tenant.organization_id, token, 25_000)
@@ -620,5 +626,102 @@ async fn revocation_and_demotion_fence_the_identity_sessions_at_once() {
             .principal
             .project_roles
             .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn a_session_bound_caller_is_revalidated_under_the_whole_predicate() {
+    let Some(admin) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let tenant = tenant(&admin).await;
+    let runtime = runtime_store(&admin).await;
+    let owner = human(&admin, &tenant, "owner").await;
+    let viewer = human(&admin, &tenant, "viewer").await;
+    admin
+        .grant_project_role(&grant(
+            &tenant,
+            owner,
+            ProjectRole::Owner,
+            MembershipAuthority::Bootstrap,
+            "bootstrap owner",
+        ))
+        .await
+        .unwrap();
+    let (_, session_id) = session(&runtime, &tenant, owner, "owner-session").await;
+    let as_owner = MembershipAuthority::Principal(DurableCaller {
+        identity_id: owner,
+        lifecycle_generation: 1,
+        session_id: Some(session_id),
+        service_credential_id: None,
+    });
+    // The bound session is valid: the grant goes through.
+    assert!(matches!(
+        runtime
+            .grant_project_role(&grant(
+                &tenant,
+                viewer,
+                ProjectRole::Viewer,
+                as_owner,
+                "live session"
+            ))
+            .await
+            .unwrap(),
+        ProjectRoleGrantOutcome::Granted(_)
+    ));
+    // An unknown session is refused.
+    let as_owner_unknown = MembershipAuthority::Principal(DurableCaller {
+        identity_id: owner,
+        lifecycle_generation: 1,
+        session_id: Some(Uuid::new_v4()),
+        service_credential_id: None,
+    });
+    assert!(is_denied(
+        runtime
+            .grant_project_role(&grant(
+                &tenant,
+                viewer,
+                ProjectRole::Developer,
+                as_owner_unknown,
+                "unknown session"
+            ))
+            .await
+    ));
+    // A provider disable fences every session of the provider without
+    // revoking a row: the bound session no longer authenticates and no
+    // longer writes roles.
+    admin
+        .transition_identity_provider_enabled(
+            tenant.organization_id,
+            tenant.provider.provider_id,
+            tenant.provider.configuration_generation,
+            false,
+            "provider disabled for the test",
+            "reviewer:par003",
+        )
+        .await
+        .expect("disable the provider");
+    assert!(is_denied(
+        runtime
+            .grant_project_role(&grant(
+                &tenant,
+                viewer,
+                ProjectRole::Developer,
+                as_owner,
+                "provider disabled"
+            ))
+            .await
+    ));
+    let memberships = runtime
+        .project_memberships(tenant.organization_id, tenant.project_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        memberships
+            .iter()
+            .map(|membership| membership.role)
+            .collect::<Vec<_>>(),
+        vec![ProjectRole::Owner, ProjectRole::Viewer]
     );
 }

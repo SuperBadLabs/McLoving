@@ -1142,8 +1142,11 @@ caller's and the target's identity rows are locked for the write
 transaction in id order, the rows a lifecycle transition, a fence, a
 session revocation and a service-credential revocation also lock first,
 and the caller must be active at the authenticated generation with its
-session and service credential unrevoked while the target is a live human
-identity, then the caller's role in the project is read under the same
+session valid under authentication's whole predicate (unrevoked, current
+lifecycle and group generations, provider enabled at the session's
+configuration and JWKS generations, read with the provider's lock held,
+the lock a provider disable or rotation takes first) and its service
+credential unrevoked, while the target is a live human identity, then the caller's role in the project is read under the same
 locks, so a demotion, revocation, deletion or fence that committed after
 authentication is applied to the write; a service principal or a mapped-policy principal is
 revalidated the same way and acts as an Admin, never as an Owner, and a
