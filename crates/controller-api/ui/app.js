@@ -308,9 +308,12 @@ byId("context-form").addEventListener("submit", (event) => {
   context.token = byId("token").value;
   byId("connection-state").textContent = "Context active";
   if (openLinkedBuild) {
-    openLinkedBuild = false;
+    // The intent outlives a wrong token or a failed load: it is dropped
+    // only once the linked build has actually been shown.
     showView("build");
-    action(loadBuild);
+    action(loadBuild).then((loaded) => {
+      if (loaded !== undefined) openLinkedBuild = false;
+    });
     return;
   }
   action(refreshBuilds);
