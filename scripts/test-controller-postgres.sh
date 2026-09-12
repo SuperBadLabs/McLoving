@@ -51,6 +51,10 @@ podman run --rm \
   "${MCLOVING_RUST_IMAGE}" \
   bash -c \
   'cargo test --locked -p mcloving-controller-store --test postgres_truth &&
+   cargo test --locked -p mcloving-controller-store --test pipeline_operational_state -- --test-threads=1 &&
+   cargo test --locked -p mcloving-controller-store --test trigger_ingress -- --test-threads=1 &&
+   cargo test --locked -p mcloving-controller-store --test discovery -- --test-threads=1 &&
+   cargo test --locked -p mcloving-controller-api --test route_denials -- --test-threads=1 &&
    cargo test --locked -p mcloving-controller-store --test identity_lifecycle &&
    cargo test --locked -p mcloving-controller-store --test authorization_mapping &&
    cargo test --locked -p mcloving-controller-store --test external_read_consumers &&
@@ -74,4 +78,6 @@ podman run --rm \
      bash scripts/test-cache-product.sh &&
    MCLOVING_CONTROLLER_BINARY=/work/target/debug/mcloving-controller \
    MCLOVING_INPUT_ADAPTER_BINARY=/work/target/debug/mcloving-input-adapter \
-     bash scripts/test-input-product.sh'
+     bash scripts/test-input-product.sh &&
+   MCLOVING_CONTROLLER_BINARY=/work/target/debug/mcloving-controller \
+     bash scripts/test-sequential-runtime.sh'

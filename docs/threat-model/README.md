@@ -1074,6 +1074,45 @@ streams charged before staging, header and receive deadlines, exact retries
 answered from the ledger, and the Windows admission refusal. The residuals
 above are carried as `AGENT-012` and `CTRL-006`.
 
+## PAR-005 dogfood review, ticket ACTIVE
+
+McLoving runs its own Foundation lanes on the owner's host for every push
+to `main` and writes the outcome back to the commit. Boundaries touched:
+TM-013 (credential and host exposure: the dogfood deployment holds the
+GitHub token that writes statuses, the sealed source binding for this
+repository and the webhook key, all as owner-private files under one state
+directory rendered by `scripts/dogfood/heman-up.sh`; the lanes run as
+process steps with the agent's cleared environment and derive the
+toolchain from the running user, never from the pipeline, and the pipeline
+file carries no credential, URL or executable, only mapping ids and a
+digest placeholder rendered at apply time); TM-003 (agent runtime: the
+checkout is the sealed acquirer entered through the AppArmor launcher under
+the host's user-namespace restriction, bounded by the deployment's
+transport tmpfs and file limits, and the lanes that need PostgreSQL or a
+container provision them themselves through rootless podman as the
+Foundation mirror script already does); TM-039 (trigger ingress: without
+public ingress the host cannot receive GitHub's deliveries, so
+`scripts/dogfood/bridge.sh` posts each new `main` head to the controller's
+own public hook route as a push delivery signed with the trigger's derived
+secret, so the receiver, filter, idempotency on the delivery id and the
+admission path are the ones GitHub exercises, and a delivery id is the
+commit id so the bridge and GitHub can never mint two builds for one push);
+TM-052 (verification integrity: `scripts/dogfood/verify-lanes.py` names the
+commands each lane mirrors and fails when Foundation or the lane stops
+carrying one, and the evidence table is written by
+`scripts/dogfood/verdicts.sh` from `gh run list` and `mcloving status`, not
+by hand). Residual: the bridge synthesizes the push payload from the
+commit record rather than receiving GitHub's, so path filters see the
+commit's changed files and nothing else; the deployment runs debug
+binaries under the owner's own user rather than the service-user install
+of `DEPLOYMENT_V1`; the lanes Foundation runs under the user-namespace
+policy, the contained browser, the deployment fixture and the TLA+ tools
+are not mirrored and the compared verdict is Foundation's whole run. The
+ticket closes on ten consecutive matching verdicts recorded in
+`docs/evidence/PAR-005_DOGFOOD.md`; closure additionally requires the
+reviewed merge, exact-main Foundation and native Windows runs, and a
+receipt in `docs/evidence/PAR-005_SECURITY_REVIEW.md`.
+
 ## PAR-004 build notification review (earned closure)
 
 A build's terminal outcome is delivered to the targets its pipeline names: a
