@@ -110,6 +110,14 @@ if ! mountpoint -q "${transport_root}"; then
 fi
 sudo chown "$(id -u):$(id -g)" "${transport_root}"; sudo chmod 0700 "${transport_root}"
 
+if [ "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || echo 0)" = "1" ]; then
+  echo "== acquirer AppArmor profile (user namespaces are restricted on this host)"
+  if ! aa-exec -p mcloving-source-acquirer -- /bin/true 2>/dev/null; then
+    sudo apparmor_parser -r "${repo}/deploy/apparmor/mcloving-source-acquirer"
+  fi
+  aa-exec -p mcloving-source-acquirer -- /bin/true
+fi
+
 echo "== sealed source binding for ${repository}"
 mkdir -p "${state}/agent-workspace" "${state}/objects" "${state}/embedded"
 rm -rf "${state}/source-output"
@@ -225,11 +233,21 @@ print(json.dumps({
 }))
 PY
 )"
-existing="$(curl -sS -o /dev/null -w '%{http_code}' "${base}" -H "Authorization: Bearer ${api_token}")"
+# A persisted trigger is reconciled with the configured repository: a
+# restart with another MCLOVING_DOGFOOD_REPOSITORY re-PUTs the trigger at
+# its current generation with a new source generation rather than leaving
+# it filtering every delivery for the old repository.
+existing="$(curl -sS -o "${state}/trigger-current.json" -w '%{http_code}' "${base}" -H "Authorization: Bearer ${api_token}")"
 if [ "${existing}" != "200" ]; then
   curl -sS -o "${state}/trigger.json" -w 'trigger PUT %{http_code}\n' -X PUT "${base}" \
     -H "Authorization: Bearer ${api_token}" -H 'Content-Type: application/json' \
     -H 'If-Match: "0"' -H 'Idempotency-Key: dogfood-trigger' --data "${trigger_body}"
+elif [ "$(jq -r .configuration.repository_identity "${state}/trigger-current.json")" != "${repository}" ]; then
+  generation="$(jq -r .generation "${state}/trigger-current.json")"
+  trigger_body="$(printf '%s' "${trigger_body}" | jq -c --arg g "dogfood-$((generation + 1))" '.source_generation = $g')"
+  curl -sS -o "${state}/trigger.json" -w 'trigger PUT (reconcile) %{http_code}\n' -X PUT "${base}" \
+    -H "Authorization: Bearer ${api_token}" -H 'Content-Type: application/json' \
+    -H "If-Match: \"${generation}\"" -H "Idempotency-Key: dogfood-trigger-${generation}" --data "${trigger_body}"
 fi
 umask 077
 curl -sS "${base}/webhook" -H "Authorization: Bearer ${api_token}" >"${state}/hook.json"

@@ -56,18 +56,40 @@ PY
   case "${code}" in 2*) return 0 ;; *) return 1 ;; esac
 }
 
-# The heads pushed since the last delivered one, oldest first: two pushes
-# inside one polling interval are two deliveries, not one. Without a record
+# The heads pushed since the last delivered one, oldest first: one per
+# push event on the branch, as GitHub would deliver them (a merge that
+# advances the branch by several commits is one push and one head), so two
+# pushes inside one polling interval are two deliveries. The repository's
+# push events are paged newest first until the watermark is found; if the
+# watermark is older than the events GitHub still lists (an outage longer
+# than its event window), the current head alone is delivered and the gap
+# is logged, since the heads between cannot be known. Without a record
 # yet, only the current head is delivered.
 pending_heads() {
-  local last
+  local last page heads found
   last="$(cat "${last_file}" 2>/dev/null || true)"
   if [ -z "${last}" ]; then
     gh api "repos/${repository}/branches/${branch}" --jq .commit.sha 2>/dev/null || true
     return
   fi
-  gh api "repos/${repository}/commits?sha=${branch}&per_page=100" --jq '.[].sha' 2>/dev/null \
-    | awk -v last="${last}" '$0 == last { exit } { print }' | tac
+  heads=""
+  found=""
+  for page in 1 2 3 4 5 6 7 8 9 10; do
+    local batch
+    batch="$(gh api "repos/${repository}/events?per_page=100&page=${page}" \
+      --jq ".[] | select(.type == \"PushEvent\" and .payload.ref == \"refs/heads/${branch}\") | .payload.head" 2>/dev/null || true)"
+    [ -z "${batch}" ] && break
+    heads="${heads}${batch}
+"
+    if printf '%s' "${batch}" | rg -q -x "${last}"; then found=yes; break; fi
+  done
+  if [ -z "${found}" ]; then
+    printf '%s watermark %s is older than the push events GitHub lists; delivering the current head only\n' \
+      "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${last}" >&2
+    gh api "repos/${repository}/branches/${branch}" --jq .commit.sha 2>/dev/null || true
+    return
+  fi
+  printf '%s' "${heads}" | awk -v last="${last}" '$0 == last { exit } NF && !seen[$0]++ { print }' | tac
 }
 
 while :; do
