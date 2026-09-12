@@ -23,7 +23,7 @@ hook_path="$(jq -r .path "${state}/hook.json")"
 secret="$(jq -r .secret "${state}/hook.json")"
 last_file="${state}/last-delivered"
 
-sign() { printf 'sha256=%s' "$(openssl dgst -sha256 -hmac "${secret}" -binary <"$1" | xxd -p -c 256)"; }
+sign() { printf 'sha256=%s' "$(openssl dgst -sha256 -hmac "${secret}" <"$1" | sed 's/^.* //')"; }
 
 deliver() {
   local sha="$1" body="${state}/delivery-${1}.json" answer="${state}/answer-${1}.json" commit="${state}/commit-${1}.json" code
@@ -56,11 +56,24 @@ PY
   case "${code}" in 2*) return 0 ;; *) return 1 ;; esac
 }
 
-while :; do
-  head="$(gh api "repos/${repository}/branches/${branch}" --jq .commit.sha 2>/dev/null || true)"
-  if [ -n "${head}" ] && [ "${head}" != "$(cat "${last_file}" 2>/dev/null || true)" ]; then
-    deliver "${head}" && printf '%s\n' "${head}" >"${last_file}"
+# The heads pushed since the last delivered one, oldest first: two pushes
+# inside one polling interval are two deliveries, not one. Without a record
+# yet, only the current head is delivered.
+pending_heads() {
+  local last
+  last="$(cat "${last_file}" 2>/dev/null || true)"
+  if [ -z "${last}" ]; then
+    gh api "repos/${repository}/branches/${branch}" --jq .commit.sha 2>/dev/null || true
+    return
   fi
+  gh api "repos/${repository}/commits?sha=${branch}&per_page=100" --jq '.[].sha' 2>/dev/null \
+    | awk -v last="${last}" '$0 == last { exit } { print }' | tac
+}
+
+while :; do
+  for head in $(pending_heads); do
+    deliver "${head}" && printf '%s\n' "${head}" >"${last_file}"
+  done
   [ "${interval}" = "once" ] && exit 0
   sleep "${interval}"
 done

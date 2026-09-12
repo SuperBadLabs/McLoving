@@ -70,10 +70,8 @@ MIRRORED: dict[str, list[str]] = {
 }
 
 # Where a lane runs a repository script that itself carries the Foundation
-# commands, the script is the lane's body and is checked instead.
-DELEGATED = {
-    "controller-postgres.sh": ROOT / "scripts/test-controller-postgres.sh",
-}
+# commands, the script is the lane's body and is checked with it.
+DELEGATED: dict[str, pathlib.Path] = {}
 
 # Commands whose Foundation form is a pinned action or container the lane
 # names differently: the workflow must name the left form, the lane the
@@ -100,13 +98,19 @@ def lane_spellings(command: str) -> tuple[str, ...]:
     )
 
 
+def without_comments(text: str) -> str:
+    """Drop comment-only lines so a command mentioned in prose or commented
+    out cannot satisfy the check."""
+    return "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("#"))
+
+
 def main() -> int:
-    workflow = WORKFLOW.read_text()
+    workflow = without_comments(WORKFLOW.read_text())
     failures: list[str] = []
     for script, commands in MIRRORED.items():
-        lane = (LANES / script).read_text()
+        lane = without_comments((LANES / script).read_text())
         delegated = DELEGATED.get(script)
-        body = lane + (delegated.read_text() if delegated else "")
+        body = lane + (without_comments(delegated.read_text()) if delegated else "")
         for command in commands:
             if command in SPELLINGS:
                 workflow_form, lane_form = SPELLINGS[command]

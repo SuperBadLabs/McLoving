@@ -133,15 +133,21 @@ async fn main() {
             hex(&Sha256::digest(intent.mapping_id.as_bytes()))
         )
     });
-    let signing_key: Vec<u8> = {
-        let mut hasher = Sha256::new();
-        hasher.update(b"mcloving-dogfood-receipt-signing-key/v1\0");
-        hasher.update(intent.deployment_identity.as_bytes());
-        hasher.update(intent.mapping_id.as_bytes());
-        let seed = hasher.finalize();
-        let mut key = seed.to_vec();
-        key.extend_from_slice(&Sha256::digest(seed));
-        key
+    // The receipt signing key is a secret: random, made once, kept in the
+    // private directory and reused on later renders so receipts stay
+    // verifiable across restarts.
+    let signing_key_path = private.join("signing.key");
+    let signing_key: Vec<u8> = match std::fs::read(&signing_key_path) {
+        Ok(existing) if existing.len() >= 32 => existing,
+        _ => {
+            let mut key = vec![0u8; 48];
+            std::io::Read::read_exact(
+                &mut std::fs::File::open("/dev/urandom").expect("open /dev/urandom"),
+                &mut key,
+            )
+            .expect("read random key");
+            key
+        }
     };
     let ca_bundle = PathBuf::from("/etc/ssl/certs/ca-certificates.crt");
     let config = SourceConfig {
@@ -215,7 +221,6 @@ async fn main() {
     );
     let credential_path = private.join("credential");
     write_private(&credential_path, credential.as_bytes(), 0o400);
-    let signing_key_path = private.join("signing.key");
     write_private(&signing_key_path, &signing_key, 0o400);
     let secret_markers_path = private.join("markers");
     write_private(

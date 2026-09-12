@@ -197,6 +197,7 @@ echo "== pipeline ${pipeline_id} from .mcloving/pipeline.yaml"
 head_commit="$(gh api "repos/${repository}/branches/main" --jq .commit.sha)"
 sed -e "s#mapping_digest: sha256:0*\$#mapping_digest: ${mapping_digest}#" \
     -e "s#default: \"0\\{40\\}\"#default: \"${head_commit}\"#" \
+    -e "s#repository: SuperBadLabs/McLoving#repository: ${repository}#" \
     .mcloving/pipeline.yaml >"${state}/pipeline.yaml"
 revision="$("${cli}" --output json pipelines 2>/dev/null | jq -r --arg id "${pipeline_id}" '.items[]? | select(.pipeline_id==$id) | .revision' | head -1)"
 "${cli}" --output json apply --slug mcloving-foundation --expected-revision "${revision:-0}" "${pipeline_id}" "${state}/pipeline.yaml" \
@@ -242,4 +243,17 @@ export MCLOVING_DOGFOOD_REPOSITORY=${repository}
 export MCLOVING_DOGFOOD_PIPELINE_ID=${pipeline_id}
 EOF
 chmod 0600 "${state}/env"
-echo "== up: . ${state}/env; scripts/dogfood/bridge.sh ${state} once"
+
+# Without public ingress the bridge stays up and polls; with the hook
+# registered at GitHub (MCLOVING_DOGFOOD_PUBLIC_HOOK=1) nothing polls, since
+# GitHub delivers to the route directly.
+if [ "${MCLOVING_DOGFOOD_PUBLIC_HOOK:-0}" != "1" ]; then
+  env -i HOME="${HOME}" PATH=/usr/local/bin:/usr/bin:/bin \
+    MCLOVING_URL="${MCLOVING_URL}" MCLOVING_DOGFOOD_REPOSITORY="${repository}" \
+    nohup bash "${repo}/scripts/dogfood/bridge.sh" "${state}" "${MCLOVING_DOGFOOD_BRIDGE_INTERVAL:-60}" >>"${state}/bridge.log" 2>&1 &
+  echo $! >"${state}/bridge.pid"
+  echo "== bridge polling ${repository} every ${MCLOVING_DOGFOOD_BRIDGE_INTERVAL:-60}s (pid $(cat "${state}/bridge.pid"))"
+else
+  echo "== hook route for GitHub: ${MCLOVING_DOGFOOD_PUBLIC_BASE_URL:-<public base url>}$(jq -r .path "${state}/hook.json")"
+fi
+echo "== up: . ${state}/env"

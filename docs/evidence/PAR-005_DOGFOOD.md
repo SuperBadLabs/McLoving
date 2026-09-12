@@ -32,5 +32,5 @@ Recorded by `scripts/dogfood/verdicts.sh`, newest last. `Foundation` is
 `McLoving` is `mcloving builds` for the dogfood pipeline's build of that
 commit. The count of consecutive matches is the acceptance.
 
-| # | Commit | Pushed (UTC) | Foundation | McLoving build | McLoving | Match |
+| # | Commit | Committed (UTC) | Foundation | McLoving build | McLoving | Match |
 |---|---|---|---|---|---|---|

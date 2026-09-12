@@ -75,3 +75,5 @@ test -s docs/architecture/CHARTER.md
 test -s docs/ALPHA_DEMO.md
 test -s docs/threat-model/README.md
 test -s docs/EXECUTION_BOARD.md
+# The dogfood's own alignment with Foundation is checked on every run.
+python3 scripts/dogfood/verify-lanes.py

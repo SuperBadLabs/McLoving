@@ -15,7 +15,7 @@ cli="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/target/debug/mcloving-c
 
 foundation="$(gh run list --repo "${repository}" --workflow Foundation --branch main --commit "${commit}" \
   --json status,conclusion --jq 'first(.[]) | if .status == "completed" then .conclusion else .status end' 2>/dev/null || true)"
-pushed="$(gh api "repos/${repository}/commits/${commit}" --jq .commit.committer.date)"
+committed="$(gh api "repos/${repository}/commits/${commit}" --jq .commit.committer.date)"
 build="$(jq -r '.admission.build_id // empty' "${state}/answer-${commit}.json" 2>/dev/null || true)"
 if [ -z "${build}" ]; then
   echo "no dogfood build recorded for ${commit} in ${state}" >&2; exit 1
@@ -26,4 +26,4 @@ case "${foundation}:${status}" in
   *) match=no ;;
 esac
 row="$(rg -c '^\| [0-9]+ \|' "${evidence}" || true)"
-printf '| %s | `%s` | %s | %s | `%s` | %s | %s |\n' "$((row + 1))" "${commit:0:12}" "${pushed}" "${foundation:-pending}" "${build}" "${status}" "${match}" | tee -a "${evidence}"
+printf '| %s | `%s` | %s | %s | `%s` | %s | %s |\n' "$((row + 1))" "${commit:0:12}" "${committed}" "${foundation:-pending}" "${build}" "${status}" "${match}" | tee -a "${evidence}"
