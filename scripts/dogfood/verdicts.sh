@@ -10,9 +10,11 @@
 # in the order the controller created the builds, to the millisecond, which
 # is the order the pushes were admitted.
 #
-# usage: verdicts.sh <state-dir> <commit> [evidence-file]
+# usage: verdicts.sh <state-dir> <commit> [evidence-file] [build-id]
+#   build-id selects the build when the bridge delivered the commit more
+#   than once (the branch pushed away from it and back).
 set -euo pipefail
-state="$1"; commit="$2"; evidence="${3:-docs/evidence/PAR-005_DOGFOOD.md}"
+state="$1"; commit="$2"; evidence="${3:-docs/evidence/PAR-005_DOGFOOD.md}"; chosen="${4:-}"
 # shellcheck disable=SC1091
 . "${state}/env"
 repository="${MCLOVING_DOGFOOD_REPOSITORY}"
@@ -24,7 +26,16 @@ case "${foundation}" in
   success|failure) ;;
   *) echo "Foundation for ${commit} is not terminal yet (${foundation:-no run}); nothing recorded" >&2; exit 1 ;;
 esac
-build="$(jq -r '.admission.build_id // empty' "${state}/answer-${commit}.json" 2>/dev/null || true)"
+# The bridge records one line per delivery: time, push event, commit, build.
+candidates="$(awk -v sha="${commit}" '$3 == sha && $4 != "-" { print $4 }' "${state}/deliveries.tsv" 2>/dev/null || true)"
+build=""
+if [ -n "${chosen}" ]; then
+  build="${chosen}"
+elif [ "$(printf '%s\n' "${candidates}" | rg -c '.' || true)" -gt 1 ]; then
+  echo "${commit} was delivered more than once; name the build to record: ${candidates//$'\n'/ }" >&2; exit 1
+else
+  build="${candidates}"
+fi
 if [ -z "${build}" ]; then
   build="$(gh api "repos/${repository}/commits/${commit}/status" \
     --jq '.statuses[] | select(.context == "mcloving/foundation") | .target_url' 2>/dev/null \

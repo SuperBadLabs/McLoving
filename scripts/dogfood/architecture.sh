@@ -41,6 +41,35 @@ workflow_files=(
   "${workflow_files[@]}"
 shopt -u nullglob dotglob
 
+# The Jenkins compatibility contracts run under the Clojure CLI Foundation
+# pins (the setup-clojure action's `cli:`), fetched once from the release
+# archive, verified against tools/versions.env and installed under the
+# dogfood cache; a host Java is the one prerequisite.
+clojure_prefix="${cache}/clojure-${CLOJURE_CLI_VERSION}"
+if [ ! -x "${clojure_prefix}/bin/clojure" ]; then
+  clojure_archive="${cache}/clojure-tools-${CLOJURE_CLI_VERSION}.tar.gz"
+  if [ ! -f "${clojure_archive}" ] || ! printf '%s  %s\n' "${CLOJURE_CLI_SHA256}" "${clojure_archive}" | sha256sum -c - >/dev/null 2>&1; then
+    curl --fail --location --silent --show-error \
+      "https://download.clojure.org/install/clojure-tools-${CLOJURE_CLI_VERSION}.tar.gz" \
+      --output "${clojure_archive}.part"
+    printf '%s  %s\n' "${CLOJURE_CLI_SHA256}" "${clojure_archive}.part" | sha256sum -c -
+    mv "${clojure_archive}.part" "${clojure_archive}"
+  fi
+  clojure_unpack="$(mktemp -d "${TMPDIR:-/tmp}/mcloving-dogfood-clojure.XXXXXX")"
+  tar -xzf "${clojure_archive}" -C "${clojure_unpack}"
+  # The archive's install.sh needs Ruby; the layout it produces is a
+  # libexec of jars, the config edn files and the launcher with its prefix
+  # substituted, laid out here directly.
+  rm -rf -- "${clojure_prefix}"
+  mkdir -p "${clojure_prefix}/bin" "${clojure_prefix}/libexec"
+  cp "${clojure_unpack}"/clojure-tools/*.jar "${clojure_prefix}/libexec/"
+  cp "${clojure_unpack}"/clojure-tools/*.edn "${clojure_prefix}/"
+  sed "s|^install_dir=PREFIX$|install_dir=${clojure_prefix}|" "${clojure_unpack}/clojure-tools/clojure" >"${clojure_prefix}/bin/clojure"
+  chmod 0755 "${clojure_prefix}/bin/clojure"
+  rm -rf -- "${clojure_unpack}"
+fi
+export PATH="${clojure_prefix}/bin:${PATH}"
+test "$(clojure --version)" = "Clojure CLI version ${CLOJURE_CLI_VERSION}"
 (
   cd compat/jenkins-worker
   timeout 60 clojure -M:test

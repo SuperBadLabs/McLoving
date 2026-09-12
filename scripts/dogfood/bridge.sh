@@ -56,8 +56,10 @@ PY
   code="$(curl -sS -o "${answer}" -w '%{http_code}' -X POST "${MCLOVING_URL}${hook_path}" \
     -H 'Content-Type: application/json' -H "X-GitHub-Delivery: ${event}" \
     -H 'X-GitHub-Event: push' -H "X-Hub-Signature-256: $(sign "${body}")" --data-binary "@${body}")"
-  # The bridge's own record of which build a commit got, for verdicts.sh.
-  [ -f "${answer}" ] && cp "${answer}" "${state}/answer-${sha}.json"
+  # The bridge's own record of which build each push got, for verdicts.sh:
+  # one line per delivery, so a commit pushed twice keeps both builds.
+  printf '%s %s %s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${event}" "${sha}" \
+    "$(jq -r '.admission.build_id // "-"' "${answer}" 2>/dev/null || echo -)" >>"${state}/deliveries.tsv"
   log "push ${event} ${sha} -> ${code} $(jq -c '{build_id: .admission.build_id, status: .status}' "${answer}" 2>/dev/null || true)"
   case "${code}" in 2*) return 0 ;; *) return 1 ;; esac
 }
@@ -103,8 +105,20 @@ pending_pushes() {
     return 0
   fi
   if [ -z "${found}" ]; then
-    log "watermark ${last} is older than the push events GitHub lists; delivering the newest push only" >&2
-    printf '%s' "${pushes}" | awk 'NF { print; exit }'
+    if [ -n "$(printf '%s' "${pushes}" | head -1)" ]; then
+      log "watermark ${last} is older than the push events GitHub lists; delivering the newest push only" >&2
+      printf '%s' "${pushes}" | awk 'NF { print; exit }'
+      return 0
+    fi
+    # No push to the branch is listed at all: the branch head is delivered
+    # under a branch-<sha> id unless it is the head last delivered.
+    local head last_sha
+    head="$(gh api "repos/${repository}/branches/${branch}" --jq .commit.sha)" || return 1
+    last_sha="$(awk 'END { print $3 }' "${state}/deliveries.tsv" 2>/dev/null || true)"
+    if [ "${head}" != "${last_sha}" ]; then
+      log "watermark ${last} is older than the events GitHub lists and none is a push to ${branch}; delivering the branch head" >&2
+      printf 'branch-%s %s\n' "${head}" "${head}"
+    fi
     return 0
   fi
   printf '%s' "${pushes}" | awk -v last="${last}" '$1 == last { exit } NF && !seen[$1]++ { print }' | tac

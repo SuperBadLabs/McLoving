@@ -40,9 +40,21 @@ acquirer="${repo}/target/debug/mcloving-source-acquirer"
 render="${repo}/target/debug/examples/render_source_binding"
 
 echo "== stop the previous instance"
-for pid_file in "${state}"/agent.pid "${state}"/controller.pid "${state}"/bridge.pid; do
-  if [ -f "${pid_file}" ]; then kill "$(cat "${pid_file}")" 2>/dev/null || true; rm -f "${pid_file}"; fi
-done
+# A recorded pid is signalled only while its command line still names the
+# binary or script we started; a reused pid is left alone and the stale
+# record removed.
+stop_recorded() {
+  local pid_file="$1" expected="$2" pid
+  [ -f "${pid_file}" ] || return 0
+  pid="$(cat "${pid_file}")"
+  if [ -r "/proc/${pid}/cmdline" ] && tr '\0' ' ' <"/proc/${pid}/cmdline" | rg -q -F "${expected}"; then
+    kill "${pid}" 2>/dev/null || true
+  fi
+  rm -f "${pid_file}"
+}
+stop_recorded "${state}/bridge.pid" "scripts/dogfood/bridge.sh"
+stop_recorded "${state}/agent.pid" "${agent_bin}"
+stop_recorded "${state}/controller.pid" "${controller}"
 sleep 1
 
 echo "== identities (kept across restarts)"
