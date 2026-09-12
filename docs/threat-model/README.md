@@ -1149,7 +1149,9 @@ static credential, which names no identity, acts as an Admin without
 revalidation); every change is one
 `identity` audit record (`project_role_granted`, `project_role_changed`,
 `project_role_revoked`) naming the authority, the actor's role, the
-previous role, the reason and the fenced generation. Residual: a promotion
+previous role, the reason and the fenced generation. Residual: a mapped-policy
+grant is decided at authorization time and not read again in the store
+(the identity, session and credential are); a promotion
 does not fence, so a session issued before it carries the new role at its
 next authentication without re-login, which is the intended direction; the
 Owner count is read under a per-project advisory lock, so two concurrent
