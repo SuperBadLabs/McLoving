@@ -8080,7 +8080,7 @@ async fn terminalize_dead_lettered_reconciliation(
     node_id: Uuid,
     build_id: Uuid,
     reason: &str,
-) -> Result<(), sqlx::Error> {
+) -> Result<(), StoreError> {
     let terminalized = sqlx::query_scalar::<_, Uuid>(
         "UPDATE attempts
          SET status = 'failed',
@@ -8117,6 +8117,9 @@ async fn terminalize_dead_lettered_reconciliation(
     .bind(build_id)
     .execute(&mut **tx)
     .await?;
+    // This is a terminal transition like any other: the build's mapped
+    // notifications are owed here too (PAR-004).
+    dag::record_terminal_notifications(tx, organization_id, build_id, "failed").await?;
     Ok(())
 }
 

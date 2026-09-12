@@ -1134,7 +1134,7 @@ async fn derive_build_outcome(
 
 /// Appends the terminal event and records the build's notification
 /// deliveries from the targets it carried since admission.
-async fn record_terminal_notifications(
+pub(crate) async fn record_terminal_notifications(
     tx: &mut Transaction<'_, Postgres>,
     organization_id: Uuid,
     build_id: Uuid,
@@ -1577,22 +1577,52 @@ fn validate_notify_targets(targets: &Value) -> Result<(), DagContractError> {
         let Some(object) = entry.as_object() else {
             return Err(invalid("notification target must be an object"));
         };
-        if !matches!(
-            object.get("kind").and_then(Value::as_str),
-            Some("github_status" | "webhook")
-        ) {
-            return Err(invalid(
-                "notification target kind must be github_status or webhook",
-            ));
-        }
-        if !object
-            .get("mapping_id")
-            .and_then(Value::as_str)
-            .is_some_and(mcloving_domain::cache_intent::canonical_mapping_id)
-        {
+        let field = |name: &str| object.get(name).and_then(Value::as_str);
+        if !field("mapping_id").is_some_and(mcloving_domain::cache_intent::canonical_mapping_id) {
             return Err(invalid(
                 "notification target must name a canonical mapping id",
             ));
+        }
+        // The resolved shape is closed per kind: what delivery needs, and
+        // nothing a pipeline or a caller could smuggle past the catalog.
+        let expected: &[&str] = match field("kind") {
+            Some("github_status") => {
+                use mcloving_domain::notifications::{
+                    is_commit_id, is_repository_identity, is_status_context,
+                };
+                if !field("commit").is_some_and(is_commit_id)
+                    || !field("context").is_some_and(is_status_context)
+                    || !field("repository").is_some_and(is_repository_identity)
+                {
+                    return Err(invalid(
+                        "github_status target needs a commit, a context and a repository",
+                    ));
+                }
+                &["kind", "mapping_id", "commit", "context", "repository"]
+            }
+            Some("webhook") => {
+                // A debug build also admits a plain-HTTP loopback destination,
+                // the shape the controller's debug-only delivery seam admits
+                // from its catalog for tests against a local sink; a release
+                // build admits `https` only.
+                if !field("destination_url").is_some_and(|url| {
+                    url.len() <= 2048
+                        && url.trim() == url
+                        && (url.starts_with("https://")
+                            || (cfg!(debug_assertions) && url.starts_with("http://127.")))
+                }) {
+                    return Err(invalid("webhook target needs an https destination"));
+                }
+                &["kind", "mapping_id", "destination_url"]
+            }
+            _ => {
+                return Err(invalid(
+                    "notification target kind must be github_status or webhook",
+                ));
+            }
+        };
+        if object.keys().any(|key| !expected.contains(&key.as_str())) {
+            return Err(invalid("notification target carries an unknown field"));
         }
     }
     Ok(())

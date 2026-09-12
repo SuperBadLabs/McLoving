@@ -5179,6 +5179,13 @@ async fn reconciliation_retry_and_terminal_decisions_are_mutually_exclusive() {
         })
         .await
         .expect("admit exhausted reconciliation work");
+    sqlx::query("UPDATE builds SET notify_targets = $3 WHERE organization_id = $1 AND id = $2")
+        .bind(organization_id)
+        .bind(exhausted.build_id)
+        .bind(json!([{"kind": "webhook", "mapping_id": "hooks.dead", "destination_url": "https://hooks.example.test/dead"}]))
+        .execute(store.pool())
+        .await
+        .expect("attach a notification target to the exhausted build");
     let mut exhausted_tx = store.pool().begin().await.expect("begin exhausted state");
     for (table, id) in [
         ("attempts", exhausted.attempt_id),
@@ -5211,6 +5218,18 @@ async fn reconciliation_retry_and_terminal_decisions_are_mutually_exclusive() {
             .await
             .expect("dead-letter exhausted reconciliation"),
         RetryDecision::DeadLettered
+    );
+    // Dead-lettering is a terminal transition like any other: the build's
+    // mapped notifications are recorded with it (PAR-004).
+    assert_eq!(
+        store
+            .build_notifications(organization_id, exhausted.build_id)
+            .await
+            .expect("read the dead-lettered build's ledger")
+            .iter()
+            .map(|row| (row.1.as_str(), row.3.as_str()))
+            .collect::<Vec<_>>(),
+        vec![("webhook", "pending")]
     );
     assert_eq!(
         store
@@ -12583,7 +12602,7 @@ async fn a_terminal_build_records_its_notification_deliveries_once() {
         .expect("create notify project");
     let targets = json!([
         {"kind": "github_status", "mapping_id": "github.notify", "commit": "0123456789abcdef0123456789abcdef01234567", "context": "mcloving", "repository": "SuperBadLabs/McLoving"},
-        {"kind": "webhook", "mapping_id": "hooks.notify"}
+        {"kind": "webhook", "mapping_id": "hooks.notify", "destination_url": "https://hooks.example.test/notify"}
     ]);
     let admission = store
         .admit_test_dag(&NewDagBuild {
