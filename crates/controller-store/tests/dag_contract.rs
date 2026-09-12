@@ -216,6 +216,7 @@ fn capabilities_are_canonical_and_bounded() {
         serde_json::json!([{"kind": "github_status", "mapping_id": "a", "commit": "abc1234"}]),
         serde_json::json!([{"kind": "github_status", "mapping_id": "a", "commit": "ABC", "context": "c", "repository": "o/r"}]),
         serde_json::json!([{"kind": "github_status", "mapping_id": "a", "commit": "abc1234", "context": "c", "repository": "o/r", "extra": 1}]),
+        serde_json::json!([{"kind": "github_status", "mapping_id": "a", "commit": "abc1234", "context": "c", "repository": "Owner/Repo"}]),
         serde_json::Value::Array(vec![
             serde_json::json!({"kind": "webhook", "mapping_id": "a", "destination_url": "https://h.test/"});
             9
@@ -232,7 +233,7 @@ fn capabilities_are_canonical_and_bounded() {
     }
     let mut well_formed = build(node(vec!["shell".to_owned()]));
     well_formed.notify_targets = serde_json::json!([
-        {"kind": "github_status", "mapping_id": "github.main", "commit": "abc1234", "context": "mcloving", "repository": "SuperBadLabs/cljest"},
+        {"kind": "github_status", "mapping_id": "github.main", "commit": "abc1234", "context": "mcloving", "repository": "superbadlabs/cljest"},
         {"kind": "webhook", "mapping_id": "hooks.main", "destination_url": "https://hooks.example.test/x"}
     ]);
     validate_dag_contract(&well_formed).unwrap();

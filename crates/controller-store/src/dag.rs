@@ -1606,12 +1606,18 @@ fn validate_notify_targets(targets: &Value) -> Result<(), DagContractError> {
                 use mcloving_domain::notifications::{
                     is_commit_id, is_repository_identity, is_status_context,
                 };
+                // The repository is one status key however it is spelled:
+                // admission stores it lowercased, so the store accepts only
+                // that spelling.
                 if !field("commit").is_some_and(is_commit_id)
                     || !field("context").is_some_and(is_status_context)
-                    || !field("repository").is_some_and(is_repository_identity)
+                    || !field("repository").is_some_and(|repository| {
+                        is_repository_identity(repository)
+                            && repository.bytes().all(|byte| !byte.is_ascii_uppercase())
+                    })
                 {
                     return Err(invalid(
-                        "github_status target needs a commit, a context and a repository",
+                        "github_status target needs a commit, a context and a lowercase repository",
                     ));
                 }
                 &["kind", "mapping_id", "commit", "context", "repository"]

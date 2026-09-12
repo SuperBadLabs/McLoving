@@ -12616,7 +12616,7 @@ async fn a_terminal_build_records_its_notification_deliveries_once() {
         .await
         .expect("create notify project");
     let targets = json!([
-        {"kind": "github_status", "mapping_id": "github.notify", "commit": "0123456789abcdef0123456789abcdef01234567", "context": "mcloving", "repository": "SuperBadLabs/McLoving"},
+        {"kind": "github_status", "mapping_id": "github.notify", "commit": "0123456789abcdef0123456789abcdef01234567", "context": "mcloving", "repository": "superbadlabs/mcloving"},
         {"kind": "webhook", "mapping_id": "hooks.notify", "destination_url": "https://hooks.example.test/notify"}
     ]);
     let admission = store

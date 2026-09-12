@@ -149,6 +149,16 @@ impl VersionedComponent {
                 error.message,
             )
         })?;
+        // Expansion folds stages, not a pipeline's notification targets
+        // (PAR-004): a component that declared them would be accepted and
+        // digest-bound and then silently notify nobody, so it is refused.
+        if !self.pipeline.notify.is_empty() {
+            return Err(ComponentError::new(
+                ComponentErrorCode::InvalidDefinition,
+                "$.pipeline.notify",
+                "a component cannot declare notification targets; expansion carries none",
+            ));
+        }
         if self
             .pipeline
             .stages
