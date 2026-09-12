@@ -75,8 +75,8 @@ pub use product::{
     PipelineWrite, TestReportView,
 };
 pub use project_roles::{
-    MembershipAuthority, ProjectMembership, ProjectRoleGrant, ProjectRoleGrantOutcome,
-    ProjectRoleRevocation, ProjectRoleRevocationOutcome,
+    DurableCaller, MembershipAuthority, ProjectMembership, ProjectRoleGrant,
+    ProjectRoleGrantOutcome, ProjectRoleRevocation, ProjectRoleRevocationOutcome,
 };
 pub use scheduler::{
     AcceptedOffer, ClaimRequest, ClaimedAttempt, LeaseRenewalDisposition, WaitReason,

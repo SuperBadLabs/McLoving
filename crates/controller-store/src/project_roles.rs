@@ -21,23 +21,35 @@ use super::audit::append_audit_record;
 use super::authz::ProjectRole;
 use super::{Store, StoreError};
 
+/// The durable credential a caller authenticated with: its identity, the
+/// lifecycle generation the bearer was issued under, and the session or
+/// service credential the bearer names. All of it is checked again inside
+/// the write transaction, with the identity row locked, so a lifecycle
+/// transition, a session revocation or a credential revocation that
+/// commits after authentication is applied to the write.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DurableCaller {
+    pub identity_id: Uuid,
+    pub lifecycle_generation: i64,
+    pub session_id: Option<Uuid>,
+    pub service_credential_id: Option<Uuid>,
+}
+
 /// Who is writing the membership.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MembershipAuthority {
     /// The offline admin tool under the migration role: may bootstrap the
     /// first Owner and manage any role.
     Bootstrap,
-    /// A human principal through the API, named by identity and by the
-    /// lifecycle generation its bearer authenticated under. Its role in the
-    /// project is read again under the membership lock, so a demotion,
-    /// revocation or fence that committed after authentication is seen.
-    Principal {
-        identity_id: Uuid,
-        lifecycle_generation: i64,
-    },
-    /// A service principal, or a mapped-policy principal, that passed the
-    /// project's configure action: acts as an Admin and never as an Owner.
-    Delegated,
+    /// A human principal through the API. Its role in the project is read
+    /// again under the locks, so a demotion or revocation that committed
+    /// after authentication is seen.
+    Principal(DurableCaller),
+    /// A service principal, a mapped-policy principal or a static
+    /// credential that passed the project's configure action: acts as an
+    /// Admin and never as an Owner. A durable caller is revalidated like a
+    /// principal; a static credential names no identity and is not.
+    Delegated { caller: Option<DurableCaller> },
 }
 
 /// The authority's role in the project as resolved under the lock: `None`
@@ -62,39 +74,91 @@ impl MembershipAuthority {
                 role: None,
                 identity_id: None,
             }),
-            Self::Delegated => Ok(ResolvedAuthority {
+            Self::Delegated { caller: None } => Ok(ResolvedAuthority {
                 kind: "delegated",
                 role: Some(ProjectRole::Admin),
                 identity_id: None,
             }),
-            Self::Principal {
-                identity_id,
-                lifecycle_generation,
+            Self::Delegated {
+                caller: Some(caller),
             } => {
-                let current = sqlx::query_scalar::<_, i64>(
-                    "SELECT lifecycle_generation FROM identities
-                     WHERE organization_id = $1 AND id = $2 AND lifecycle_state = 'active'",
-                )
-                .bind(organization_id)
-                .bind(identity_id)
-                .fetch_optional(&mut **tx)
-                .await?;
-                if current != Some(lifecycle_generation) {
-                    return denied(
-                        "the caller's session was fenced after it authenticated; sign in again",
-                    );
-                }
-                let role = current_role(tx, organization_id, project_id, identity_id).await?;
+                caller.revalidate(tx, organization_id).await?;
+                Ok(ResolvedAuthority {
+                    kind: "delegated",
+                    role: Some(ProjectRole::Admin),
+                    identity_id: Some(caller.identity_id),
+                })
+            }
+            Self::Principal(caller) => {
+                caller.revalidate(tx, organization_id).await?;
+                let role =
+                    current_role(tx, organization_id, project_id, caller.identity_id).await?;
                 let Some(role) = role else {
                     return denied("the caller holds no role in the project");
                 };
                 Ok(ResolvedAuthority {
                     kind: "principal",
                     role: Some(role),
-                    identity_id: Some(identity_id),
+                    identity_id: Some(caller.identity_id),
                 })
             }
         }
+    }
+}
+
+impl DurableCaller {
+    /// Locks the caller's identity row for the rest of the transaction (the
+    /// row a lifecycle transition and a fence also lock) and requires the
+    /// identity active at the authenticated generation, the session not
+    /// revoked and the service credential not revoked.
+    async fn revalidate(
+        self,
+        tx: &mut Transaction<'_, Postgres>,
+        organization_id: Uuid,
+    ) -> Result<(), StoreError> {
+        let current = sqlx::query_scalar::<_, i64>(
+            "SELECT lifecycle_generation FROM identities
+             WHERE organization_id = $1 AND id = $2 AND lifecycle_state = 'active'
+             FOR UPDATE",
+        )
+        .bind(organization_id)
+        .bind(self.identity_id)
+        .fetch_optional(&mut **tx)
+        .await?;
+        if current != Some(self.lifecycle_generation) {
+            return denied(
+                "the caller's identity was fenced after it authenticated; sign in again",
+            );
+        }
+        if let Some(session_id) = self.session_id {
+            let live = sqlx::query_scalar::<_, i32>(
+                "SELECT 1 FROM identity_sessions
+                 WHERE organization_id = $1 AND session_id = $2 AND revoked_at_unix_ms IS NULL",
+            )
+            .bind(organization_id)
+            .bind(session_id)
+            .fetch_optional(&mut **tx)
+            .await?;
+            if live.is_none() {
+                return denied("the caller's session was revoked after it authenticated");
+            }
+        }
+        if let Some(credential_id) = self.service_credential_id {
+            let live = sqlx::query_scalar::<_, i32>(
+                "SELECT 1 FROM service_credentials
+                 WHERE organization_id = $1 AND credential_id = $2 AND revoked_at_unix_ms IS NULL",
+            )
+            .bind(organization_id)
+            .bind(credential_id)
+            .fetch_optional(&mut **tx)
+            .await?;
+            if live.is_none() {
+                return denied(
+                    "the caller's service credential was revoked after it authenticated",
+                );
+            }
+        }
+        Ok(())
     }
 }
 

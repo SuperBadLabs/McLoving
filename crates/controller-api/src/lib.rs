@@ -44,17 +44,18 @@ use mcloving_controller_store::{
     DiscoveredRefKind, DiscoveryChild, DiscoveryChildState, DiscoveryObservationWrite,
     DiscoveryParent, DiscoveryParentKind, DiscoveryParentPutOutcome, DiscoveryParentState,
     DiscoveryParentWrite, DiscoveryScanOutcome, DiscoveryScanReceipt, DiscoveryScanSource,
-    DiscoveryScanWrite, ForkTrustStrategy, MAX_OBJECT_RETENTION_SECONDS, MembershipAuthority,
-    NewDagBuild, NewDagNode, NewEnvironmentApproval, NewTriggerDelivery, ObjectKind, ObjectStatus,
-    OrphanPolicy, PipelineOperationalStateRecord, PipelineOperationalStateTransition,
-    PipelineOperationalStateTransitionOutcome, PipelinePage, PipelinePutOutcome, PipelineRecord,
-    PipelineTrigger, PipelineTriggerState, PipelineTriggerWrite, PipelineWrite, ProjectMembership,
-    ProjectRoleGrant, ProjectRoleGrantOutcome, ProjectRoleRevocation, PullRequestDiscoveryStrategy,
-    RetryDecision, Store, StoreError, TRIGGER_DAG_IDEMPOTENCY_PREFIX, TestReportView,
-    TriggerDelivery, TriggerDeliveryAdmission, TriggerDeliveryClaimOutcome,
-    TriggerDeliveryClaimRequest, TriggerDeliveryDagAdmission, TriggerDeliveryDagAdmissionRequest,
-    TriggerDeliveryFailure, TriggerDeliveryFailureRequest, TriggerDeliveryRedrive, TriggerKind,
-    TriggerPutOutcome, TriggerScheduleSlot, WaitReason,
+    DiscoveryScanWrite, DurableCaller, ForkTrustStrategy, MAX_OBJECT_RETENTION_SECONDS,
+    MembershipAuthority, NewDagBuild, NewDagNode, NewEnvironmentApproval, NewTriggerDelivery,
+    ObjectKind, ObjectStatus, OrphanPolicy, PipelineOperationalStateRecord,
+    PipelineOperationalStateTransition, PipelineOperationalStateTransitionOutcome, PipelinePage,
+    PipelinePutOutcome, PipelineRecord, PipelineTrigger, PipelineTriggerState,
+    PipelineTriggerWrite, PipelineWrite, ProjectMembership, ProjectRoleGrant,
+    ProjectRoleGrantOutcome, ProjectRoleRevocation, PullRequestDiscoveryStrategy, RetryDecision,
+    Store, StoreError, TRIGGER_DAG_IDEMPOTENCY_PREFIX, TestReportView, TriggerDelivery,
+    TriggerDeliveryAdmission, TriggerDeliveryClaimOutcome, TriggerDeliveryClaimRequest,
+    TriggerDeliveryDagAdmission, TriggerDeliveryDagAdmissionRequest, TriggerDeliveryFailure,
+    TriggerDeliveryFailureRequest, TriggerDeliveryRedrive, TriggerKind, TriggerPutOutcome,
+    TriggerScheduleSlot, WaitReason,
     authz::{Action, Principal, PrincipalKind, ProjectRole, authorize as authorize_principal},
 };
 use mcloving_object_store::{
@@ -3676,7 +3677,7 @@ async fn authorize_membership_writer(
     organization_id: Uuid,
     project_id: Uuid,
 ) -> Result<(Principal, MembershipAuthority), ApiError> {
-    let (principal, identity) = authenticate_identity(state, headers, organization_id).await?;
+    let (principal, caller) = authenticate_identity(state, headers, organization_id).await?;
     authorize_principal(
         &principal,
         organization_id,
@@ -3684,17 +3685,14 @@ async fn authorize_membership_writer(
         Action::ProjectConfigure,
     )
     .map_err(|error| ApiError::new(StatusCode::FORBIDDEN, "forbidden", error.to_string()))?;
-    let authority = match identity {
-        Some((identity_id, lifecycle_generation))
+    let authority = match caller {
+        Some(caller)
             if principal.kind == PrincipalKind::Human
                 && !principal.mapped_projects.contains(&project_id) =>
         {
-            MembershipAuthority::Principal {
-                identity_id,
-                lifecycle_generation,
-            }
+            MembershipAuthority::Principal(caller)
         }
-        _ => MembershipAuthority::Delegated,
+        caller => MembershipAuthority::Delegated { caller },
     };
     Ok((principal, authority))
 }
@@ -7131,14 +7129,14 @@ async fn authenticate_principal(
         .map(|(principal, _)| principal)
 }
 
-/// The principal and, for a durable credential, the identity id and the
-/// lifecycle generation it authenticated under; a static credential names
-/// no identity.
+/// The principal and, for a durable credential, the caller it authenticated
+/// as (identity, lifecycle generation, session or service credential); a
+/// static credential names no identity.
 async fn authenticate_identity(
     state: &ApiState,
     headers: &HeaderMap,
     organization_id: Uuid,
-) -> Result<(Principal, Option<(Uuid, i64)>), ApiError> {
+) -> Result<(Principal, Option<DurableCaller>), ApiError> {
     let supplied: [u8; 32] = bearer_token(headers)
         .map(|token| Sha256::digest(token.as_bytes()).into())
         .ok_or_else(unauthorized)?;
@@ -7153,11 +7151,13 @@ async fn authenticate_identity(
             .authenticate_api_token(organization_id, supplied, unix_time_ms())
             .await
             .map(|authenticated| {
-                let identity = (
-                    authenticated.identity_id,
-                    authenticated.lifecycle_generation,
-                );
-                (authenticated.principal, Some(identity))
+                let caller = DurableCaller {
+                    identity_id: authenticated.identity_id,
+                    lifecycle_generation: authenticated.lifecycle_generation,
+                    session_id: authenticated.session_id,
+                    service_credential_id: authenticated.service_credential_id,
+                };
+                (authenticated.principal, Some(caller))
             })
             .map_err(|_| unauthorized()),
     }
