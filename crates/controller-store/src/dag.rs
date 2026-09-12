@@ -1639,30 +1639,29 @@ fn validate_notify_targets(targets: &Value) -> Result<(), DagContractError> {
     Ok(())
 }
 
-/// The destination shape delivery will accept: `https://` (a debug build
-/// also admits plain-HTTP loopback, the shape the controller's debug-only
-/// delivery seam admits for tests against a local sink), a non-empty
-/// authority without credentials, no fragment, bounded, untrimmed.
-fn webhook_destination_is_well_formed(url: &str) -> bool {
-    let rest = if let Some(rest) = url.strip_prefix("https://") {
-        rest
-    } else if cfg!(debug_assertions) {
-        match url.strip_prefix("http://") {
-            Some(rest) if rest.starts_with("127.") => rest,
-            _ => return false,
-        }
-    } else {
+/// The destination shape delivery will accept, parsed as delivery parses
+/// it: `https` (a debug build also admits plain-HTTP loopback, the shape
+/// the controller's debug-only delivery seam admits for tests against a
+/// local sink), a host, no credentials, no fragment, bounded, untrimmed.
+fn webhook_destination_is_well_formed(value: &str) -> bool {
+    if value.len() > 2048 || value.trim() != value {
+        return false;
+    }
+    let Ok(url) = url::Url::parse(value) else {
         return false;
     };
-    let authority = rest.split(['/', '?']).next().unwrap_or_default();
-    url.len() <= 2048
-        && url.trim() == url
-        && !url.contains('#')
-        && !authority.is_empty()
-        && !authority.contains('@')
-        && authority.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b':' | b'[' | b']')
-        })
+    let scheme_ok = url.scheme() == "https"
+        || (cfg!(debug_assertions)
+            && url.scheme() == "http"
+            && url
+                .host_str()
+                .and_then(|host| host.parse::<std::net::Ipv4Addr>().ok())
+                .is_some_and(|ip| ip.is_loopback()));
+    scheme_ok
+        && url.host_str().is_some_and(|host| !host.is_empty())
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.fragment().is_none()
 }
 
 fn validate_text(path: &str, value: &str) -> Result<(), DagContractError> {

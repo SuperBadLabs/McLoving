@@ -210,7 +210,10 @@ pub(super) fn resolve_notification_targets(
                 let Some(bound) = &row.repository else {
                     return Err(refuse("github_status mapping names no repository"));
                 };
-                if repository.as_deref().is_some_and(|named| named != bound) {
+                if repository
+                    .as_deref()
+                    .is_some_and(|named| !named.eq_ignore_ascii_case(bound))
+                {
                     return Err(refuse(
                         "notification target names a repository the mapping does not own",
                     ));
@@ -225,7 +228,10 @@ pub(super) fn resolve_notification_targets(
                     "mapping_id": mapping_id,
                     "commit": commit,
                     "context": context,
-                    "repository": bound,
+                    // GitHub routes any spelling of the owner and name to
+                    // one repository; one spelling here keeps one status
+                    // key per repository across catalogs and mappings.
+                    "repository": bound.to_ascii_lowercase(),
                 })
             }
             NotifyTarget::Webhook { mapping_id } => {

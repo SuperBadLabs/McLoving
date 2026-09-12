@@ -545,7 +545,7 @@ async fn terminal_builds_notify_their_mapped_targets_once_with_bounded_retries()
         let sink = sink.lock().unwrap();
         assert_eq!(sink.statuses.len(), 1);
         let (target, headers, body) = &sink.statuses[0];
-        assert_eq!(target, &format!("SuperBadLabs/cljest@{COMMIT}"));
+        assert_eq!(target, &format!("superbadlabs/cljest@{COMMIT}"));
         assert_eq!(
             headers[header::AUTHORIZATION].to_str().unwrap(),
             format!("Bearer {GITHUB_TOKEN}")

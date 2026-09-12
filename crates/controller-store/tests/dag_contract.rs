@@ -211,6 +211,7 @@ fn capabilities_are_canonical_and_bounded() {
         serde_json::json!([{"kind": "webhook", "mapping_id": "a", "destination_url": "https://user@h.test/"}]),
         serde_json::json!([{"kind": "webhook", "mapping_id": "a", "destination_url": "https://h.test/#frag"}]),
         serde_json::json!([{"kind": "webhook", "mapping_id": "a", "destination_url": " https://h.test/"}]),
+        serde_json::json!([{"kind": "webhook", "mapping_id": "a", "destination_url": "https://hooks.example:abc/path"}]),
         serde_json::json!([{"kind": "webhook", "mapping_id": "a", "destination_url": "https://h.test/", "token": "x"}]),
         serde_json::json!([{"kind": "github_status", "mapping_id": "a", "commit": "abc1234"}]),
         serde_json::json!([{"kind": "github_status", "mapping_id": "a", "commit": "ABC", "context": "c", "repository": "o/r"}]),

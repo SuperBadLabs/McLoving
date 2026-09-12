@@ -5272,6 +5272,21 @@ async fn reconciliation_retry_and_terminal_decisions_are_mutually_exclusive() {
     .await
     .expect("count exhausted retry children");
     assert_eq!(exhausted_children, 0);
+    // The second dead-letter decision on the already terminal build records
+    // no second terminal generation and no second terminal event.
+    let (generation, terminal_events) = sqlx::query_as::<_, (i32, i64)>(
+        "SELECT (SELECT max(terminal_generation) FROM notification_deliveries
+                 WHERE organization_id = $1 AND build_id = $2),
+                (SELECT count(*) FROM build_events
+                 WHERE organization_id = $1 AND build_id = $2
+                   AND kind = 'dag.build_terminal')",
+    )
+    .bind(organization_id)
+    .bind(exhausted.build_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("read the dead-lettered build's generation and events");
+    assert_eq!((generation, terminal_events), (1, 1));
     assert!(
         !store
             .finalize_reconciled_attempt(
