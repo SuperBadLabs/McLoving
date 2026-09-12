@@ -1,0 +1,68 @@
+# McLoving's own Foundation, run by McLoving (PAR-005).
+#
+# One stage checks this repository out at the pushed commit and runs the
+# Foundation lanes that need no user namespaces or privileged containers:
+# lint, workspace tests, dependencies, secret scan, architecture records and
+# controller PostgreSQL. Each step is the lane's own script under
+# scripts/dogfood/, which mirrors the commands in
+# .github/workflows/foundation.yml (scripts/dogfood/verify-lanes.py keeps the
+# two aligned). The terminal outcome is written back to the commit as the
+# `mcloving/foundation` status.
+#
+# Two values are deployment-specific and rendered at apply time by
+# scripts/dogfood/heman-up.sh: the checkout step's `mapping_digest` (the
+# digest of the deployment's sealed source binding) and the `revision`
+# default (the branch head at apply time). A push delivery supplies
+# `revision`; the placeholders below are valid literals so the file compiles
+# as committed.
+version: 1
+name: mcloving-foundation
+parameters:
+  revision:
+    type: string
+    default: "0000000000000000000000000000000000000000"
+notify:
+  - github_status:
+      mapping_id: github.mcloving
+      commit:
+        expression: parameters.revision
+      context: mcloving/foundation
+      repository: SuperBadLabs/McLoving
+stages:
+  - id: foundation
+    name: Foundation
+    steps:
+      - checkout:
+          mapping_id: source.mcloving
+          mapping_digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+          ref: refs/heads/main
+          commit:
+            expression: parameters.revision
+          destination: source
+          # The sealed acquirer reads every blob through its own git
+          # process; this tree takes about fifteen minutes (AGENT-013).
+          timeout_seconds: 3600
+      - process:
+          program: /usr/bin/bash
+          args: [source/scripts/dogfood/rust-lint.sh]
+          timeout_seconds: 3600
+      - process:
+          program: /usr/bin/bash
+          args: [source/scripts/dogfood/rust-tests.sh]
+          timeout_seconds: 7200
+      - process:
+          program: /usr/bin/bash
+          args: [source/scripts/dogfood/dependencies.sh]
+          timeout_seconds: 900
+      - process:
+          program: /usr/bin/bash
+          args: [source/scripts/dogfood/secrets.sh]
+          timeout_seconds: 900
+      - process:
+          program: /usr/bin/bash
+          args: [source/scripts/dogfood/architecture.sh]
+          timeout_seconds: 1800
+      - process:
+          program: /usr/bin/bash
+          args: [source/scripts/dogfood/controller-postgres.sh]
+          timeout_seconds: 7200

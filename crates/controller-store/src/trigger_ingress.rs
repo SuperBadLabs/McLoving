@@ -808,10 +808,13 @@ impl Store {
         }
         let mut tx = self.tenant_transaction(input.organization_id).await?;
         lock_trigger_transaction(&mut tx, input.organization_id, input.trigger_id).await?;
+        // The trigger lock above serializes the read with every other
+        // decision for the trigger; a row lock would need the UPDATE
+        // privilege the tenant role does not hold on receipts (found by the
+        // PAR-005 deployment: every filtered delivery answered 500).
         let existing = sqlx::query(
             "SELECT * FROM webhook_receipts
-             WHERE organization_id = $1 AND trigger_id = $2 AND delivery_id = $3
-             FOR UPDATE",
+             WHERE organization_id = $1 AND trigger_id = $2 AND delivery_id = $3",
         )
         .bind(input.organization_id)
         .bind(input.trigger_id)

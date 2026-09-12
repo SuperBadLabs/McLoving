@@ -15,16 +15,17 @@ ticket, in this order:
 `PAR-000` -> `PAR-010` -> `PAR-011` -> `PAR-012` -> `PAR-001` -> `PAR-013` ->
 `PAR-014` -> `PAR-004` -> `PAR-005` -> `PAR-003` -> `PAR-002` -> `PAR-015`
 
-`PAR-000` closed on PR #143 (`aeb6dd85`, Foundation `34560483683`, Windows `34560483674`) and `PAR-010` on PR #145 (`cca42de5`, Foundation `34571458905`, Windows `34571458894`); `PAR-011` closed on PR #146 (`0eb949ba`, Foundation `34584499133`, Windows `34584499144`); `PAR-012` closed on PR #147 (`e22a94ed`, Foundation `34598819224`, Windows `34598819193`) and closed `EXEC-005` with it; `PAR-001` closed on PR #148 (`327a032a`, Foundation `34612940947`, Windows `34612940719`); `PAR-013` closed on PR #149 (`0e2cf213`, Foundation `34636714250`, Windows `34636714092`); `PAR-014` closed on PR #150 (`9208e4e2`, Foundation `34652565336`, Windows `34652565410`); `PAR-004` is `ACTIVE` in slot 1. `AGENT-008` was filed from PAR-010 review, `AGENT-009` from PAR-011 review, `AGENT-010` from PAR-012 review, `CTRL-005` and `AGENT-011` from PAR-013 review, and `AGENT-012` and `CTRL-006` from PAR-014 review as parallel lanes. The `JCOMP-001` through `JCOMP-003` milestone is complete and its
+`PAR-000` closed on PR #143 (`aeb6dd85`, Foundation `34560483683`, Windows `34560483674`) and `PAR-010` on PR #145 (`cca42de5`, Foundation `34571458905`, Windows `34571458894`); `PAR-011` closed on PR #146 (`0eb949ba`, Foundation `34584499133`, Windows `34584499144`); `PAR-012` closed on PR #147 (`e22a94ed`, Foundation `34598819224`, Windows `34598819193`) and closed `EXEC-005` with it; `PAR-001` closed on PR #148 (`327a032a`, Foundation `34612940947`, Windows `34612940719`); `PAR-013` closed on PR #149 (`0e2cf213`, Foundation `34636714250`, Windows `34636714092`); `PAR-014` closed on PR #150 (`9208e4e2`, Foundation `34652565336`, Windows `34652565410`); `PAR-004` closed on PR #151 (`bf47e751`, Foundation `34666100980`, Windows `34666100983`); `PAR-005` is `ACTIVE` in slot 1. `AGENT-008` was filed from PAR-010 review, `AGENT-009` from PAR-011 review, `AGENT-010` from PAR-012 review, `CTRL-005` and `AGENT-011` from PAR-013 review, `AGENT-012` and `CTRL-006` from PAR-014 review, and `CTRL-007` from PAR-004 review as parallel lanes. The `JCOMP-001` through `JCOMP-003` milestone is complete and its
 receipts stand as bounded evidence.
 
 **Progress metric: distance.** Count the unclosed tickets from the head of the
 chain to `PAR-005`. It was 9 on 2026-09-10, 8 after `PAR-000` closed, 7
 after `PAR-010` closed on 2026-09-11, 6 after `PAR-011` closed the same day,
 5 after `PAR-012` closed on 2026-09-11, 4 after `PAR-001` closed on
-2026-09-11, 3 after `PAR-013` closed on 2026-09-11, and 2 after `PAR-014`
-closed on 2026-09-11 (`PAR-004`, `PAR-005`); the 2026-09-30 milestone is met
-nineteen days early and the 2026-10-31 milestone's distance is passed. Report it here every
+2026-09-11, 3 after `PAR-013` closed on 2026-09-11, 2 after `PAR-014`
+closed on 2026-09-11, and 1 after `PAR-004` closed on 2026-09-12 (`PAR-005`);
+the 2026-09-30 milestone is met nineteen days early and the 2026-11-30
+milestone's distance is already reached. Report it here every
 two weeks; it must fall. A ticket added to the chain is reported as a
 regression in this file, not filed silently.
 
