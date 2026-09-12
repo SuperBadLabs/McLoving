@@ -71,6 +71,18 @@ sessions and login attempts. Disabling a service identity atomically revokes its
 credentials so reactivation cannot resurrect them. It
 does not accept raw access, refresh, or service-token values.
 
+Project roles are the one identity
+operation the API carries (PAR-003): `PUT` and `DELETE` on
+`/projects/{project_id}/memberships/{identity_id}` under `ProjectConfigure`
+grant, change and revoke a human's role, with the store applying the role
+rules whichever authority writes: a project's first Owner is bootstrapped
+only by the admin tool's `grant-role`, Owner is needed to grant Owner or to
+change or revoke an Owner, an Admin manages the roles below, the last Owner
+cannot be revoked or demoted, and a revocation or demotion bumps the
+identity's lifecycle generation so its live sessions stop authenticating at
+once. Each write is one `identity` audit record naming the authority, the
+actor's role, the previous role, the reason and the fenced generation.
+
 Identity/provider/service-credential provisioning is serialized per tenant with a
 transaction-scoped advisory lock, making exact active-active bootstrap idempotent even
 when the durable row does not yet exist. A provider ID's issuer is immutable; issuer

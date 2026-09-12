@@ -35,7 +35,7 @@ use axum::extract::DefaultBodyLimit;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use mcloving_controller_store::{
     ApprovalView, ArtifactMetadata, AuditPage, BuildGraph, BuildPage, CancellationDecision,
@@ -44,17 +44,19 @@ use mcloving_controller_store::{
     DiscoveredRefKind, DiscoveryChild, DiscoveryChildState, DiscoveryObservationWrite,
     DiscoveryParent, DiscoveryParentKind, DiscoveryParentPutOutcome, DiscoveryParentState,
     DiscoveryParentWrite, DiscoveryScanOutcome, DiscoveryScanReceipt, DiscoveryScanSource,
-    DiscoveryScanWrite, ForkTrustStrategy, MAX_OBJECT_RETENTION_SECONDS, NewDagBuild, NewDagNode,
-    NewEnvironmentApproval, NewTriggerDelivery, ObjectKind, ObjectStatus, OrphanPolicy,
-    PipelineOperationalStateRecord, PipelineOperationalStateTransition,
-    PipelineOperationalStateTransitionOutcome, PipelinePage, PipelinePutOutcome, PipelineRecord,
-    PipelineTrigger, PipelineTriggerState, PipelineTriggerWrite, PipelineWrite,
-    PullRequestDiscoveryStrategy, RetryDecision, Store, StoreError, TRIGGER_DAG_IDEMPOTENCY_PREFIX,
-    TestReportView, TriggerDelivery, TriggerDeliveryAdmission, TriggerDeliveryClaimOutcome,
-    TriggerDeliveryClaimRequest, TriggerDeliveryDagAdmission, TriggerDeliveryDagAdmissionRequest,
-    TriggerDeliveryFailure, TriggerDeliveryFailureRequest, TriggerDeliveryRedrive, TriggerKind,
-    TriggerPutOutcome, TriggerScheduleSlot, WaitReason,
-    authz::{Action, Principal, authorize as authorize_principal},
+    DiscoveryScanWrite, DurableCaller, ForkTrustStrategy, MAX_OBJECT_RETENTION_SECONDS,
+    MembershipAuthority, NewDagBuild, NewDagNode, NewEnvironmentApproval, NewTriggerDelivery,
+    ObjectKind, ObjectStatus, OrphanPolicy, PipelineOperationalStateRecord,
+    PipelineOperationalStateTransition, PipelineOperationalStateTransitionOutcome, PipelinePage,
+    PipelinePutOutcome, PipelineRecord, PipelineTrigger, PipelineTriggerState,
+    PipelineTriggerWrite, PipelineWrite, ProjectMembership, ProjectRoleGrant,
+    ProjectRoleGrantOutcome, ProjectRoleRevocation, PullRequestDiscoveryStrategy, RetryDecision,
+    Store, StoreError, TRIGGER_DAG_IDEMPOTENCY_PREFIX, TestReportView, TriggerDelivery,
+    TriggerDeliveryAdmission, TriggerDeliveryClaimOutcome, TriggerDeliveryClaimRequest,
+    TriggerDeliveryDagAdmission, TriggerDeliveryDagAdmissionRequest, TriggerDeliveryFailure,
+    TriggerDeliveryFailureRequest, TriggerDeliveryRedrive, TriggerKind, TriggerPutOutcome,
+    TriggerScheduleSlot, WaitReason,
+    authz::{Action, Principal, PrincipalKind, ProjectRole, authorize as authorize_principal},
 };
 use mcloving_object_store::{
     FilesystemObjectStore, ObjectGap, ObjectRef, ObjectStoreError, PendingObject,
@@ -684,6 +686,14 @@ pub fn router(state: ApiState) -> Router {
             get(get_pipeline_trigger).put(put_pipeline_trigger),
         )
         .route(
+            "/api/v1/organizations/{organization_id}/projects/{project_id}/memberships",
+            get(list_project_memberships),
+        )
+        .route(
+            "/api/v1/organizations/{organization_id}/projects/{project_id}/memberships/{identity_id}",
+            put(put_project_membership).delete(delete_project_membership),
+        )
+        .route(
             "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/triggers/{trigger_id}/events",
             post(submit_trigger_event),
         )
@@ -1226,6 +1236,7 @@ fn openapi_document() -> Value {
     let project = path_parameter("project_id", "uuid");
     let pipeline = path_parameter("pipeline_id", "uuid");
     let trigger = path_parameter("trigger_id", "uuid");
+    let identity = path_parameter("identity_id", "uuid");
     let discovery_parent = path_parameter("parent_id", "uuid");
     let delivery = path_parameter("delivery_id", "string");
     let digest = path_parameter("digest", "sha256");
@@ -1369,6 +1380,18 @@ fn openapi_document() -> Value {
                     Vec::new(), None
                 ),
                 "put": put_pipeline_trigger_operation()
+            },
+            "/api/v1/organizations/{organization_id}/projects/{project_id}/memberships": {
+                "parameters": [organization.clone(), project.clone()],
+                "get": api_operation(
+                    "listProjectMemberships", "memberships", "List the project's human role memberships", "200",
+                    Vec::new(), None
+                )
+            },
+            "/api/v1/organizations/{organization_id}/projects/{project_id}/memberships/{identity_id}": {
+                "parameters": [organization.clone(), project.clone(), identity.clone()],
+                "put": put_project_membership_operation(),
+                "delete": delete_project_membership_operation()
             },
             "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/triggers/{trigger_id}/events": {
                 "parameters": [organization.clone(), project.clone(), pipeline.clone(), trigger.clone()],
@@ -1692,6 +1715,23 @@ fn openapi_document() -> Value {
                 "ScheduleTriggerEventPayload": schedule_trigger_event_payload_schema(),
                 "UpstreamTriggerEventPayload": upstream_trigger_event_payload_schema(),
                 "RemoteApiTriggerEventPayload": remote_api_trigger_event_payload_schema(),
+                "ProjectRoleGrantRequest": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["role", "reason"],
+                    "properties": {
+                        "role": {"type": "string", "enum": ["viewer", "developer", "admin", "owner"]},
+                        "reason": {"type": "string", "minLength": 1, "maxLength": 1024}
+                    }
+                },
+                "ProjectRoleRevokeRequest": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["reason"],
+                    "properties": {
+                        "reason": {"type": "string", "minLength": 1, "maxLength": 1024}
+                    }
+                },
                 "TriggerRedriveRequest": {
                     "type": "object",
                     "required": ["delivery_id", "event_id"],
@@ -2448,6 +2488,42 @@ fn put_pipeline_state_operation() -> Value {
     );
     operation["responses"]["412"] = json!({
         "description": "Operational-state generation precondition failed",
+        "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}
+    });
+    operation
+}
+
+fn put_project_membership_operation() -> Value {
+    let mut operation = api_operation(
+        "putProjectMembership",
+        "memberships",
+        "Grant a human project role, or change the role an identity holds",
+        "201",
+        Vec::new(),
+        Some("ProjectRoleGrantRequest"),
+    );
+    operation["responses"]["200"] = json!({
+        "description": "Role changed, or already held",
+        "content": {"application/json": {"schema": {"type": "object"}}}
+    });
+    operation["responses"]["403"] = json!({
+        "description": "The caller's role does not manage this role: Owner is needed to grant Owner or to change or revoke an Owner, and a project's first Owner is bootstrapped offline",
+        "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}
+    });
+    operation
+}
+
+fn delete_project_membership_operation() -> Value {
+    let mut operation = api_operation(
+        "deleteProjectMembership",
+        "memberships",
+        "Revoke a human project role and fence the identity's live sessions",
+        "200",
+        Vec::new(),
+        Some("ProjectRoleRevokeRequest"),
+    );
+    operation["responses"]["403"] = json!({
+        "description": "The caller's role does not manage this role, or the identity is the project's last Owner",
         "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}
     });
     operation
@@ -3571,6 +3647,179 @@ async fn get_pipeline_trigger(
         .map_err(trigger_error)?
         .ok_or_else(resource_not_found)?;
     trigger_response(StatusCode::OK, trigger)
+}
+
+/// PAR-003: human project roles. The caller needs `ProjectConfigure` in the
+/// project; the store applies the role rules (Owner manages Owner, the last
+/// Owner stays, the first Owner is bootstrapped offline) against the role
+/// the caller holds in the project, read again under the membership lock
+/// for the identity and lifecycle generation the bearer authenticated as.
+/// A service principal, a mapped-policy principal, or a static credential
+/// acts as an Admin: it manages every role below Owner and nothing at Owner.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectRoleGrantRequest {
+    pub role: ProjectRole,
+    pub reason: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectRoleRevokeRequest {
+    pub reason: String,
+}
+
+/// Authenticates and authorizes a membership write, answering the authority
+/// the store resolves under its lock.
+async fn authorize_membership_writer(
+    state: &ApiState,
+    headers: &HeaderMap,
+    organization_id: Uuid,
+    project_id: Uuid,
+) -> Result<(Principal, MembershipAuthority), ApiError> {
+    let (principal, caller) = authenticate_identity(state, headers, organization_id).await?;
+    authorize_principal(
+        &principal,
+        organization_id,
+        Some(project_id),
+        Action::ProjectConfigure,
+    )
+    .map_err(|error| ApiError::new(StatusCode::FORBIDDEN, "forbidden", error.to_string()))?;
+    let authority = match caller {
+        Some(caller)
+            if principal.kind == PrincipalKind::Human
+                && !principal.mapped_projects.contains(&project_id) =>
+        {
+            MembershipAuthority::Principal(caller)
+        }
+        caller => MembershipAuthority::Delegated { caller },
+    };
+    Ok((principal, authority))
+}
+
+fn membership_json(membership: &ProjectMembership) -> Value {
+    json!({
+        "identity_id": membership.identity_id,
+        "project_id": membership.project_id,
+        "subject": membership.subject,
+        "role": membership.role,
+        "granted_by": membership.granted_by,
+        "granted_at_unix_ms": membership.granted_at_unix_ms,
+    })
+}
+
+fn membership_error(error: StoreError) -> ApiError {
+    match error {
+        StoreError::ProjectRoleDenied(message) => {
+            ApiError::new(StatusCode::FORBIDDEN, "project_role_denied", message)
+        }
+        StoreError::IdentityConflict(message) => {
+            ApiError::new(StatusCode::CONFLICT, "identity_conflict", message)
+        }
+        StoreError::InvalidIdentityOperation(message) => ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_identity_operation",
+            message,
+        ),
+        other => internal(other),
+    }
+}
+
+async fn list_project_memberships(
+    State(state): State<Arc<ApiState>>,
+    Path((organization_id, project_id)): Path<(Uuid, Uuid)>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    authorize(
+        &state,
+        &headers,
+        organization_id,
+        Some(project_id),
+        Action::ProjectConfigure,
+    )
+    .await?;
+    let memberships = state
+        .store
+        .project_memberships(organization_id, project_id)
+        .await
+        .map_err(membership_error)?;
+    Ok(Json(json!({
+        "project_id": project_id,
+        "memberships": memberships.iter().map(membership_json).collect::<Vec<_>>(),
+    }))
+    .into_response())
+}
+
+async fn put_project_membership(
+    State(state): State<Arc<ApiState>>,
+    Path((organization_id, project_id, identity_id)): Path<(Uuid, Uuid, Uuid)>,
+    headers: HeaderMap,
+    Json(request): Json<ProjectRoleGrantRequest>,
+) -> Result<Response, ApiError> {
+    let (principal, authority) =
+        authorize_membership_writer(&state, &headers, organization_id, project_id).await?;
+    let outcome = state
+        .store
+        .grant_project_role(&ProjectRoleGrant {
+            organization_id,
+            project_id,
+            identity_id,
+            role: request.role,
+            authority,
+            actor_subject: &principal.subject,
+            reason: &request.reason,
+        })
+        .await
+        .map_err(membership_error)?;
+    let (status, label, previous, fenced_generation) = match &outcome {
+        ProjectRoleGrantOutcome::Granted(_) => (StatusCode::CREATED, "granted", None, None),
+        ProjectRoleGrantOutcome::Changed {
+            previous,
+            fenced_generation,
+            ..
+        } => (
+            StatusCode::OK,
+            "changed",
+            Some(*previous),
+            *fenced_generation,
+        ),
+        ProjectRoleGrantOutcome::Unchanged(_) => (StatusCode::OK, "unchanged", None, None),
+    };
+    let mut body = membership_json(outcome.membership());
+    body["outcome"] = json!(label);
+    body["previous_role"] = json!(previous);
+    body["fenced_generation"] = json!(fenced_generation);
+    Ok((status, Json(body)).into_response())
+}
+
+async fn delete_project_membership(
+    State(state): State<Arc<ApiState>>,
+    Path((organization_id, project_id, identity_id)): Path<(Uuid, Uuid, Uuid)>,
+    headers: HeaderMap,
+    Json(request): Json<ProjectRoleRevokeRequest>,
+) -> Result<Response, ApiError> {
+    let (principal, authority) =
+        authorize_membership_writer(&state, &headers, organization_id, project_id).await?;
+    let outcome = state
+        .store
+        .revoke_project_role(&ProjectRoleRevocation {
+            organization_id,
+            project_id,
+            identity_id,
+            authority,
+            actor_subject: &principal.subject,
+            reason: &request.reason,
+        })
+        .await
+        .map_err(membership_error)?;
+    Ok(Json(json!({
+        "identity_id": outcome.identity_id,
+        "project_id": outcome.project_id,
+        "previous_role": outcome.previous,
+        "outcome": "revoked",
+        "fenced_generation": outcome.fenced_generation,
+    }))
+    .into_response())
 }
 
 async fn put_pipeline_trigger(
@@ -6875,6 +7124,19 @@ async fn authenticate_principal(
     headers: &HeaderMap,
     organization_id: Uuid,
 ) -> Result<Principal, ApiError> {
+    authenticate_identity(state, headers, organization_id)
+        .await
+        .map(|(principal, _)| principal)
+}
+
+/// The principal and, for a durable credential, the caller it authenticated
+/// as (identity, lifecycle generation, session or service credential); a
+/// static credential names no identity.
+async fn authenticate_identity(
+    state: &ApiState,
+    headers: &HeaderMap,
+    organization_id: Uuid,
+) -> Result<(Principal, Option<DurableCaller>), ApiError> {
     let supplied: [u8; 32] = bearer_token(headers)
         .map(|token| Sha256::digest(token.as_bytes()).into())
         .ok_or_else(unauthorized)?;
@@ -6882,13 +7144,21 @@ async fn authenticate_principal(
         Authentication::Static(credentials) => credentials
             .iter()
             .find(|credential| constant_time_eq(&supplied, &credential.token_digest))
-            .map(|credential| credential.principal.clone())
+            .map(|credential| (credential.principal.clone(), None))
             .ok_or_else(unauthorized),
         Authentication::Durable => state
             .store
             .authenticate_api_token(organization_id, supplied, unix_time_ms())
             .await
-            .map(|authenticated| authenticated.principal)
+            .map(|authenticated| {
+                let caller = DurableCaller {
+                    identity_id: authenticated.identity_id,
+                    lifecycle_generation: authenticated.lifecycle_generation,
+                    session_id: authenticated.session_id,
+                    service_credential_id: authenticated.service_credential_id,
+                };
+                (authenticated.principal, Some(caller))
+            })
             .map_err(|_| unauthorized()),
     }
 }
@@ -8179,6 +8449,18 @@ mod tests {
             (
                 "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/state",
                 "put",
+            ),
+            (
+                "/api/v1/organizations/{organization_id}/projects/{project_id}/memberships",
+                "get",
+            ),
+            (
+                "/api/v1/organizations/{organization_id}/projects/{project_id}/memberships/{identity_id}",
+                "put",
+            ),
+            (
+                "/api/v1/organizations/{organization_id}/projects/{project_id}/memberships/{identity_id}",
+                "delete",
             ),
             (
                 "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/triggers/{trigger_id}",
