@@ -36,7 +36,6 @@ MIRRORED: dict[str, list[str]] = {
         "detect --source /repo --no-banner --redact --verbose",
     ],
     "architecture.sh": [
-        "bash scripts/verify-jenkins-sequential-retained.sh",
         "/usr/bin/python3 -I scripts/test-workflow-aggregate.py",
         "/usr/bin/python3 -I scripts/test-sequential-runtime-gate.py",
         "timeout 60 clojure -M:test",
@@ -67,6 +66,16 @@ MIRRORED: dict[str, list[str]] = {
         "bash scripts/test-input-product.sh",
         "bash scripts/test-sequential-runtime.sh",
     ],
+}
+
+# Foundation commands a lane deliberately does not carry, each with the
+# reason; the workflow must still name them, so a change there is noticed.
+UNMIRRORED: dict[str, dict[str, str]] = {
+    "architecture.sh": {
+        "bash scripts/verify-jenkins-sequential-retained.sh": (
+            "walks the commit's ancestry; the sealed acquirer publishes the tree without history"
+        ),
+    },
 }
 
 # Where a lane runs a repository script that itself carries the Foundation
@@ -121,11 +130,19 @@ def main() -> int:
                 failures.append(f"{script}: Foundation no longer runs `{workflow_form}`")
             if not any(form in body for form in lane_forms):
                 failures.append(f"{script}: the lane does not run `{lane_forms[0]}`")
+    for script, commands in UNMIRRORED.items():
+        lane = without_comments((LANES / script).read_text())
+        for command, reason in commands.items():
+            if command not in workflow:
+                failures.append(f"{script}: Foundation no longer runs the unmirrored `{command}` ({reason}); drop it here")
+            if command in lane:
+                failures.append(f"{script}: the lane runs `{command}`, which is recorded as unmirrored ({reason})")
     for failure in failures:
         print(f"dogfood-lanes error: {failure}")
     if failures:
         return 1
-    print(f"dogfood-lanes-ok lanes={len(MIRRORED)} commands={sum(len(c) for c in MIRRORED.values())}")
+    unmirrored = sum(len(c) for c in UNMIRRORED.values())
+    print(f"dogfood-lanes-ok lanes={len(MIRRORED)} commands={sum(len(c) for c in MIRRORED.values())} unmirrored={unmirrored}")
     return 0
 
 

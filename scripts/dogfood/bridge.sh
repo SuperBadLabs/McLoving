@@ -71,8 +71,11 @@ pending_heads() {
 }
 
 while :; do
+  # The watermark is contiguous: a failed delivery stops this pass, so the
+  # next one starts again at that head rather than skipping it.
   for head in $(pending_heads); do
-    deliver "${head}" && printf '%s\n' "${head}" >"${last_file}"
+    deliver "${head}" || break
+    printf '%s\n' "${head}" >"${last_file}"
   done
   [ "${interval}" = "once" ] && exit 0
   sleep "${interval}"

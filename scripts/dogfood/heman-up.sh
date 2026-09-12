@@ -13,7 +13,7 @@
 # needs: podman, sudo (a tmpfs for the acquirer transport), gh (the GitHub
 # token for commit statuses), a built target/debug (the script builds it).
 set -euo pipefail
-state="$(mkdir -p "$1" && cd "$1" && pwd)"
+state="$(mkdir -p "$1" && chmod 0700 "$1" && cd "$1" && pwd)"
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "${repo}"
 # shellcheck source=../../tools/versions.env
@@ -231,7 +231,10 @@ if [ "${existing}" != "200" ]; then
     -H "Authorization: Bearer ${api_token}" -H 'Content-Type: application/json' \
     -H 'If-Match: "0"' -H 'Idempotency-Key: dogfood-trigger' --data "${trigger_body}"
 fi
+umask 077
 curl -sS "${base}/webhook" -H "Authorization: Bearer ${api_token}" >"${state}/hook.json"
+chmod 0600 "${state}/hook.json"
+umask 022
 jq '{path, provider}' "${state}/hook.json"
 
 cat >"${state}/env" <<EOF

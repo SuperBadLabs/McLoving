@@ -20,6 +20,9 @@ pushes have the same verdict from both; a mismatch resets the count.
 
 The lanes not run here, and why: `rust-source-acquirer` and the boundary
 suites need the user-namespace policy the acquirer's own tests exercise,
+the `architecture` lane's retained-source verification walks the commit's
+ancestry and the sealed acquirer publishes the tree without its history
+(recorded as unmirrored in `verify-lanes.py`),
 `ui-browser` needs the contained Chrome image, `deployment` and
 `backup-restore` need a service user and a second host, and `formal` needs
 the TLA+ tools; all are Foundation's alone. The verdict compared below is

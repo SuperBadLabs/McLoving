@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
-# Foundation `architecture`: the retained Jenkins sequential contract, the
-# workflow aggregate and runtime gates, the workflows linted with the pinned
-# actionlint, the Jenkins compatibility and plugin-directory contracts, and
-# the record-verification step, as the lane runs them.
+# Foundation `architecture`: the workflow aggregate and runtime gates, the
+# workflows linted with the pinned actionlint, the Jenkins compatibility and
+# plugin-directory contracts, and the record-verification step, as the lane
+# runs them. The lane's retained-source verification
+# (scripts/verify-jenkins-sequential-retained.sh) walks the commit's
+# ancestry, and the sealed acquirer publishes the tree without its history,
+# so that one step is Foundation's alone; verify-lanes.py records it as
+# unmirrored rather than pretending.
 # shellcheck source=lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 dogfood_lane architecture
-bash scripts/verify-jenkins-sequential-retained.sh
 /usr/bin/python3 -I scripts/test-workflow-aggregate.py
 /usr/bin/python3 -I scripts/test-sequential-runtime-gate.py
 
