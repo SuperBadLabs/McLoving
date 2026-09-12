@@ -141,9 +141,11 @@ or aborted build, under the target's context, with a `target_url` that opens
 the build in the controller UI when `MCLOVING_PUBLIC_BASE_URL` (an origin,
 no path) is set. A later build for the same repository, commit and context
 holds that status: an earlier build's delayed delivery is recorded as
-abandoned, superseded by the later build, and not written, and if the two
-raced the later build is posted once more so its outcome is the last
-write. A webhook is a JSON record (`mcloving.build-notification/v1`: organization,
+abandoned, superseded by the later build, and not written; every attempt
+marks itself in flight under the status key's lock before sending, and a
+later build's terminal transaction takes the same lock and delays its first
+post past an in-flight earlier attempt's deadline, so the later build's
+outcome is the last write even across a controller crash. A webhook is a JSON record (`mcloving.build-notification/v1`: organization,
 project, pipeline, build, status, mapping, target index, terminal generation,
 attempt, build URL)
 POSTed to the mapping's `https` destination with `X-McLoving-Signature-256:

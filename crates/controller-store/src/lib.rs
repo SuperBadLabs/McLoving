@@ -390,6 +390,73 @@ pub struct NotificationDelivery {
     pub attempts: i32,
 }
 
+/// Serializes every decision about one commit status (repository, commit,
+/// context) within an organization: an attempt marking itself in flight and
+/// a terminal transaction recording a later build's rows take this lock, so
+/// one of them sees the other's record.
+pub(crate) async fn lock_status_key(
+    tx: &mut Transaction<'_, Postgres>,
+    organization_id: Uuid,
+    target: &Value,
+) -> Result<(), StoreError> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
+        .bind(format!(
+            "mcloving.notification.status.{organization_id}.{}.{}.{}",
+            target["repository"].as_str().unwrap_or_default(),
+            target["commit"].as_str().unwrap_or_default(),
+            target["context"].as_str().unwrap_or_default()
+        ))
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+pub(crate) async fn later_github_status_holder_in(
+    tx: &mut Transaction<'_, Postgres>,
+    organization_id: Uuid,
+    build_id: Uuid,
+    target: &Value,
+) -> Result<Option<(Uuid, i32)>, StoreError> {
+    let holder = sqlx::query_as::<_, (Uuid, i32)>(
+        "SELECT d.build_id, d.target_index
+         FROM notification_deliveries AS d
+         JOIN builds AS b
+           ON b.organization_id = d.organization_id AND b.id = d.build_id
+         WHERE d.organization_id = $1
+           AND d.kind = 'github_status'
+           AND d.build_id <> $2
+           AND d.target->>'repository' = $3
+           AND d.target->>'commit' = $4
+           AND d.target->>'context' = $5
+           AND (b.created_at, b.id) > (
+               SELECT created_at, id FROM builds
+               WHERE organization_id = $1 AND id = $2
+           )
+         ORDER BY b.created_at DESC, b.id DESC
+         LIMIT 1",
+    )
+    .bind(organization_id)
+    .bind(build_id)
+    .bind(target["repository"].as_str().unwrap_or_default())
+    .bind(target["commit"].as_str().unwrap_or_default())
+    .bind(target["context"].as_str().unwrap_or_default())
+    .fetch_optional(&mut **tx)
+    .await?;
+    Ok(holder)
+}
+
+/// What marking a claimed notification attempt in flight found.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InFlightMark {
+    /// The attempt may send its request.
+    Marked,
+    /// The claim was overtaken; nothing must be sent.
+    Overtaken,
+    /// A later build holds this commit status; nothing must be sent, and the
+    /// row is to be settled as superseded by that build.
+    Superseded { by: Uuid },
+}
+
 /// One transactionally published outbox record.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PublishedOutbox {
@@ -3711,10 +3778,15 @@ impl Store {
 
     /// Records, before its request is sent, that a claimed attempt may write
     /// at its target from now on: a build that becomes terminal again while
-    /// this stands delays its new outcome's first post past the attempt's
-    /// deadline, so the old write cannot land after the new one even if the
-    /// controller dies between the write and its settlement. Answers false
-    /// when the claim was overtaken, and then nothing must be sent.
+    /// this stands, and a later build for the same commit status, delay
+    /// their outcome's first post past this attempt's deadline, so this
+    /// write cannot land after theirs even if the controller dies between
+    /// the write and its settlement. For a commit status the mark and the
+    /// later-holder check are one step under the status key's lock, the
+    /// same lock the terminal transaction takes, so either this attempt is
+    /// marked before the later build records its rows (and that build is
+    /// delayed) or the later build is visible here (and this attempt is
+    /// superseded, sending nothing).
     pub async fn mark_notification_in_flight(
         &self,
         organization_id: Uuid,
@@ -3722,8 +3794,33 @@ impl Store {
         target_index: i32,
         terminal_generation: i32,
         attempts: i32,
-    ) -> Result<bool, StoreError> {
+    ) -> Result<InFlightMark, StoreError> {
         let mut tx = self.tenant_transaction(organization_id).await?;
+        let row = sqlx::query_as::<_, (String, Value)>(
+            "SELECT kind, target FROM notification_deliveries
+             WHERE organization_id = $1 AND build_id = $2 AND target_index = $3
+               AND state = 'pending' AND terminal_generation = $4 AND attempts = $5",
+        )
+        .bind(organization_id)
+        .bind(build_id)
+        .bind(target_index)
+        .bind(terminal_generation)
+        .bind(attempts)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some((kind, target)) = row else {
+            tx.rollback().await?;
+            return Ok(InFlightMark::Overtaken);
+        };
+        if kind == "github_status" {
+            lock_status_key(&mut tx, organization_id, &target).await?;
+            if let Some((by, _)) =
+                later_github_status_holder_in(&mut tx, organization_id, build_id, &target).await?
+            {
+                tx.rollback().await?;
+                return Ok(InFlightMark::Superseded { by });
+            }
+        }
         let marked = sqlx::query_scalar::<_, i32>(
             "UPDATE notification_deliveries
              SET in_flight = true
@@ -3743,7 +3840,11 @@ impl Store {
         .fetch_optional(&mut *tx)
         .await?;
         tx.commit().await?;
-        Ok(marked.is_some())
+        Ok(if marked.is_some() {
+            InFlightMark::Marked
+        } else {
+            InFlightMark::Overtaken
+        })
     }
 
     /// The later build, if any, whose `github_status` delivery names the same
@@ -3758,31 +3859,8 @@ impl Store {
         target: &Value,
     ) -> Result<Option<(Uuid, i32)>, StoreError> {
         let mut tx = self.tenant_transaction(organization_id).await?;
-        let holder = sqlx::query_as::<_, (Uuid, i32)>(
-            "SELECT d.build_id, d.target_index
-             FROM notification_deliveries AS d
-             JOIN builds AS b
-               ON b.organization_id = d.organization_id AND b.id = d.build_id
-             WHERE d.organization_id = $1
-               AND d.kind = 'github_status'
-               AND d.build_id <> $2
-               AND d.target->>'repository' = $3
-               AND d.target->>'commit' = $4
-               AND d.target->>'context' = $5
-               AND (b.created_at, b.id) > (
-                   SELECT created_at, id FROM builds
-                   WHERE organization_id = $1 AND id = $2
-               )
-             ORDER BY b.created_at DESC, b.id DESC
-             LIMIT 1",
-        )
-        .bind(organization_id)
-        .bind(build_id)
-        .bind(target["repository"].as_str().unwrap_or_default())
-        .bind(target["commit"].as_str().unwrap_or_default())
-        .bind(target["context"].as_str().unwrap_or_default())
-        .fetch_optional(&mut *tx)
-        .await?;
+        let holder =
+            later_github_status_holder_in(&mut tx, organization_id, build_id, target).await?;
         tx.commit().await?;
         Ok(holder)
     }

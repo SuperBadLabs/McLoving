@@ -5,7 +5,7 @@ use mcloving_controller_store::{
     AgentCancellationCompletion, AgentCancellationDisposition, AgentCancellationOutcome,
     AgentReconciliationDisposition, BuildAdmission, CancellationDecision, ClaimRequest,
     ComponentPutOutcome, ComponentWrite, DagAdmission, DagDependency, DagNodeKind,
-    DependencyCondition, EffectClass, EffectEvidenceKind, EffectStatus, JunitLimits,
+    DependencyCondition, EffectClass, EffectEvidenceKind, EffectStatus, InFlightMark, JunitLimits,
     LeaseRenewalDisposition, MAX_OBJECT_RETENTION_SECONDS, NewAuditEvent, NewBuild,
     NewCredentialGrant, NewDagBuild, NewDagNode, NewEnvironmentApproval, NewLogChunk, ObjectKind,
     ObjectStatus, OutboxBacklog, PipelinePutOutcome, PipelineRecord, PipelineWrite,
@@ -13059,17 +13059,19 @@ async fn a_terminal_build_records_its_notification_deliveries_once() {
     // attempt's deadline, so the old write cannot land after the new one
     // even if the controller died before settling; an overtaken claim
     // cannot be marked at all.
-    assert!(
-        !store
+    assert_eq!(
+        store
             .mark_notification_in_flight(organization_id, later.build_id, 1, 1, 5)
             .await
-            .expect("mark an overtaken claim")
+            .expect("mark an overtaken claim"),
+        InFlightMark::Overtaken
     );
-    assert!(
+    assert_eq!(
         store
             .mark_notification_in_flight(organization_id, later.build_id, 1, 1, 1)
             .await
-            .expect("mark the webhook attempt in flight")
+            .expect("mark the webhook attempt in flight"),
+        InFlightMark::Marked
     );
     let RetryDecision::Scheduled { created: true, .. } = store
         .schedule_retry(organization_id, claim.attempt_id, 3, "operator retry")
@@ -13133,6 +13135,72 @@ async fn a_terminal_build_records_its_notification_deliveries_once() {
             .collect::<Vec<_>>(),
         vec![(later.build_id, 0, 2)],
         "the delayed row is not due until the old attempt's deadline has passed"
+    );
+    // Across builds: an attempt marked in flight for a commit status makes
+    // a later build for the same status delay its first post past the
+    // deadline (its webhook is due at once), and once that later build is
+    // recorded the older attempt can no longer be marked: it is superseded.
+    assert_eq!(
+        store
+            .mark_notification_in_flight(organization_id, later.build_id, 0, 2, 1)
+            .await
+            .expect("mark the status attempt of the later build in flight"),
+        InFlightMark::Marked
+    );
+    let third = store
+        .admit_test_dag(&NewDagBuild {
+            organization_id,
+            project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
+            idempotency_key: "notify-terminal-third".to_owned(),
+            pipeline_digest: [0xe4; 32],
+            priority: 0,
+            notify_targets: targets.clone(),
+            nodes: vec![dag_node("only", DagNodeKind::Work, vec![], "linux", "only")],
+        })
+        .await
+        .expect("admit the third notify DAG");
+    let claim = store
+        .claim_next(&dag_claim(organization_id, "agent-n3", "linux", "only"))
+        .await
+        .expect("claim the third node")
+        .expect("the third node is ready");
+    run_dag_claim(&store, &claim).await;
+    assert!(
+        store
+            .finalize_attempt(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                &claim.agent_id,
+                TerminalOutcome::Succeeded,
+                json!({"exit_code": 0}),
+            )
+            .await
+            .expect("finalize the third node")
+    );
+    let rows = sqlx::query_as::<_, (i32, bool)>(
+        "SELECT target_index, next_attempt_at > clock_timestamp() + make_interval(secs => $3)
+         FROM notification_deliveries
+         WHERE organization_id = $1 AND build_id = $2
+         ORDER BY target_index",
+    )
+    .bind(organization_id)
+    .bind(third.build_id)
+    .bind(mcloving_domain::notifications::DELIVERY_DEADLINE_SECONDS as f64)
+    .fetch_all(store.pool())
+    .await
+    .expect("read the third build's rows");
+    assert_eq!(rows, vec![(0, true), (1, false)]);
+    assert_eq!(
+        store
+            .mark_notification_in_flight(organization_id, later.build_id, 0, 2, 1)
+            .await
+            .expect("mark the superseded attempt"),
+        InFlightMark::Superseded { by: third.build_id }
     );
 }
 

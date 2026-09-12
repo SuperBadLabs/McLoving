@@ -6,7 +6,7 @@
 //! destination address checked and pinned before a connection is made.
 use super::{ApiError, ApiState, PipelineIr, StatusCode};
 use hmac::{Hmac, Mac as _};
-use mcloving_controller_store::NotificationDelivery;
+use mcloving_controller_store::{InFlightMark, NotificationDelivery};
 use mcloving_domain::cache_intent::canonical_mapping_id;
 use mcloving_domain::notifications::{
     MAX_RESPONSE_BYTES, NotifyTarget, is_commit_id, is_repository_identity,
@@ -583,12 +583,6 @@ async fn deliver_github_status(
     state: &ApiState,
     delivery: &NotificationDelivery,
 ) -> Result<Delivered, String> {
-    // A later build for the same repository, commit and context is the
-    // outcome that stands there; an older build's delayed delivery is not
-    // written over it.
-    if let Some((later, _)) = later_holder(state, delivery).await? {
-        return Ok(Delivered::Superseded(later));
-    }
     let token = state
         .notification_github_token
         .as_deref()
@@ -698,10 +692,11 @@ async fn deliver_webhook(
 async fn deliver(state: &ApiState, delivery: &NotificationDelivery) -> Result<Delivered, String> {
     let attempt = async {
         // Recorded before anything is sent, so a build that becomes
-        // terminal again while this request is out delays its new outcome
-        // past this attempt's deadline whether or not this process lives
-        // to settle it.
-        let mine = state
+        // terminal again while this request is out, or a later build for
+        // the same commit status, delays its outcome past this attempt's
+        // deadline whether or not this process lives to settle it; and a
+        // later build already recorded supersedes this attempt outright.
+        match state
             .store
             .mark_notification_in_flight(
                 delivery.organization_id,
@@ -711,9 +706,13 @@ async fn deliver(state: &ApiState, delivery: &NotificationDelivery) -> Result<De
                 delivery.attempts,
             )
             .await
-            .map_err(|error| format!("in-flight mark failed: {error}"))?;
-        if !mine {
-            return Err("claim overtaken before the request was sent".to_owned());
+            .map_err(|error| format!("in-flight mark failed: {error}"))?
+        {
+            InFlightMark::Marked => {}
+            InFlightMark::Overtaken => {
+                return Err("claim overtaken before the request was sent".to_owned());
+            }
+            InFlightMark::Superseded { by } => return Ok(Delivered::Superseded(by)),
         }
         match delivery.kind.as_str() {
             "github_status" => deliver_github_status(state, delivery).await,

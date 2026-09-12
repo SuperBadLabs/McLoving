@@ -1113,8 +1113,10 @@ deadline whether or not the controller lives to settle it, the resolved targets 
 the build's replay contract so catalog drift between controllers is an
 idempotency conflict rather than a race, a commit status is held by the
 latest build for its repository, commit and context so an earlier build's
-delayed delivery is abandoned as superseded rather than written over it and
-a race is settled by posting the later build once more, a scan
+delayed delivery is abandoned as superseded rather than written over it, the
+in-flight mark and the later build's terminal record are serialized under
+the status key's lock so the later build delays its first post past an
+in-flight earlier attempt's deadline (durably, before any request), a scan
 abandons a pending row whose attempts are spent rather than claiming it
 again, and attempts are bounded at twelve per generation with the backoff
 capped at an hour); TM-013 (credentials and host exposure: the token

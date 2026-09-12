@@ -1176,6 +1176,51 @@ async fn record_terminal_notifications(
     .bind(mcloving_domain::notifications::STALE_WRITE_QUIET_SECONDS as f64)
     .fetch_one(&mut **tx)
     .await?;
+    // A commit status this build names may be held in flight by an earlier
+    // build's attempt: under the status key's lock (taken in key order, the
+    // same lock that attempt took to mark itself), this build's first post
+    // is delayed past that attempt's deadline so the earlier write cannot
+    // land after this build's whether or not its controller lives to settle.
+    let statuses = sqlx::query_as::<_, (i32, Value)>(
+        "SELECT target_index, target FROM notification_deliveries
+         WHERE organization_id = $1 AND build_id = $2 AND kind = 'github_status'
+         ORDER BY target->>'repository', target->>'commit', target->>'context', target_index",
+    )
+    .bind(organization_id)
+    .bind(build_id)
+    .fetch_all(&mut **tx)
+    .await?;
+    for (target_index, target) in statuses {
+        crate::lock_status_key(tx, organization_id, &target).await?;
+        sqlx::query(
+            "UPDATE notification_deliveries AS d
+             SET next_attempt_at = clock_timestamp() + make_interval(secs => $4)
+             WHERE d.organization_id = $1 AND d.build_id = $2 AND d.target_index = $3
+               AND EXISTS (
+                   SELECT 1
+                   FROM notification_deliveries AS o
+                   JOIN builds AS b
+                     ON b.organization_id = o.organization_id AND b.id = o.build_id
+                   WHERE o.organization_id = $1
+                     AND o.build_id <> $2
+                     AND o.kind = 'github_status'
+                     AND o.in_flight
+                     AND o.target->>'repository' = d.target->>'repository'
+                     AND o.target->>'commit' = d.target->>'commit'
+                     AND o.target->>'context' = d.target->>'context'
+                     AND (b.created_at, b.id) < (
+                         SELECT created_at, id FROM builds
+                         WHERE organization_id = $1 AND id = $2
+                     )
+               )",
+        )
+        .bind(organization_id)
+        .bind(build_id)
+        .bind(target_index)
+        .bind(mcloving_domain::notifications::STALE_WRITE_QUIET_SECONDS as f64)
+        .execute(&mut **tx)
+        .await?;
+    }
     crate::append_event_and_outbox(
         tx,
         organization_id,
