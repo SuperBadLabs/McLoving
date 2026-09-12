@@ -1137,9 +1137,12 @@ broadening: the API cannot mint a project's first Owner, only an Owner
 grants Owner or changes or revokes an Owner, an Admin manages the roles
 below, a Developer or Viewer manages nothing, and the last Owner of a
 project cannot be revoked or demoted by either authority, so a project
-never loses its Owner and an Admin never becomes one through the API; a
-service principal or a mapped-policy principal that passed
-`ProjectConfigure` acts as an Admin, never as an Owner); every change is one
+never loses its Owner and an Admin never becomes one through the API; the
+caller's role is read again under the membership lock for the identity
+and lifecycle generation its bearer authenticated as, so a demotion,
+revocation or fence that committed after authentication is applied to the
+write, and a service principal, a mapped-policy principal or a static
+credential acts as an Admin, never as an Owner); every change is one
 `identity` audit record (`project_role_granted`, `project_role_changed`,
 `project_role_revoked`) naming the authority, the actor's role, the
 previous role, the reason and the fenced generation. Residual: a promotion
