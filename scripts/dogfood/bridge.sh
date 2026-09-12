@@ -129,7 +129,7 @@ pending_pushes() {
     # under a branch-<sha> id unless it is the head last delivered.
     local head last_sha
     head="$(gh api "repos/${repository}/branches/${branch}" --jq .commit.sha)" || return 1
-    last_sha="$(awk 'END { print $3 }' "${ledger}" 2>/dev/null || true)"
+    last_sha="$(awk '$4 != "-" { sha = $3 } END { print sha }' "${ledger}" 2>/dev/null || true)"
     if [ "${head}" != "${last_sha}" ]; then
       log "watermark ${last} is older than the events GitHub lists and none is a push to ${branch}; delivering the branch head" >&2
       printf 'branch-%s %s -\n' "${head}" "${head}"
