@@ -12,14 +12,19 @@ deliberately unmirrored with its reason. A command Foundation adds, drops or
 renames therefore fails here rather than drifting silently. Steps that are
 pinned actions or container invocations rather than `run:` lines are
 checked by the pinned reference both sides must name.
+
+The workflow is read with the standard library alone: a job is the block
+under `  <id>:` at two spaces, a step the block under `      - name:` at six,
+and a `run:` scalar is inline, a literal block (`|`) whose lines are
+commands, or a folded block (`>`) that is one command. That is the whole
+shape this workflow uses, and a shape it does not use fails the check
+rather than being guessed at.
 """
 from __future__ import annotations
 
 import pathlib
 import re
 import sys
-
-import yaml
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 WORKFLOW = ROOT / ".github/workflows/foundation.yml"
@@ -81,6 +86,66 @@ COMPAT_COMMANDS = [
 ]
 
 
+class Step:
+    def __init__(self, name: str, run: list[str]) -> None:
+        self.name = name
+        self.run = run
+
+
+def parse_jobs(text: str) -> dict[str, list[Step]]:
+    """The workflow's jobs and their steps' run commands, from the file's own
+    indentation: jobs at two spaces under `jobs:`, steps at six under
+    `steps:`, and a `run:` scalar inline, literal or folded."""
+    lines = text.splitlines()
+    jobs: dict[str, list[Step]] = {}
+    job: str | None = None
+    in_jobs = False
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if line == "jobs:":
+            in_jobs = True
+            i += 1
+            continue
+        if not in_jobs:
+            i += 1
+            continue
+        job_match = re.match(r"^  ([a-z][a-z0-9-]*):\s*$", line)
+        if job_match:
+            job = job_match.group(1)
+            jobs[job] = []
+            i += 1
+            continue
+        step_match = re.match(r"^      - name: (.*)$", line)
+        if step_match and job is not None:
+            name = step_match.group(1).strip()
+            run: list[str] = []
+            i += 1
+            while i < len(lines) and not re.match(r"^      - name: |^  [a-z][a-z0-9-]*:\s*$", lines[i]):
+                run_match = re.match(r"^        run: (.*)$", lines[i])
+                if run_match:
+                    scalar = run_match.group(1).strip()
+                    if scalar in ("|", "|-", ">", ">-"):
+                        block: list[str] = []
+                        i += 1
+                        while i < len(lines) and (lines[i].startswith("          ") or not lines[i].strip()):
+                            block.append(lines[i][10:])
+                            i += 1
+                        if scalar.startswith(">"):
+                            run.append(" ".join(part.strip() for part in block if part.strip()))
+                        else:
+                            run.extend(part.strip() for part in block if part.strip())
+                        continue
+                    if scalar.startswith(("|", ">")):
+                        raise SystemExit(f"unsupported run scalar in step {name!r}: {scalar!r}")
+                    run.append(scalar)
+                i += 1
+            jobs[job].append(Step(name, run))
+            continue
+        i += 1
+    return jobs
+
+
 def lane_forms(command: str) -> tuple[str, ...]:
     return (
         command.replace("cargo +1.97.1", 'cargo "+${RUST_TOOLCHAIN}"'),
@@ -94,43 +159,35 @@ def without_comments(text: str) -> str:
     return "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("#"))
 
 
-def run_lines(job: dict) -> list[str]:
-    lines: list[str] = []
-    for step in job.get("steps", []):
-        if RUNNER_STEP_NAMES.match(step.get("name", "")):
+def job_commands(steps: list[Step]) -> list[str]:
+    commands: list[str] = []
+    for step in steps:
+        if RUNNER_STEP_NAMES.match(step.name):
             continue
-        run = step.get("run")
-        if not run:
-            continue
-        text = " ".join(part.strip() for part in run.splitlines()) if ">" in str(run)[:0] else run
-        for raw in text.splitlines():
+        for raw in step.run:
             line = raw.strip().rstrip("\\").strip()
-            if not line or line.startswith("#"):
-                continue
-            lines.append(line)
-    return lines
-
-
-def folded(job: dict) -> list[str]:
-    """Commands of folded (`>-`) steps come as one line already; block (`|`)
-    steps come line by line. PyYAML has folded them, so every `run` is a
-    string whose lines are commands."""
-    return run_lines(job)
+            if line and not line.startswith("#"):
+                commands.append(line)
+    return commands
 
 
 def main() -> int:
-    workflow = yaml.safe_load(WORKFLOW.read_text())
-    workflow_text = without_comments(WORKFLOW.read_text())
+    workflow_raw = WORKFLOW.read_text()
+    jobs = parse_jobs(workflow_raw)
+    workflow_text = without_comments(workflow_raw)
     failures: list[str] = []
     checked = 0
     for script, job_id in MIRRORED.items():
-        job = workflow["jobs"].get(job_id)
-        if job is None:
+        steps = jobs.get(job_id)
+        if steps is None:
             failures.append(f"{script}: Foundation has no job {job_id}")
             continue
         lane = without_comments((LANES / script).read_text())
         unmirrored = UNMIRRORED.get(script, {})
-        for command in folded(job):
+        commands = job_commands(steps)
+        if not commands and script not in PINNED:
+            failures.append(f"{script}: Foundation {job_id} yielded no commands; the parser or the job changed shape")
+        for command in commands:
             if command in unmirrored:
                 if command in lane:
                     failures.append(f"{script}: runs `{command}`, recorded as unmirrored ({unmirrored[command]})")
@@ -145,7 +202,7 @@ def main() -> int:
             if not any(form in lane for form in lane_forms(command)):
                 failures.append(f"{script}: Foundation {job_id} runs `{command}` but the lane does not")
         for command, reason in unmirrored.items():
-            if command not in folded(job):
+            if command not in commands:
                 failures.append(f"{script}: Foundation no longer runs the unmirrored `{command}` ({reason}); drop it here")
         for workflow_form, lane_form in PINNED.get(script, []):
             checked += 1
