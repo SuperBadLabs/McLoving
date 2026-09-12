@@ -609,6 +609,7 @@ had never claimed one.
 | PAR-001 | `docs/evidence/PAR-001_SECURITY_REVIEW.md` |
 | PAR-013 | `docs/evidence/PAR-013_SECURITY_REVIEW.md` |
 | PAR-014 | `docs/evidence/PAR-014_SECURITY_REVIEW.md` |
+| PAR-004 | `docs/evidence/PAR-004_SECURITY_REVIEW.md` |
 | EXEC-005 | `docs/evidence/EXEC-005_SECURITY_REVIEW.md` |
 
 ## Residual-risk policy
@@ -1073,7 +1074,7 @@ streams charged before staging, header and receive deadlines, exact retries
 answered from the ledger, and the Windows admission refusal. The residuals
 above are carried as `AGENT-012` and `CTRL-006`.
 
-## PAR-004 build notification review, ticket ACTIVE
+## PAR-004 build notification review (earned closure)
 
 A build's terminal outcome is delivered to the targets its pipeline names: a
 GitHub commit status under the deployment's token, or a signed HTTPS
@@ -1149,9 +1150,17 @@ ledger and its idempotence under a second terminal, admission refusals for
 unknown, foreign, mismatched and uncredentialed mappings, a sink that
 refuses twice then accepts with the error kept and cleared, a signed webhook
 verified under the key, two concurrent workers claiming one row once, and a
-private-resolving destination refused before any connection. Closure
-requires the reviewed merge, exact-main Foundation and native Windows runs,
-and a receipt in `docs/evidence/PAR-004_SECURITY_REVIEW.md`.
+private-resolving destination refused before any connection. Closed on PR
+#151 (`bf47e751`), exact-main Foundation `34666100980` and Windows Agent `34666100983`;
+receipt `docs/evidence/PAR-004_SECURITY_REVIEW.md`. The review added,
+before the merge, the claim lease past the delivery deadline, concurrent
+delivery inside it, the terminal generation fence, the IPv6 allowlist,
+credential-scoped claims, the resolved targets in the replay contract,
+re-posting after a stale settlement, supersession by the latest build, the
+in-flight mark before any request under the status key's lock, full
+validation of resolved targets, the dead-letter terminal path notifying
+once, and the refusal of targets in components and sequential admission;
+the items above are carried as `CTRL-007`.
 
 ## PAR-001 GitHub webhook receiver review (earned closure)
 
