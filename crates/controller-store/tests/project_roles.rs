@@ -4,9 +4,9 @@
 
 use mcloving_controller_store::authz::ProjectRole;
 use mcloving_controller_store::{
-    IdentityProviderWrite, MembershipAuthority, NewHumanIdentity, OidcIdentityClaims,
-    ProjectRoleGrant, ProjectRoleGrantOutcome, ProjectRoleRevocation, SessionIssue, Store,
-    StoreError,
+    DurableCaller, IdentityProviderWrite, MembershipAuthority, NewHumanIdentity,
+    OidcIdentityClaims, ProjectRoleGrant, ProjectRoleGrantOutcome, ProjectRoleRevocation,
+    SessionIssue, Store, StoreError,
 };
 use sha2::{Digest, Sha256};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
@@ -213,11 +213,15 @@ async fn as_principal(admin: &Store, tenant: &Tenant, identity_id: Uuid) -> Memb
     .fetch_one(admin.pool())
     .await
     .expect("read lifecycle generation");
-    MembershipAuthority::Principal {
+    MembershipAuthority::Principal(DurableCaller {
         identity_id,
         lifecycle_generation,
-    }
+        session_id: None,
+        service_credential_id: None,
+    })
 }
+
+const DELEGATED: MembershipAuthority = MembershipAuthority::Delegated { caller: None };
 
 fn is_denied<T: std::fmt::Debug>(result: Result<T, StoreError>) -> bool {
     matches!(result, Err(StoreError::ProjectRoleDenied(_)))
@@ -270,7 +274,7 @@ async fn owners_are_bootstrapped_offline_and_managed_only_by_owners() {
                 &tenant,
                 bob,
                 ProjectRole::Admin,
-                MembershipAuthority::Delegated,
+                DELEGATED,
                 "service grants admin"
             ))
             .await
@@ -283,8 +287,27 @@ async fn owners_are_bootstrapped_offline_and_managed_only_by_owners() {
                 &tenant,
                 carol,
                 ProjectRole::Owner,
-                MembershipAuthority::Delegated,
+                DELEGATED,
                 "service grants owner"
+            ))
+            .await
+    ));
+    // A durable delegated caller is revalidated: a stale generation is refused.
+    assert!(is_denied(
+        runtime
+            .grant_project_role(&grant(
+                &tenant,
+                carol,
+                ProjectRole::Viewer,
+                MembershipAuthority::Delegated {
+                    caller: Some(DurableCaller {
+                        identity_id: alice,
+                        lifecycle_generation: 99,
+                        session_id: None,
+                        service_credential_id: None,
+                    }),
+                },
+                "fenced service caller"
             ))
             .await
     ));
