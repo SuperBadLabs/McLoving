@@ -91,7 +91,9 @@ pending_pushes() {
   last="$(cat "${last_file}" 2>/dev/null || true)"
   pushes=""
   found=""
-  for page in 1 2 3 4 5 6 7 8 9 10; do
+  # GitHub lists at most 300 events (three pages of 100); a fourth page is
+  # refused with 422, so the window ends here rather than failing the pass.
+  for page in 1 2 3; do
     if ! events="$(gh api "repos/${repository}/events?per_page=100&page=${page}")"; then
       log "events page ${page} failed; retrying this pass later" >&2
       return 1
