@@ -2,13 +2,15 @@
 # Records one evidence row for PAR-005: Foundation's conclusion for a main
 # push against the dogfood build's status for the same push, appended to
 # docs/evidence/PAR-005_DOGFOOD.md as a table row. Both sides are keyed by
-# push: GitHub starts one Foundation run per push and the bridge records
-# one delivery (and build) per push event, in the same order, so the n-th
-# recorded delivery of a commit is paired with the n-th Foundation run for
-# that commit (runs listed oldest first). When GitHub delivered directly
-# and the bridge has no record, the build is read from the
-# mcloving/foundation status the build wrote to the commit, whose target
-# URL names it, and the commit must then have exactly one Foundation run.
+# push: GitHub starts one Foundation run per push, within moments of it,
+# and the bridge records one delivery (and build) per push event with the
+# time GitHub recorded the push, so the Foundation run paired with a build
+# is the one run for the commit created within the pairing window after
+# that push time; a push time the bridge could not record (a branch-head
+# fallback), or a build read from the mcloving/foundation status because
+# GitHub delivered directly, pairs only when the commit has exactly one
+# Foundation run. Runs the record cannot account for are never paired by
+# position.
 # A row is written only when both verdicts are terminal; rows are one per
 # build (a commit pushed twice is two pushes, two builds and two rows) and
 # in the order the controller created the builds, to the millisecond, which
@@ -28,15 +30,33 @@ cli="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/target/debug/mcloving-c
 # Foundation's runs for the commit, oldest first: one per push of it.
 runs="$(gh run list --repo "${repository}" --workflow Foundation --branch main --commit "${commit}" \
   --json databaseId,status,conclusion,createdAt \
-  --jq 'sort_by(.createdAt) | .[] | "\(.databaseId) \(if .status == "completed" then .conclusion else .status end)"')"
+  --jq 'sort_by(.createdAt) | .[] | "\(.databaseId) \(if .status == "completed" then .conclusion else .status end) \(.createdAt)"')"
 run_count="$(printf '%s\n' "${runs}" | rg -c . || echo 0)"
 if [ "${run_count}" -eq 0 ]; then
   echo "Foundation has no run for ${commit}; nothing recorded" >&2; exit 1
 fi
-# The bridge records one line per delivery: time, push event, commit, build,
-# in push order; the chosen build must be one of them.
-candidates="$(awk -v sha="${commit}" '$3 == sha && $4 != "-" { print $4 }' "${state}/deliveries.tsv" 2>/dev/null || true)"
+# The bridge records one line per push event: time, event, commit, build,
+# push time (`-` for a branch-head fallback), under the repository's own
+# ledger; the chosen build must be one of them. A build recorded twice
+# (an event delivered again after a crash) is one candidate.
+ledger="${state}/deliveries.${repository//\//__}.main.tsv"
+records="$(awk -v sha="${commit}" '$3 == sha && $4 != "-" && !seen[$4]++ { print $4, $5 }' "${ledger}" 2>/dev/null || true)"
+candidates="$(printf '%s\n' "${records}" | awk 'NF { print $1 }')"
 candidate_count="$(printf '%s\n' "${candidates}" | rg -c . || echo 0)"
+# The run GitHub started for a push: created within the window after the
+# push time, and the only one there.
+pairing_window=900
+run_for_push() {
+  local pushed_at="$1" pushed_s
+  pushed_s="$(date -u -d "${pushed_at}" +%s)"
+  printf '%s\n' "${runs}" | while read -r id conclusion created_at; do
+    [ -z "${id}" ] && continue
+    created_s="$(date -u -d "${created_at}" +%s)"
+    if [ "${created_s}" -ge $((pushed_s - 60)) ] && [ "${created_s}" -le $((pushed_s + pairing_window)) ]; then
+      printf '%s %s\n' "${id}" "${conclusion}"
+    fi
+  done
+}
 build=""
 if [ -n "${chosen}" ]; then
   if ! printf '%s\n' "${candidates}" | rg -q -x -F "${chosen}"; then
@@ -49,12 +69,20 @@ else
   build="${candidates}"
 fi
 if [ -n "${build}" ]; then
-  # The n-th delivery of the commit pairs with the n-th Foundation run of it.
-  ordinal="$(printf '%s\n' "${candidates}" | awk -v id="${build}" '$1 == id { print NR; exit }')"
-  if [ "${run_count}" -lt "${candidate_count}" ]; then
-    echo "${commit} has ${candidate_count} recorded deliveries but ${run_count} Foundation runs; the pairing is ambiguous, nothing recorded" >&2; exit 1
+  pushed_at="$(printf '%s\n' "${records}" | awk -v id="${build}" '$1 == id { print $2; exit }')"
+  if [ "${pushed_at}" = "-" ]; then
+    if [ "${run_count}" -ne 1 ]; then
+      echo "build ${build} was a branch-head delivery without a push time and ${commit} has ${run_count} Foundation runs; nothing recorded" >&2; exit 1
+    fi
+    run_line="${runs}"
+  else
+    paired="$(run_for_push "${pushed_at}")"
+    paired_count="$(printf '%s\n' "${paired}" | rg -c . || echo 0)"
+    if [ "${paired_count}" -ne 1 ]; then
+      echo "${paired_count} Foundation runs for ${commit} were created within ${pairing_window}s of the push at ${pushed_at}; nothing recorded" >&2; exit 1
+    fi
+    run_line="${paired}"
   fi
-  run_line="$(printf '%s\n' "${runs}" | sed -n "${ordinal}p")"
 else
   build="$(gh api "repos/${repository}/commits/${commit}/status" \
     --jq '.statuses[] | select(.context == "mcloving/foundation") | .target_url' 2>/dev/null \
@@ -68,7 +96,7 @@ else
   run_line="${runs}"
 fi
 run_id="${run_line%% *}"
-foundation="${run_line#* }"
+foundation="$(printf '%s\n' "${run_line}" | awk '{ print $2 }')"
 case "${foundation}" in
   success|failure) ;;
   *) echo "Foundation run ${run_id} for ${commit} is not terminal yet (${foundation}); nothing recorded" >&2; exit 1 ;;

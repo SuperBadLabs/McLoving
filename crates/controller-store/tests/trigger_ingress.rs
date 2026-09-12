@@ -9,13 +9,13 @@ use mcloving_controller_store::{
     TriggerDeliveryAdmission, TriggerDeliveryClaimOutcome, TriggerDeliveryClaimRequest,
     TriggerDeliveryDagAdmission, TriggerDeliveryDagAdmissionRequest, TriggerDeliveryFailure,
     TriggerDeliveryFailureRequest, TriggerDeliveryRedrive, TriggerDeliveryStatus, TriggerKind,
-    TriggerPutOutcome, TriggerScheduleSlot, compute_audit_event_hash,
+    TriggerPutOutcome, TriggerScheduleSlot, WebhookReceiptOutcome, compute_audit_event_hash,
     compute_trigger_transfer_snapshot_digest, compute_trigger_transfer_snapshot_ledger_digest,
     verify_trigger_transfer_snapshot,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use sqlx::postgres::PgPoolOptions;
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{Postgres, Transaction};
 use uuid::Uuid;
 
@@ -62,6 +62,42 @@ async fn test_store() -> Option<Store> {
     let store = Store::new(pool);
     store.migrate().await.expect("install controller schema");
     Some(store)
+}
+
+/// A store connected as the runtime role the controller runs under, so a
+/// statement that needs a privilege the role does not hold fails here and
+/// not first in a deployment.
+async fn tenant_store(admin: &Store) -> Store {
+    let mut setup = admin.pool().begin().await.expect("begin role setup");
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind("mcloving.test.authorization-role-login")
+        .execute(&mut *setup)
+        .await
+        .expect("serialize runtime-role setup");
+    let login_enabled: bool =
+        sqlx::query_scalar("SELECT rolcanlogin FROM pg_roles WHERE rolname = 'mcloving_tenant'")
+            .fetch_one(&mut *setup)
+            .await
+            .expect("inspect runtime role");
+    if !login_enabled {
+        sqlx::query("ALTER ROLE mcloving_tenant LOGIN")
+            .execute(&mut *setup)
+            .await
+            .expect("enable test-only runtime login");
+    }
+    setup.commit().await.expect("commit runtime-role setup");
+    let options = std::env::var("MCLOVING_TEST_DATABASE_URL")
+        .expect("database URL remains configured")
+        .parse::<PgConnectOptions>()
+        .expect("parse PostgreSQL test URL")
+        .username("mcloving_tenant");
+    Store::new(
+        PgPoolOptions::new()
+            .max_connections(4)
+            .connect_with(options)
+            .await
+            .expect("connect as the runtime role"),
+    )
 }
 
 async fn fixture(store: &Store) -> (Uuid, Uuid, Uuid) {
@@ -3144,4 +3180,75 @@ async fn upstream_identity_status_filters_and_unimplemented_plugin_classes_fail_
         store.put_pipeline_trigger(&plugin).await,
         Err(StoreError::InvalidTriggerIngress(_))
     ));
+}
+
+/// The receipt of an unadmitted webhook delivery is written by the
+/// controller's runtime role, which holds SELECT and INSERT on receipts and
+/// nothing else; the PAR-005 deployment found the path locking the row it
+/// read, which that role cannot do, so every filtered delivery answered
+/// 500 while the owner-role tests passed. The decision and its replay must
+/// both succeed as the runtime role.
+#[tokio::test]
+async fn unadmitted_webhook_receipts_are_recorded_by_the_runtime_role() {
+    let Some(admin) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let (organization_id, project_id, pipeline_id) = fixture(&admin).await;
+    let trigger_id = Uuid::new_v4();
+    let write = trigger_write(
+        organization_id,
+        project_id,
+        pipeline_id,
+        trigger_id,
+        0,
+        TriggerKind::ScmWebhook,
+        PipelineTriggerState::Enabled,
+        "scm:github:webhook:runtime-role",
+        json!({"provider": "github", "repository_identity": "example/repo", "filter": {"event_kinds": ["push"], "branches": ["main"], "path_prefixes": []}}),
+        "runtime-role-create",
+        1,
+    );
+    admin.put_pipeline_trigger(&write).await.unwrap();
+    let generation = admin
+        .pipeline_trigger(organization_id, project_id, pipeline_id, trigger_id)
+        .await
+        .unwrap()
+        .expect("trigger is current")
+        .generation;
+    let store = tenant_store(&admin).await;
+    let receipt = NewWebhookReceipt {
+        organization_id,
+        trigger_id,
+        expected_trigger_generation: generation,
+        delivery_id: "runtime-role-filtered-1",
+        event: "push",
+        body_sha256: [9; 32],
+        status: "filtered",
+        reason: "trigger event did not pass the configured branch filter",
+        caller_identity: "scm:github:webhook:runtime-role",
+    };
+    assert!(matches!(
+        store
+            .record_unadmitted_webhook_delivery(&receipt)
+            .await
+            .expect("the runtime role records the receipt"),
+        WebhookReceiptOutcome::Recorded(_)
+    ));
+    assert!(matches!(
+        store
+            .record_unadmitted_webhook_delivery(&receipt)
+            .await
+            .expect("the runtime role replays the receipt"),
+        WebhookReceiptOutcome::Replayed(_)
+    ));
+    assert_eq!(
+        store
+            .webhook_receipt(organization_id, trigger_id, "runtime-role-filtered-1")
+            .await
+            .unwrap()
+            .expect("receipt is readable by the runtime role")
+            .status,
+        "filtered"
+    );
 }

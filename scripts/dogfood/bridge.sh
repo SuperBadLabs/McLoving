@@ -12,9 +12,10 @@
 # this loop is not run; the two never run together.
 #
 # usage: bridge.sh <state-dir> [interval-seconds|once]
-#   state-dir holds hook.json (path + secret, written by heman-up.sh) and
-#   the id of the last delivered push event; MCLOVING_URL and
-#   MCLOVING_DOGFOOD_REPOSITORY (owner/name) come from the environment.
+#   state-dir holds hook.json (path + secret, written by heman-up.sh) and,
+#   per repository and branch, the id of the last delivered push event and
+#   the delivery record; MCLOVING_URL and MCLOVING_DOGFOOD_REPOSITORY
+#   (owner/name) come from the environment.
 set -euo pipefail
 state="$1"
 interval="${2:-60}"
@@ -22,16 +23,22 @@ repository="${MCLOVING_DOGFOOD_REPOSITORY:?owner/name}"
 branch="${MCLOVING_DOGFOOD_BRANCH:-main}"
 hook_path="$(jq -r .path "${state}/hook.json")"
 secret="$(jq -r .secret "${state}/hook.json")"
-last_file="${state}/last-delivered-event"
+# The watermark and the delivery record are the repository's and branch's
+# own, so a state directory restarted against another repository (a fork
+# sharing commit ids, say) starts that repository's record afresh.
+scope="${repository//\//__}.${branch//\//__}"
+last_file="${state}/last-delivered-event.${scope}"
+ledger="${state}/deliveries.${scope}.tsv"
 log() { printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
 
 sign() { printf 'sha256=%s' "$(openssl dgst -sha256 -hmac "${secret}" <"$1" | sed 's/^.* //')"; }
 
-# Delivers one push: event id and head. Answers non-zero unless the route
+# Delivers one push: event id, head and the time GitHub recorded the push
+# (`-` for a branch-head fallback). Answers non-zero unless the route
 # acknowledged it (admitted, replayed or filtered), so a failed delivery is
 # retried on the next pass and never recorded as done.
 deliver() {
-  local event="$1" sha="$2"
+  local event="$1" sha="$2" pushed_at="${3:--}"
   local body="${state}/delivery-${event}.json" answer="${state}/answer-${event}.json" commit="${state}/commit-${sha}.json" code
   gh api "repos/${repository}/commits/${sha}" \
     --jq '{sha, message: .commit.message, timestamp: .commit.committer.date, files: [.files[]?.filename]}' \
@@ -57,15 +64,21 @@ PY
     -H 'Content-Type: application/json' -H "X-GitHub-Delivery: ${event}" \
     -H 'X-GitHub-Event: push' -H "X-Hub-Signature-256: $(sign "${body}")" --data-binary "@${body}")"
   # The bridge's own record of which build each push got, for verdicts.sh:
-  # one line per delivery, so a commit pushed twice keeps both builds.
-  printf '%s %s %s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${event}" "${sha}" \
-    "$(jq -r '.admission.build_id // "-"' "${answer}" 2>/dev/null || echo -)" >>"${state}/deliveries.tsv"
+  # one line per push event (time, event, commit, build, push time), so a
+  # commit pushed twice keeps both builds, and an event delivered again
+  # after a crash between the answer and the watermark (the controller
+  # replays the same build) is not recorded twice.
+  local build
+  build="$(jq -r '.admission.build_id // "-"' "${answer}" 2>/dev/null || echo -)"
+  if [ "${build}" = "-" ] || ! awk -v ev="${event}" '$2 == ev && $4 != "-" { found = 1 } END { exit !found }' "${ledger}" 2>/dev/null; then
+    printf '%s %s %s %s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${event}" "${sha}" "${build}" "${pushed_at}" >>"${ledger}"
+  fi
   log "push ${event} ${sha} -> ${code} $(jq -c '{build_id: .admission.build_id, status: .status}' "${answer}" 2>/dev/null || true)"
   case "${code}" in 2*) return 0 ;; *) return 1 ;; esac
 }
 
 # The pushes to the branch since the last delivered one, oldest first, as
-# "<event id> <head>" lines: GitHub's push events, paged newest first until
+# "<event id> <head> <created_at>" lines: GitHub's push events, paged newest first until
 # the watermark is found. A page request that fails aborts the pass (answer
 # 1) rather than being read as the end of the events, so nothing is skipped
 # on a transient error. Without a record yet, only the newest push (or the
@@ -85,7 +98,7 @@ pending_pushes() {
     fi
     [ "$(printf '%s' "${events}" | jq 'length')" = "0" ] && break
     batch="$(printf '%s' "${events}" \
-      | jq -r ".[] | select(.type == \"PushEvent\" and .payload.ref == \"refs/heads/${branch}\") | \"\\(.id) \\(.payload.head)\"")"
+      | jq -r ".[] | select(.type == \"PushEvent\" and .payload.ref == \"refs/heads/${branch}\") | \"\\(.id) \\(.payload.head) \\(.created_at)\"")"
     pushes="${pushes}${batch}
 "
     if [ -z "${last}" ]; then
@@ -100,7 +113,7 @@ pending_pushes() {
     else
       local head
       head="$(gh api "repos/${repository}/branches/${branch}" --jq .commit.sha)" || return 1
-      printf 'branch-%s %s\n' "${head}" "${head}"
+      printf 'branch-%s %s -\n' "${head}" "${head}"
     fi
     return 0
   fi
@@ -114,10 +127,10 @@ pending_pushes() {
     # under a branch-<sha> id unless it is the head last delivered.
     local head last_sha
     head="$(gh api "repos/${repository}/branches/${branch}" --jq .commit.sha)" || return 1
-    last_sha="$(awk 'END { print $3 }' "${state}/deliveries.tsv" 2>/dev/null || true)"
+    last_sha="$(awk 'END { print $3 }' "${ledger}" 2>/dev/null || true)"
     if [ "${head}" != "${last_sha}" ]; then
       log "watermark ${last} is older than the events GitHub lists and none is a push to ${branch}; delivering the branch head" >&2
-      printf 'branch-%s %s\n' "${head}" "${head}"
+      printf 'branch-%s %s -\n' "${head}" "${head}"
     fi
     return 0
   fi
@@ -128,9 +141,9 @@ while :; do
   # The watermark is contiguous: a failed delivery stops this pass, so the
   # next one starts again at that push rather than skipping it.
   if pending="$(pending_pushes)"; then
-    while read -r event sha; do
+    while read -r event sha pushed_at; do
       [ -z "${event}" ] && continue
-      deliver "${event}" "${sha}" || break
+      deliver "${event}" "${sha}" "${pushed_at}" || break
       printf '%s\n' "${event}" >"${last_file}"
     done <<<"${pending}"
   fi

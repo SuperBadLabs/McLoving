@@ -33,9 +33,10 @@ Foundation's whole-run conclusion against the dogfood build's status.
 
 Recorded by `scripts/dogfood/verdicts.sh`, newest last. `Foundation` is
 the conclusion of the Foundation run GitHub started for the push (`gh run
-list --workflow Foundation --branch main`, the n-th run of the commit for
-the n-th delivery the bridge recorded of it); `McLoving` is `mcloving
-status` for the dogfood build the same push was admitted as. The count of
+list --workflow Foundation --branch main`: the one run of the commit
+created within fifteen minutes after the push time the bridge recorded);
+`McLoving` is `mcloving status` for the dogfood build the same push was
+admitted as. The count of
 consecutive matches is the acceptance. A push the branch
 moved past before its build ran fails its checkout as `revision_mismatch`
 (the acquirer fetches the branch and requires it to still resolve to the

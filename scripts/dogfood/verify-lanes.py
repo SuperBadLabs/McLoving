@@ -95,11 +95,15 @@ class Step:
 def parse_jobs(text: str) -> dict[str, list[Step]]:
     """The workflow's jobs and their steps' run commands, from the file's own
     indentation: jobs at two spaces under `jobs:`, steps at six under
-    `steps:`, and a `run:` scalar inline, literal or folded."""
+    `steps:`, and a `run:` scalar inline, literal or folded. Every item
+    under `steps:` must be a named step (`- name:`); a step of another
+    shape (`- run:`, `- uses:` first) fails the check rather than
+    vanishing from it."""
     lines = text.splitlines()
     jobs: dict[str, list[Step]] = {}
     job: str | None = None
     in_jobs = False
+    in_steps = False
     i = 0
     while i < len(lines):
         line = lines[i]
@@ -114,14 +118,21 @@ def parse_jobs(text: str) -> dict[str, list[Step]]:
         if job_match:
             job = job_match.group(1)
             jobs[job] = []
+            in_steps = False
             i += 1
             continue
+        if re.match(r"^    [a-z_-]+:", line):
+            in_steps = line.rstrip() == "    steps:"
+            i += 1
+            continue
+        if in_steps and job is not None and line.startswith("      - ") and not line.startswith("      - name: "):
+            raise SystemExit(f"unnamed step in job {job!r}: {line.strip()!r}; every Foundation step must carry a name")
         step_match = re.match(r"^      - name: (.*)$", line)
-        if step_match and job is not None:
+        if in_steps and step_match and job is not None:
             name = step_match.group(1).strip()
             run: list[str] = []
             i += 1
-            while i < len(lines) and not re.match(r"^      - name: |^  [a-z][a-z0-9-]*:\s*$", lines[i]):
+            while i < len(lines) and not re.match(r"^      - |^  [a-z][a-z0-9-]*:\s*$|^    [a-z_-]+:", lines[i]):
                 run_match = re.match(r"^        run: (.*)$", lines[i])
                 if run_match:
                     scalar = run_match.group(1).strip()
