@@ -144,7 +144,11 @@ while :; do
     while read -r event sha pushed_at; do
       [ -z "${event}" ] && continue
       deliver "${event}" "${sha}" "${pushed_at}" || break
-      printf '%s\n' "${event}" >"${last_file}"
+      # Written beside and renamed over, so a crash mid-write leaves the
+      # previous watermark rather than an empty one.
+      printf '%s\n' "${event}" >"${last_file}.next"
+      sync "${last_file}.next"
+      mv -f "${last_file}.next" "${last_file}"
     done <<<"${pending}"
   fi
   [ "${interval}" = "once" ] && exit 0

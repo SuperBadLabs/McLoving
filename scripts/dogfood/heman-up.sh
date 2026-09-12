@@ -287,6 +287,21 @@ if [ "${MCLOVING_DOGFOOD_PUBLIC_HOOK:-0}" != "1" ]; then
   echo $! >"${state}/bridge.pid"
   echo "== bridge polling ${repository} every ${MCLOVING_DOGFOOD_BRIDGE_INTERVAL:-60}s (pid $(cat "${state}/bridge.pid"))"
 else
-  echo "== hook route for GitHub: ${MCLOVING_DOGFOOD_PUBLIC_BASE_URL:-<public base url>}$(jq -r .path "${state}/hook.json")"
+  # The repository webhook at GitHub is created, or its configuration
+  # replaced, for the public base URL and the trigger's current secret; it
+  # is found again by its URL on the next run, so the registration is
+  # idempotent and a rotated secret (a re-PUT trigger) is re-registered.
+  hook_url="${MCLOVING_DOGFOOD_PUBLIC_BASE_URL:?public base url for the hook}$(jq -r .path "${state}/hook.json")"
+  hook_config="$(jq -c --arg url "${hook_url}" '{url: $url, content_type: "json", secret: .secret, insecure_ssl: "0"}' "${state}/hook.json")"
+  hook_id="$(gh api "repos/${repository}/hooks" --paginate --jq ".[] | select(.config.url == \"${hook_url}\") | .id" | head -1)"
+  if [ -z "${hook_id}" ]; then
+    hook_id="$(jq -n --argjson config "${hook_config}" '{name: "web", active: true, events: ["push"], config: $config}' \
+      | gh api -X POST "repos/${repository}/hooks" --input - --jq .id)"
+    echo "== hook ${hook_id} registered at GitHub for ${hook_url}"
+  else
+    jq -n --argjson config "${hook_config}" '{active: true, events: ["push"], config: $config}' \
+      | gh api -X PATCH "repos/${repository}/hooks/${hook_id}" --input - --jq .id >/dev/null
+    echo "== hook ${hook_id} at GitHub updated for ${hook_url}"
+  fi
 fi
 echo "== up: . ${state}/env"

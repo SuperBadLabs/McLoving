@@ -43,7 +43,7 @@ shopt -u nullglob dotglob
 
 # The Jenkins compatibility contracts run under the Clojure CLI Foundation
 # pins (the setup-clojure action's `cli:`), fetched once from the release
-# archive, verified against tools/versions.env and installed under the
+# archive, verified against scripts/dogfood/versions.env and installed under the
 # dogfood cache; a host Java is the one prerequisite.
 clojure_prefix="${cache}/clojure-${CLOJURE_CLI_VERSION}"
 if [ ! -x "${clojure_prefix}/bin/clojure" ]; then

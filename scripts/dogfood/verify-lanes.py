@@ -182,8 +182,23 @@ def job_commands(steps: list[Step]) -> list[str]:
     return commands
 
 
+def clojure_pin_matches(workflow_raw: str) -> str | None:
+    """The Clojure CLI Foundation installs (setup-clojure's `cli:`) must be
+    the one scripts/dogfood/versions.env pins; answers the mismatch, if any."""
+    workflow_pins = set(re.findall(r"^\s+cli:\s*['\"]?([0-9][0-9.]+)['\"]?\s*$", workflow_raw, re.M))
+    pins = (ROOT / "scripts/dogfood/versions.env").read_text()
+    match = re.search(r'^CLOJURE_CLI_VERSION="([^"]+)"$', pins, re.M)
+    lane_pin = match.group(1) if match else None
+    if workflow_pins != {lane_pin}:
+        return f"Foundation pins the Clojure CLI at {sorted(workflow_pins)}, the dogfood lanes at {lane_pin!r}"
+    return None
+
+
 def main() -> int:
     workflow_raw = WORKFLOW.read_text()
+    if (mismatch := clojure_pin_matches(workflow_raw)) is not None:
+        print(f"dogfood-lanes-drift: {mismatch}", file=sys.stderr)
+        return 1
     jobs = parse_jobs(workflow_raw)
     workflow_text = without_comments(workflow_raw)
     failures: list[str] = []

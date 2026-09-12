@@ -24,6 +24,8 @@ cd "${dogfood_repo}"
 
 # shellcheck source=../../tools/versions.env
 . "${dogfood_repo}/tools/versions.env"
+# shellcheck source=versions.env
+. "${dogfood_repo}/scripts/dogfood/versions.env"
 
 dogfood_lane() {
   printf '== dogfood lane %s in %s (%s)\n' "$1" "${dogfood_repo}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
