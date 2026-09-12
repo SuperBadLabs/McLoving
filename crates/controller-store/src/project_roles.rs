@@ -62,6 +62,16 @@ struct ResolvedAuthority {
 }
 
 impl MembershipAuthority {
+    fn caller_identity(self) -> Option<Uuid> {
+        match self {
+            Self::Bootstrap | Self::Delegated { caller: None } => None,
+            Self::Delegated {
+                caller: Some(caller),
+            }
+            | Self::Principal(caller) => Some(caller.identity_id),
+        }
+    }
+
     async fn resolve(
         self,
         tx: &mut Transaction<'_, Postgres>,
@@ -107,10 +117,11 @@ impl MembershipAuthority {
 }
 
 impl DurableCaller {
-    /// Locks the caller's identity row for the rest of the transaction (the
-    /// row a lifecycle transition and a fence also lock) and requires the
-    /// identity active at the authenticated generation, the session not
-    /// revoked and the service credential not revoked.
+    /// With the caller's identity row held by this transaction (the row a
+    /// lifecycle transition, a fence, a session revocation and a credential
+    /// revocation also lock), requires the identity active at the
+    /// authenticated generation, the session not revoked and the service
+    /// credential not revoked.
     async fn revalidate(
         self,
         tx: &mut Transaction<'_, Postgres>,
@@ -278,6 +289,13 @@ impl Store {
         let mut tx = self.tenant_transaction(grant.organization_id).await?;
         lock_project_memberships(&mut tx, grant.organization_id, grant.project_id).await?;
         require_project(&mut tx, grant.organization_id, grant.project_id).await?;
+        lock_identity_rows(
+            &mut tx,
+            grant.organization_id,
+            grant.identity_id,
+            grant.authority.caller_identity(),
+        )
+        .await?;
         let subject =
             require_human_identity(&mut tx, grant.organization_id, grant.identity_id).await?;
         let owners = owner_count(&mut tx, grant.organization_id, grant.project_id).await?;
@@ -439,6 +457,13 @@ impl Store {
         lock_project_memberships(&mut tx, revocation.organization_id, revocation.project_id)
             .await?;
         require_project(&mut tx, revocation.organization_id, revocation.project_id).await?;
+        lock_identity_rows(
+            &mut tx,
+            revocation.organization_id,
+            revocation.identity_id,
+            revocation.authority.caller_identity(),
+        )
+        .await?;
         let previous = current_role(
             &mut tx,
             revocation.organization_id,
@@ -593,8 +618,34 @@ async fn require_project(
     Ok(())
 }
 
+/// Locks the target's and the caller's identity rows for the rest of the
+/// transaction, in id order so two writes with the roles swapped cannot
+/// deadlock. A lifecycle transition, a fence and a credential revocation
+/// lock the same rows, so a deletion of the target or a revocation of the
+/// caller has a defined order against the membership write; the checks
+/// that follow read rows this transaction holds.
+async fn lock_identity_rows(
+    tx: &mut Transaction<'_, Postgres>,
+    organization_id: Uuid,
+    target: Uuid,
+    caller: Option<Uuid>,
+) -> Result<(), StoreError> {
+    let mut ids = vec![target];
+    ids.extend(caller);
+    sqlx::query_scalar::<_, Uuid>(
+        "SELECT id FROM identities
+         WHERE organization_id = $1 AND id = ANY($2)
+         ORDER BY id FOR UPDATE",
+    )
+    .bind(organization_id)
+    .bind(&ids)
+    .fetch_all(&mut **tx)
+    .await?;
+    Ok(())
+}
+
 /// A role is held by a human identity of the organization that is not
-/// deleted; answers its subject.
+/// deleted; answers its subject. The row is held by this transaction.
 async fn require_human_identity(
     tx: &mut Transaction<'_, Postgres>,
     organization_id: Uuid,

@@ -1138,12 +1138,14 @@ grants Owner or changes or revokes an Owner, an Admin manages the roles
 below, a Developer or Viewer manages nothing, and the last Owner of a
 project cannot be revoked or demoted by either authority, so a project
 never loses its Owner and an Admin never becomes one through the API; the
-caller's identity row is locked for the write transaction, the row a
-lifecycle transition and a fence also lock, and the identity must be active
-at the authenticated generation with its session and service credential
-unrevoked, then its role in the project is read under the same locks, so a
-demotion, revocation or fence that committed after authentication is
-applied to the write; a service principal or a mapped-policy principal is
+caller's and the target's identity rows are locked for the write
+transaction in id order, the rows a lifecycle transition, a fence, a
+session revocation and a service-credential revocation also lock first,
+and the caller must be active at the authenticated generation with its
+session and service credential unrevoked while the target is a live human
+identity, then the caller's role in the project is read under the same
+locks, so a demotion, revocation, deletion or fence that committed after
+authentication is applied to the write; a service principal or a mapped-policy principal is
 revalidated the same way and acts as an Admin, never as an Owner, and a
 static credential, which names no identity, acts as an Admin without
 revalidation); every change is one
