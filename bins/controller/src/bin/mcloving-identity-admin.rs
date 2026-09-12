@@ -2,7 +2,11 @@ use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
-use mcloving_controller_store::{IdentityLifecycle, NewHumanIdentity, Store};
+use mcloving_controller_store::authz::ProjectRole;
+use mcloving_controller_store::{
+    IdentityLifecycle, MembershipAuthority, NewHumanIdentity, ProjectRoleGrant,
+    ProjectRoleGrantOutcome, ProjectRoleRevocation, Store,
+};
 use sqlx::postgres::PgPoolOptions;
 use uuid::Uuid;
 
@@ -82,6 +86,65 @@ async fn main() -> Result<()> {
                 .context("provision reviewed human identity mapping")?;
             println!("identity_id={identity_id} provisioned=true");
         }
+        "grant-role" => {
+            let organization_id = command.uuid("organization")?;
+            let project_id = command.uuid("project")?;
+            let identity_id = command.uuid("identity")?;
+            let role = ProjectRole::parse(&command.required("role")?)
+                .context("role must be viewer, developer, admin or owner")?;
+            let reason = command.required("reason")?;
+            let actor = command.required("actor")?;
+            command.finish()?;
+            let outcome = store
+                .grant_project_role(&ProjectRoleGrant {
+                    organization_id,
+                    project_id,
+                    identity_id,
+                    role,
+                    authority: MembershipAuthority::Bootstrap,
+                    actor_subject: &actor,
+                    reason: &reason,
+                })
+                .await
+                .context("grant project role")?;
+            let (outcome_label, fenced) = match &outcome {
+                ProjectRoleGrantOutcome::Granted(_) => ("granted", None),
+                ProjectRoleGrantOutcome::Changed {
+                    fenced_generation, ..
+                } => ("changed", *fenced_generation),
+                ProjectRoleGrantOutcome::Unchanged(_) => ("unchanged", None),
+            };
+            let membership = outcome.membership();
+            println!(
+                "identity_id={identity_id} project_id={project_id} role={} outcome={outcome_label} fenced_generation={}",
+                membership.role.as_str(),
+                fenced.map_or_else(|| "-".to_owned(), |generation| generation.to_string())
+            );
+        }
+        "revoke-role" => {
+            let organization_id = command.uuid("organization")?;
+            let project_id = command.uuid("project")?;
+            let identity_id = command.uuid("identity")?;
+            let reason = command.required("reason")?;
+            let actor = command.required("actor")?;
+            command.finish()?;
+            let outcome = store
+                .revoke_project_role(&ProjectRoleRevocation {
+                    organization_id,
+                    project_id,
+                    identity_id,
+                    authority: MembershipAuthority::Bootstrap,
+                    actor_subject: &actor,
+                    reason: &reason,
+                })
+                .await
+                .context("revoke project role")?;
+            println!(
+                "identity_id={identity_id} project_id={project_id} previous_role={} revoked=true fenced_generation={}",
+                outcome.previous.as_str(),
+                outcome.fenced_generation
+            );
+        }
         "lifecycle" => {
             let organization_id = command.uuid("organization")?;
             let identity_id = command.uuid("identity")?;
@@ -145,7 +208,7 @@ async fn main() -> Result<()> {
             );
         }
         action => bail!(
-            "unsupported identity-admin action {action:?}; expected migrate, create-project, provision-human, lifecycle, revoke-service-credential, or provider-status"
+            "unsupported identity-admin action {action:?}; expected migrate, create-project, provision-human, grant-role, revoke-role, lifecycle, revoke-service-credential, or provider-status"
         ),
     }
     pool.close().await;
