@@ -12813,6 +12813,16 @@ async fn a_terminal_build_records_its_notification_deliveries_once() {
             .await
             .expect("settle delivered")
     );
+    // Row 1's attempt is marked in flight and then fails: the mark stays,
+    // since a request that timed out after its body was sent may still be
+    // applied by the target, so a later outcome keeps its quiet delay.
+    assert_eq!(
+        store
+            .mark_notification_in_flight(organization_id, admission.build_id, 1, 1, 1)
+            .await
+            .expect("mark row 1 in flight"),
+        InFlightMark::Marked
+    );
     assert!(
         store
             .settle_notification(
@@ -12826,6 +12836,16 @@ async fn a_terminal_build_records_its_notification_deliveries_once() {
             .await
             .expect("settle failed")
     );
+    let still_marked = sqlx::query_scalar::<_, bool>(
+        "SELECT in_flight FROM notification_deliveries
+         WHERE organization_id = $1 AND build_id = $2 AND target_index = 1",
+    )
+    .bind(organization_id)
+    .bind(admission.build_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("read the mark after a failed settlement");
+    assert!(still_marked, "a failed attempt keeps its in-flight mark");
     // A stale settlement (wrong attempt count) changes nothing.
     assert!(
         !store

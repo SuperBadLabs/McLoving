@@ -3665,7 +3665,11 @@ impl Store {
     /// terminal generation than the claim, is left alone. A row marked for a
     /// re-post (an older generation's write may have landed after this
     /// one's) goes back to pending on success instead of resting, so it is
-    /// posted once more and the latest outcome is the last write.
+    /// posted once more and the latest outcome is the last write. A failed
+    /// attempt keeps its in-flight mark: a request that timed out after its
+    /// body was sent may still be applied by the target, so a later outcome
+    /// recorded meanwhile stays delayed past the deadline; the next claim of
+    /// the row clears the mark before its own request is marked.
     pub async fn settle_notification(
         &self,
         organization_id: Uuid,
@@ -3707,7 +3711,7 @@ impl Store {
                          + make_interval(secs => LEAST(power(2, attempts), $7))
                  END,
                  repost_required = false,
-                 in_flight = false,
+                 in_flight = CASE WHEN $5::text IS NULL THEN false ELSE in_flight END,
                  last_error = $5
              WHERE organization_id = $1
                AND build_id = $2
