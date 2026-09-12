@@ -55,7 +55,7 @@ use mcloving_controller_store::{
     TriggerDeliveryClaimRequest, TriggerDeliveryDagAdmission, TriggerDeliveryDagAdmissionRequest,
     TriggerDeliveryFailure, TriggerDeliveryFailureRequest, TriggerDeliveryRedrive, TriggerKind,
     TriggerPutOutcome, TriggerScheduleSlot, WaitReason,
-    authz::{Action, Principal, ProjectRole, authorize as authorize_principal},
+    authz::{Action, Principal, PrincipalKind, ProjectRole, authorize as authorize_principal},
 };
 use mcloving_object_store::{
     FilesystemObjectStore, ObjectGap, ObjectRef, ObjectStoreError, PendingObject,
@@ -1716,6 +1716,7 @@ fn openapi_document() -> Value {
                 "RemoteApiTriggerEventPayload": remote_api_trigger_event_payload_schema(),
                 "ProjectRoleGrantRequest": {
                     "type": "object",
+                    "additionalProperties": false,
                     "required": ["role", "reason"],
                     "properties": {
                         "role": {"type": "string", "enum": ["viewer", "developer", "admin", "owner"]},
@@ -1724,6 +1725,7 @@ fn openapi_document() -> Value {
                 },
                 "ProjectRoleRevokeRequest": {
                     "type": "object",
+                    "additionalProperties": false,
                     "required": ["reason"],
                     "properties": {
                         "reason": {"type": "string", "minLength": 1, "maxLength": 1024}
@@ -3649,9 +3651,10 @@ async fn get_pipeline_trigger(
 /// PAR-003: human project roles. The caller needs `ProjectConfigure` in the
 /// project; the store applies the role rules (Owner manages Owner, the last
 /// Owner stays, the first Owner is bootstrapped offline) against the role
-/// the caller holds in the project. A service principal or a mapped-policy
-/// principal that passed `ProjectConfigure` without a project role acts as
-/// an Admin: it manages every role below Owner and nothing at Owner.
+/// the caller holds in the project, read again under the membership lock
+/// for the identity and lifecycle generation the bearer authenticated as.
+/// A service principal, a mapped-policy principal, or a static credential
+/// acts as an Admin: it manages every role below Owner and nothing at Owner.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProjectRoleGrantRequest {
@@ -3665,14 +3668,35 @@ pub struct ProjectRoleRevokeRequest {
     pub reason: String,
 }
 
-fn membership_authority(principal: &Principal, project_id: Uuid) -> MembershipAuthority {
-    MembershipAuthority::Principal {
-        role: principal
-            .project_roles
-            .get(&project_id)
-            .copied()
-            .unwrap_or(ProjectRole::Admin),
-    }
+/// Authenticates and authorizes a membership write, answering the authority
+/// the store resolves under its lock.
+async fn authorize_membership_writer(
+    state: &ApiState,
+    headers: &HeaderMap,
+    organization_id: Uuid,
+    project_id: Uuid,
+) -> Result<(Principal, MembershipAuthority), ApiError> {
+    let (principal, identity) = authenticate_identity(state, headers, organization_id).await?;
+    authorize_principal(
+        &principal,
+        organization_id,
+        Some(project_id),
+        Action::ProjectConfigure,
+    )
+    .map_err(|error| ApiError::new(StatusCode::FORBIDDEN, "forbidden", error.to_string()))?;
+    let authority = match identity {
+        Some((identity_id, lifecycle_generation))
+            if principal.kind == PrincipalKind::Human
+                && !principal.mapped_projects.contains(&project_id) =>
+        {
+            MembershipAuthority::Principal {
+                identity_id,
+                lifecycle_generation,
+            }
+        }
+        _ => MembershipAuthority::Delegated,
+    };
+    Ok((principal, authority))
 }
 
 fn membership_json(membership: &ProjectMembership) -> Value {
@@ -3734,14 +3758,8 @@ async fn put_project_membership(
     headers: HeaderMap,
     Json(request): Json<ProjectRoleGrantRequest>,
 ) -> Result<Response, ApiError> {
-    let principal = authorize(
-        &state,
-        &headers,
-        organization_id,
-        Some(project_id),
-        Action::ProjectConfigure,
-    )
-    .await?;
+    let (principal, authority) =
+        authorize_membership_writer(&state, &headers, organization_id, project_id).await?;
     let outcome = state
         .store
         .grant_project_role(&ProjectRoleGrant {
@@ -3749,7 +3767,7 @@ async fn put_project_membership(
             project_id,
             identity_id,
             role: request.role,
-            authority: membership_authority(&principal, project_id),
+            authority,
             actor_subject: &principal.subject,
             reason: &request.reason,
         })
@@ -3782,21 +3800,15 @@ async fn delete_project_membership(
     headers: HeaderMap,
     Json(request): Json<ProjectRoleRevokeRequest>,
 ) -> Result<Response, ApiError> {
-    let principal = authorize(
-        &state,
-        &headers,
-        organization_id,
-        Some(project_id),
-        Action::ProjectConfigure,
-    )
-    .await?;
+    let (principal, authority) =
+        authorize_membership_writer(&state, &headers, organization_id, project_id).await?;
     let outcome = state
         .store
         .revoke_project_role(&ProjectRoleRevocation {
             organization_id,
             project_id,
             identity_id,
-            authority: membership_authority(&principal, project_id),
+            authority,
             actor_subject: &principal.subject,
             reason: &request.reason,
         })
@@ -7114,6 +7126,19 @@ async fn authenticate_principal(
     headers: &HeaderMap,
     organization_id: Uuid,
 ) -> Result<Principal, ApiError> {
+    authenticate_identity(state, headers, organization_id)
+        .await
+        .map(|(principal, _)| principal)
+}
+
+/// The principal and, for a durable credential, the identity id and the
+/// lifecycle generation it authenticated under; a static credential names
+/// no identity.
+async fn authenticate_identity(
+    state: &ApiState,
+    headers: &HeaderMap,
+    organization_id: Uuid,
+) -> Result<(Principal, Option<(Uuid, i64)>), ApiError> {
     let supplied: [u8; 32] = bearer_token(headers)
         .map(|token| Sha256::digest(token.as_bytes()).into())
         .ok_or_else(unauthorized)?;
@@ -7121,13 +7146,19 @@ async fn authenticate_principal(
         Authentication::Static(credentials) => credentials
             .iter()
             .find(|credential| constant_time_eq(&supplied, &credential.token_digest))
-            .map(|credential| credential.principal.clone())
+            .map(|credential| (credential.principal.clone(), None))
             .ok_or_else(unauthorized),
         Authentication::Durable => state
             .store
             .authenticate_api_token(organization_id, supplied, unix_time_ms())
             .await
-            .map(|authenticated| authenticated.principal)
+            .map(|authenticated| {
+                let identity = (
+                    authenticated.identity_id,
+                    authenticated.lifecycle_generation,
+                );
+                (authenticated.principal, Some(identity))
+            })
             .map_err(|_| unauthorized()),
     }
 }

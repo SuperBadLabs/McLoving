@@ -27,22 +27,73 @@ pub enum MembershipAuthority {
     /// The offline admin tool under the migration role: may bootstrap the
     /// first Owner and manage any role.
     Bootstrap,
-    /// A project principal through the API, with its own role in the project.
-    Principal { role: ProjectRole },
+    /// A human principal through the API, named by identity and by the
+    /// lifecycle generation its bearer authenticated under. Its role in the
+    /// project is read again under the membership lock, so a demotion,
+    /// revocation or fence that committed after authentication is seen.
+    Principal {
+        identity_id: Uuid,
+        lifecycle_generation: i64,
+    },
+    /// A service principal, or a mapped-policy principal, that passed the
+    /// project's configure action: acts as an Admin and never as an Owner.
+    Delegated,
+}
+
+/// The authority's role in the project as resolved under the lock: `None`
+/// for the admin tool, which is not bounded by a role.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ResolvedAuthority {
+    kind: &'static str,
+    role: Option<ProjectRole>,
+    identity_id: Option<Uuid>,
 }
 
 impl MembershipAuthority {
-    fn as_str(self) -> &'static str {
+    async fn resolve(
+        self,
+        tx: &mut Transaction<'_, Postgres>,
+        organization_id: Uuid,
+        project_id: Uuid,
+    ) -> Result<ResolvedAuthority, StoreError> {
         match self {
-            Self::Bootstrap => "bootstrap",
-            Self::Principal { .. } => "principal",
-        }
-    }
-
-    fn principal_role(self) -> Option<ProjectRole> {
-        match self {
-            Self::Bootstrap => None,
-            Self::Principal { role } => Some(role),
+            Self::Bootstrap => Ok(ResolvedAuthority {
+                kind: "bootstrap",
+                role: None,
+                identity_id: None,
+            }),
+            Self::Delegated => Ok(ResolvedAuthority {
+                kind: "delegated",
+                role: Some(ProjectRole::Admin),
+                identity_id: None,
+            }),
+            Self::Principal {
+                identity_id,
+                lifecycle_generation,
+            } => {
+                let current = sqlx::query_scalar::<_, i64>(
+                    "SELECT lifecycle_generation FROM identities
+                     WHERE organization_id = $1 AND id = $2 AND lifecycle_state = 'active'",
+                )
+                .bind(organization_id)
+                .bind(identity_id)
+                .fetch_optional(&mut **tx)
+                .await?;
+                if current != Some(lifecycle_generation) {
+                    return denied(
+                        "the caller's session was fenced after it authenticated; sign in again",
+                    );
+                }
+                let role = current_role(tx, organization_id, project_id, identity_id).await?;
+                let Some(role) = role else {
+                    return denied("the caller holds no role in the project");
+                };
+                Ok(ResolvedAuthority {
+                    kind: "principal",
+                    role: Some(role),
+                    identity_id: Some(identity_id),
+                })
+            }
         }
     }
 }
@@ -173,7 +224,11 @@ impl Store {
             grant.identity_id,
         )
         .await?;
-        if let Some(actor_role) = grant.authority.principal_role() {
+        let authority = grant
+            .authority
+            .resolve(&mut tx, grant.organization_id, grant.project_id)
+            .await?;
+        if let Some(actor_role) = authority.role {
             if actor_role < ProjectRole::Admin {
                 return denied("granting a project role needs the Admin role or better");
             }
@@ -252,8 +307,9 @@ impl Store {
                         "project_id": grant.project_id,
                         "role": grant.role,
                         "previous_role": existing,
-                        "authority": grant.authority.as_str(),
-                        "actor_role": grant.authority.principal_role(),
+                        "authority": authority.kind,
+                        "actor_role": authority.role,
+                        "actor_identity_id": authority.identity_id,
                         "fenced_generation": fenced_generation,
                         "reason": grant.reason,
                     }),
@@ -290,8 +346,9 @@ impl Store {
                     json!({
                         "project_id": grant.project_id,
                         "role": grant.role,
-                        "authority": grant.authority.as_str(),
-                        "actor_role": grant.authority.principal_role(),
+                        "authority": authority.kind,
+                        "actor_role": authority.role,
+                        "actor_identity_id": authority.identity_id,
                         "bootstrap_owner": grant.role == ProjectRole::Owner && owners == 0,
                         "reason": grant.reason,
                     }),
@@ -328,7 +385,11 @@ impl Store {
         .ok_or_else(|| {
             StoreError::IdentityConflict("identity holds no role in the project".to_owned())
         })?;
-        if let Some(actor_role) = revocation.authority.principal_role() {
+        let authority = revocation
+            .authority
+            .resolve(&mut tx, revocation.organization_id, revocation.project_id)
+            .await?;
+        if let Some(actor_role) = authority.role {
             if actor_role < ProjectRole::Admin {
                 return denied("revoking a project role needs the Admin role or better");
             }
@@ -365,8 +426,9 @@ impl Store {
             json!({
                 "project_id": revocation.project_id,
                 "previous_role": previous,
-                "authority": revocation.authority.as_str(),
-                "actor_role": revocation.authority.principal_role(),
+                "authority": authority.kind,
+                "actor_role": authority.role,
+                "actor_identity_id": authority.identity_id,
                 "fenced_generation": fenced_generation,
                 "reason": revocation.reason,
             }),

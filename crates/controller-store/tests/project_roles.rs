@@ -202,15 +202,26 @@ fn revocation<'a>(
     }
 }
 
-const OWNER: MembershipAuthority = MembershipAuthority::Principal {
-    role: ProjectRole::Owner,
-};
-const ADMIN: MembershipAuthority = MembershipAuthority::Principal {
-    role: ProjectRole::Admin,
-};
-const DEVELOPER: MembershipAuthority = MembershipAuthority::Principal {
-    role: ProjectRole::Developer,
-};
+/// The authority a human's bearer carries: its identity and the lifecycle
+/// generation it authenticated under, read now.
+async fn as_principal(admin: &Store, tenant: &Tenant, identity_id: Uuid) -> MembershipAuthority {
+    let lifecycle_generation = sqlx::query_scalar::<_, i64>(
+        "SELECT lifecycle_generation FROM identities WHERE organization_id = $1 AND id = $2",
+    )
+    .bind(tenant.organization_id)
+    .bind(identity_id)
+    .fetch_one(admin.pool())
+    .await
+    .expect("read lifecycle generation");
+    MembershipAuthority::Principal {
+        identity_id,
+        lifecycle_generation,
+    }
+}
+
+fn is_denied<T: std::fmt::Debug>(result: Result<T, StoreError>) -> bool {
+    matches!(result, Err(StoreError::ProjectRoleDenied(_)))
+}
 
 #[tokio::test]
 async fn owners_are_bootstrapped_offline_and_managed_only_by_owners() {
@@ -223,19 +234,20 @@ async fn owners_are_bootstrapped_offline_and_managed_only_by_owners() {
     let alice = human(&admin, &tenant, "alice").await;
     let bob = human(&admin, &tenant, "bob").await;
     let carol = human(&admin, &tenant, "carol").await;
+    let bootstrap = MembershipAuthority::Bootstrap;
 
-    // No Owner exists: the API cannot mint one, whatever the caller holds.
-    assert!(matches!(
+    // No Owner exists and alice holds nothing: the API cannot mint one.
+    let as_alice = as_principal(&admin, &tenant, alice).await;
+    assert!(is_denied(
         runtime
             .grant_project_role(&grant(
                 &tenant,
                 alice,
                 ProjectRole::Owner,
-                OWNER,
+                as_alice,
                 "no bootstrap"
             ))
-            .await,
-        Err(StoreError::ProjectRoleDenied(_))
+            .await
     ));
     // The admin tool bootstraps the first Owner.
     assert!(matches!(
@@ -244,112 +256,153 @@ async fn owners_are_bootstrapped_offline_and_managed_only_by_owners() {
                 &tenant,
                 alice,
                 ProjectRole::Owner,
-                MembershipAuthority::Bootstrap,
+                bootstrap,
                 "bootstrap owner"
             ))
             .await
             .unwrap(),
         ProjectRoleGrantOutcome::Granted(_)
     ));
-    // An Admin manages roles below Owner and nothing at Owner.
+    // A delegated caller (service or mapped policy) manages below Owner.
     assert!(matches!(
         runtime
             .grant_project_role(&grant(
                 &tenant,
                 bob,
                 ProjectRole::Admin,
-                ADMIN,
-                "admin grants admin"
+                MembershipAuthority::Delegated,
+                "service grants admin"
             ))
             .await
             .unwrap(),
         ProjectRoleGrantOutcome::Granted(_)
     ));
-    assert!(matches!(
+    assert!(is_denied(
         runtime
             .grant_project_role(&grant(
                 &tenant,
                 carol,
                 ProjectRole::Owner,
-                ADMIN,
+                MembershipAuthority::Delegated,
+                "service grants owner"
+            ))
+            .await
+    ));
+    // An Admin manages roles below Owner and nothing at Owner.
+    let as_bob = as_principal(&admin, &tenant, bob).await;
+    assert!(is_denied(
+        runtime
+            .grant_project_role(&grant(
+                &tenant,
+                carol,
+                ProjectRole::Owner,
+                as_bob,
                 "admin grants owner"
             ))
-            .await,
-        Err(StoreError::ProjectRoleDenied(_))
+            .await
     ));
-    assert!(matches!(
+    assert!(is_denied(
         runtime
             .grant_project_role(&grant(
                 &tenant,
                 alice,
                 ProjectRole::Viewer,
-                ADMIN,
+                as_bob,
                 "admin demotes owner"
             ))
-            .await,
-        Err(StoreError::ProjectRoleDenied(_))
+            .await
     ));
-    assert!(matches!(
+    assert!(is_denied(
         runtime
-            .revoke_project_role(&revocation(&tenant, alice, ADMIN, "admin revokes owner"))
-            .await,
-        Err(StoreError::ProjectRoleDenied(_))
+            .revoke_project_role(&revocation(&tenant, alice, as_bob, "admin revokes owner"))
+            .await
     ));
-    // A Developer manages nothing.
     assert!(matches!(
         runtime
             .grant_project_role(&grant(
                 &tenant,
                 carol,
-                ProjectRole::Viewer,
-                DEVELOPER,
-                "developer grants"
+                ProjectRole::Developer,
+                as_bob,
+                "admin grants developer"
             ))
-            .await,
-        Err(StoreError::ProjectRoleDenied(_))
+            .await
+            .unwrap(),
+        ProjectRoleGrantOutcome::Granted(_)
     ));
-    // An Owner grants Owner; the last Owner is never revoked or demoted.
-    assert!(matches!(
+    // A Developer manages nothing.
+    let as_carol = as_principal(&admin, &tenant, carol).await;
+    assert!(is_denied(
         runtime
-            .revoke_project_role(&revocation(&tenant, alice, OWNER, "last owner"))
-            .await,
-        Err(StoreError::ProjectRoleDenied(_))
+            .grant_project_role(&grant(
+                &tenant,
+                bob,
+                ProjectRole::Viewer,
+                as_carol,
+                "developer demotes"
+            ))
+            .await
     ));
-    assert!(matches!(
+    // The last Owner is never revoked or demoted, by either authority.
+    assert!(is_denied(
+        runtime
+            .revoke_project_role(&revocation(&tenant, alice, as_alice, "last owner"))
+            .await
+    ));
+    assert!(is_denied(
         admin
             .grant_project_role(&grant(
                 &tenant,
                 alice,
                 ProjectRole::Admin,
-                MembershipAuthority::Bootstrap,
+                bootstrap,
                 "last owner demoted offline"
             ))
-            .await,
-        Err(StoreError::ProjectRoleDenied(_))
+            .await
     ));
+    // An Owner grants Owner (a promotion, no fence); the second Owner then
+    // revokes the first.
     assert!(matches!(
         runtime
             .grant_project_role(&grant(
                 &tenant,
                 carol,
                 ProjectRole::Owner,
-                OWNER,
+                as_alice,
                 "second owner"
             ))
             .await
             .unwrap(),
-        ProjectRoleGrantOutcome::Granted(_)
+        ProjectRoleGrantOutcome::Changed {
+            previous: ProjectRole::Developer,
+            fenced_generation: None,
+            ..
+        }
     ));
+    let as_carol = as_principal(&admin, &tenant, carol).await;
     let revoked = runtime
-        .revoke_project_role(&revocation(&tenant, alice, OWNER, "first owner leaves"))
+        .revoke_project_role(&revocation(&tenant, alice, as_carol, "first owner leaves"))
         .await
         .expect("an owner revokes another owner while one remains");
     assert_eq!(revoked.previous, ProjectRole::Owner);
-    // Re-granting the same role is a no-op; a service or unknown identity
-    // and an unknown project are refused.
+    // alice's authority was captured before the revocation: her session is
+    // fenced and her role gone, so the stale authority writes nothing.
+    assert!(is_denied(
+        runtime
+            .grant_project_role(&grant(
+                &tenant,
+                bob,
+                ProjectRole::Viewer,
+                as_alice,
+                "stale owner"
+            ))
+            .await
+    ));
+    // Re-granting the same role is a no-op; an unknown identity is refused;
+    // revoking a role not held is a conflict.
     assert!(matches!(
         runtime
-            .grant_project_role(&grant(&tenant, bob, ProjectRole::Admin, OWNER, "again"))
+            .grant_project_role(&grant(&tenant, bob, ProjectRole::Admin, as_carol, "again"))
             .await
             .unwrap(),
         ProjectRoleGrantOutcome::Unchanged(_)
@@ -360,7 +413,7 @@ async fn owners_are_bootstrapped_offline_and_managed_only_by_owners() {
                 &tenant,
                 Uuid::new_v4(),
                 ProjectRole::Viewer,
-                OWNER,
+                as_carol,
                 "unknown"
             ))
             .await,
@@ -368,7 +421,7 @@ async fn owners_are_bootstrapped_offline_and_managed_only_by_owners() {
     ));
     assert!(matches!(
         runtime
-            .revoke_project_role(&revocation(&tenant, alice, OWNER, "already gone"))
+            .revoke_project_role(&revocation(&tenant, alice, as_carol, "already gone"))
             .await,
         Err(StoreError::IdentityConflict(_))
     ));
@@ -393,8 +446,8 @@ async fn owners_are_bootstrapped_offline_and_managed_only_by_owners() {
                 && membership.granted_at_unix_ms > 0)
     );
     let actions = sqlx::query_scalar::<_, String>(
-        "SELECT action FROM audit_events WHERE organization_id = $1
-           AND action LIKE 'project_role_%' ORDER BY sequence",
+        "SELECT action || ':' || (payload->>'authority') FROM audit_events
+         WHERE organization_id = $1 AND action LIKE 'project_role_%' ORDER BY sequence",
     )
     .bind(tenant.organization_id)
     .fetch_all(admin.pool())
@@ -403,10 +456,11 @@ async fn owners_are_bootstrapped_offline_and_managed_only_by_owners() {
     assert_eq!(
         actions,
         vec![
-            "project_role_granted",
-            "project_role_granted",
-            "project_role_granted",
-            "project_role_revoked"
+            "project_role_granted:bootstrap",
+            "project_role_granted:delegated",
+            "project_role_granted:principal",
+            "project_role_changed:principal",
+            "project_role_revoked:principal",
         ]
     );
 }
@@ -431,12 +485,13 @@ async fn revocation_and_demotion_fence_the_identity_sessions_at_once() {
         ))
         .await
         .unwrap();
+    let as_owner = as_principal(&admin, &tenant, owner).await;
     runtime
         .grant_project_role(&grant(
             &tenant,
             viewer,
             ProjectRole::Developer,
-            OWNER,
+            as_owner,
             "developer",
         ))
         .await
@@ -462,7 +517,7 @@ async fn revocation_and_demotion_fence_the_identity_sessions_at_once() {
             &tenant,
             viewer,
             ProjectRole::Viewer,
-            OWNER,
+            as_owner,
             "demote",
         ))
         .await
@@ -502,7 +557,7 @@ async fn revocation_and_demotion_fence_the_identity_sessions_at_once() {
             &tenant,
             viewer,
             ProjectRole::Admin,
-            OWNER,
+            as_owner,
             "promote",
         ))
         .await
@@ -522,7 +577,7 @@ async fn revocation_and_demotion_fence_the_identity_sessions_at_once() {
     );
     // A revocation fences and the identity holds no role afterwards.
     let revoked = runtime
-        .revoke_project_role(&revocation(&tenant, viewer, OWNER, "revoke"))
+        .revoke_project_role(&revocation(&tenant, viewer, as_owner, "revoke"))
         .await
         .unwrap();
     assert_eq!(revoked.fenced_generation, 3);
