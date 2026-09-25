@@ -67,19 +67,27 @@ build's verdict equals Foundation's, recorded in
 [`docs/evidence/PAR-005_DOGFOOD.md`](docs/evidence/PAR-005_DOGFOOD.md). The
 pipeline and deployment merged in #152; the verdict table is empty.
 
-Critical path:
+What stands in the way:
 
-1. **`AGENT-013`: source acquirer throughput and retained state.** Checking
-   this repository out took the acquirer past a fifteen-minute step timeout
+1. **Collect ten matching verdicts** with `scripts/dogfood/verdicts.sh`. This
+   is the only thing the board requires to close `PAR-005`.
+2. **The checkout is too slow and fragile for a reliable count.** Checking this
+   repository out took the source acquirer past a fifteen-minute step timeout
    because it reads blobs one process per file. A killed acquisition leaves
    state that blocks the next one until an operator cleans it up, and a push
    the branch has moved past fails as `revision_mismatch`, which counts as a
-   mismatch. Until this lands the ten-push count cannot advance reliably.
-2. **`DOGFOOD-001`: ingress modes and drift comparison.** Stop a push being
-   delivered twice when the deployment switches between public hook and bridge
-   mode, and make `verify-lanes.py` compare wrapped test commands in both
-   directions.
-3. **Collect ten matching verdicts** with `scripts/dogfood/verdicts.sh`.
+   mismatch. `AGENT-013` fixes all three.
+3. **The board orders these the other way round.** `AGENT-013` and
+   `DOGFOOD-001` both list `PAR-005` as a dependency, and the board verifier
+   refuses to dispatch a ticket whose dependencies are not `DONE`, so neither
+   can take a slot until the ten-push count completes. As written, the count
+   has to be collected with the current acquirer (operator cleanup included),
+   or the owner changes those two dependencies so the fixes can land first.
+   That is a board decision; this file does not make it.
+
+`DOGFOOD-001` stops a push being delivered twice when the deployment switches
+between public hook and bridge mode, and makes `verify-lanes.py` compare
+wrapped test commands in both directions.
 
 ## Phase 2: finish the parity chain (serial)
 
@@ -147,5 +155,8 @@ Deferred, not cancelled. These resume when a real team runs real pipelines.
   the dispatch queue does not run dry.
 - **The first real team is unnamed.** Every Phase 4 lane waits on it; naming
   it, and the pipeline it would move first, would give Phase 3 a target.
+- **`AGENT-013` and `DOGFOOD-001` are gated on the ticket they unblock.** See
+  Phase 1: re-pointing their dependency from `PAR-005` to its merged pull
+  request would let the checkout fixes land before the ten-push count.
 - **The fortnightly distance report is due.** The last one is from
   2026-09-10.
