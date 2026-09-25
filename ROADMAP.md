@@ -39,7 +39,9 @@ Progress is reported as **distance**: the count of unclosed tickets up to
 
 ## Phase 0: durable core (done)
 
-108 board tickets are `DONE`. `main` has a PostgreSQL-backed controller and
+Every ticket outside the phases below is `DONE`; run
+`python3 scripts/verify-execution-board.py` for live totals rather than
+copying counts from this file. `main` has a PostgreSQL-backed controller and
 scheduler, outbound fenced mTLS agents for Linux and Windows, a public API, CLI
 and static UI, artifact and test-result storage, a hash-chained audit, backup
 and restore drills, identity and action-scoped authorization, and the isolated
