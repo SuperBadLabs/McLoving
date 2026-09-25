@@ -34,7 +34,7 @@ Progress is reported as **distance**: the count of unclosed tickets up to
 | 1 | McLoving builds itself (`PAR-005`) | Active |
 | 2 | Finish the parity chain (`PAR-003`, `PAR-002`, `PAR-015`) | Next, serial |
 | 2b | Hardening follow-ups from parity review | Parallel, any time |
-| 3 | Production readiness | Pending; dependencies to be re-derived |
+| 3 | Production readiness | `SECRET-002` can start now, `SEC-005` after it; release rows wait on re-derivation |
 | 4 | Migration authority, new web UI, release campaigns | Deferred |
 
 ## Phase 0: durable core (done)
@@ -121,17 +121,20 @@ can land in any order alongside Phase 1 and 2.
 
 ## Phase 3: production readiness
 
-These rows still depend on deferred tickets. ADR 0016 says those edges are
-re-derived when the parity phase closes; that re-derivation is the first task
-of this phase.
+Two tracks. The secret broker and workload containment have no deferred
+dependencies: every dependency of `SECRET-002` is `DONE`, and `SEC-005` waits
+only on `SECRET-002`, so this chain can be dispatched today. The release,
+deployment and performance rows still carry edges to deferred tickets; ADR
+0016 says those are re-derived when the parity phase closes, and that
+re-derivation gates them.
 
-| Ticket | Objective |
-|---|---|
-| `SEC-005` | Contain workload processes so they cannot read the host's credentials (containers are a partial answer; plain process steps are uncontained) |
-| `SECRET-002` | Production secret broker and its authority boundary |
-| `REL-003` | Package and sign every executable the deployment lane installs |
-| `DEPLOY-002` | Revalidate the deployment lane against the release that ships |
-| `PERF-001` | Reproducible capacity and regression envelopes |
+| Ticket | Track | Objective |
+|---|---|---|
+| `SECRET-002` | Runnable now | Production secret broker and its authority boundary |
+| `SEC-005` | After `SECRET-002` | Contain workload processes so they cannot read the host's credentials (containers are a partial answer; plain process steps are uncontained) |
+| `REL-003` | After re-derivation | Package and sign every executable the deployment lane installs |
+| `DEPLOY-002` | After re-derivation | Revalidate the deployment lane against the release that ships |
+| `PERF-001` | After re-derivation | Reproducible capacity and regression envelopes |
 
 ## Phase 4: deferred
 
