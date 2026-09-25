@@ -113,8 +113,12 @@ until `PAR-005` closes, rather than continuing and merging later.
 
 ## Phase 2b: hardening follow-ups (parallel)
 
-Filed from parity reviews past the correction cap. They touch disjoint code and
-can land in any order alongside Phase 1 and 2.
+The `AGENT-` and `CTRL-` rows were filed from parity reviews past the
+correction cap; they touch disjoint code and can land in any order alongside
+Phase 1 and 2. `HYG-003` is different: it edits the board, the handoff and the
+board verifier, which every phase closure also edits, so the board asks for
+hygiene work to be coordinated before concurrent edits to those files rather
+than run in parallel with a closure.
 
 | Ticket | Area | Objective |
 |---|---|---|
