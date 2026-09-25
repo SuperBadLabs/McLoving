@@ -1,0 +1,49 @@
+{
+  "ticket": "HYG-003",
+  "utc": "2026-10-05T18:13:58.058325+00:00",
+  "green": {
+    "command": [
+      "python3",
+      "-B",
+      "scripts/dogfood/verify-lanes.py"
+    ],
+    "exit": 0,
+    "stdout": "dogfood-lanes-ok lanes=6 checked=65 unmirrored=1\n",
+    "stderr": ""
+  },
+  "isolated_green": {
+    "command": [
+      "python3",
+      "-B",
+      "scripts/dogfood/verify-lanes.py"
+    ],
+    "exit": 0,
+    "stdout": "dogfood-lanes-ok lanes=6 checked=65 unmirrored=1\n",
+    "stderr": ""
+  },
+  "removed_hook_red": {
+    "command": [
+      "python3",
+      "-B",
+      "scripts/dogfood/verify-lanes.py"
+    ],
+    "exit": 1,
+    "stdout": "dogfood-lanes error: architecture.sh: Foundation architecture runs `python3 scripts/test-stale-claims-mutations.py` but the lane does not\n",
+    "stderr": ""
+  },
+  "specific_denial": "architecture.sh: Foundation architecture runs `python3 scripts/test-stale-claims-mutations.py` but the lane does not",
+  "shell_syntax": {
+    "command": [
+      "bash",
+      "-n",
+      "scripts/dogfood/architecture.sh"
+    ],
+    "exit": 0
+  },
+  "source_sha256": {
+    ".github/workflows/foundation.yml": "821d9cd7dd273eac19b13a01a18ba57b81d4a3f1991b64c12a62fff30001bcb8",
+    "scripts/dogfood/architecture.sh": "853fa6d6d801ae10ab785b19d95e5fbe1dcc8278f8d4a0316ffe4c6f67c334d5",
+    "scripts/dogfood/verify-lanes.py": "9d8a99876d38bd2d7f3f98b968a45b3055963302d10e6a4639ab5803c582a2a3"
+  },
+  "scope": "Read-only lane alignment gate plus removal in isolated documentation/shell mirror; no native/DB/Git command executed"
+}

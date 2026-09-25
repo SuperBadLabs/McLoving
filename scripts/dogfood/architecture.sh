@@ -99,6 +99,7 @@ bash -n scripts/ui-browser/build-image.sh
 python3 scripts/test-execution-board.py
 python3 scripts/verify-execution-board.py
 python3 scripts/test-ticket-closure-receipts.py
+python3 scripts/test-stale-claims-mutations.py
 python3 scripts/verify-ticket-closure-receipts.py
 python3 scripts/test-verify-rust-test-execution.py
 python3 scripts/test-dogfood-verdicts.py

@@ -37,6 +37,8 @@ from collections import Counter
 import sys
 from pathlib import Path
 
+from stale_claims import expected_tables_comment_defects
+
 
 TICKET_STATUSES = ("PENDING", "ACTIVE", "BLOCKED", "DONE", "DEFERRED")
 
@@ -304,7 +306,7 @@ THREAT_MODEL_DEBT_BASELINE = frozenset({
     "ALPHA-001",
 })
 
-# The board's tables come in 4 row formats. Only those whose first header cell
+# The board's tables have several row formats. Only those whose first header cell
 # is `Ticket` carry authoritative status; the lane, batch and dispatch tables
 # are redundant views and are cross-checked against them. The per-format counts
 # live in EXPECTED_TABLES below and are ratcheted there; this comment states no
@@ -982,6 +984,7 @@ def verify(repository: Path, strict: bool) -> tuple[list[str], list[str], str]:
     """Return (errors, debt, summary) for ``repository``."""
     board = read(repository / "docs" / "EXECUTION_BOARD.md")
     statuses, errors = board_statuses(board)
+    errors += expected_tables_comment_defects(Path(__file__).read_text(encoding="utf-8"))
     if not statuses:
         return errors, [], ""
 

@@ -1,0 +1,297 @@
+{
+  "ticket": "HYG-003",
+  "source_sha256": {
+    "scripts/stale_claims.py": "366f09ffed61de7b7720a61236acd9810c48f417e2fa364703d238a536158ca7",
+    "scripts/test-stale-claims-mutations.py": "a1de937b3d0bfd299a83e5ed6832c6506e3c0fb8da25c9515012878f17066f5d",
+    "scripts/test-execution-board.py": "7edb685dbd6fe633773cdf2cc0e3405b3c3188142e55466ba526e8646f0798e7",
+    "scripts/test-ticket-closure-receipts.py": "46c1b03499bd215a21592c00ab932a41480172f199964ab8c2f80de924a46a2b",
+    "scripts/verify-execution-board.py": "b1e88b89ea4997b7c59178023e1aaef6ca02a846a81af843b536a9e170aa3d49",
+    "scripts/verify-ticket-closure-receipts.py": "bad8003b284b4189a9f024072c85b97cbf9cd2e4ad24421a9107ecc5408126a1",
+    "scripts/fixtures/stale-claims.json": "dffc504be3b305e2dba583bbac59de91eb940a5e2e555e973760321cc2563604"
+  },
+  "mutations": [
+    {
+      "mutation": "head-assertions",
+      "source": "stale_claims.py",
+      "test": "ExecutionBoardVerifierTests.test_named_head_verified_now_fails",
+      "green_exit": 0,
+      "red_exit": 1,
+      "green_output": ".\n----------------------------------------------------------------------\nRan 1 test in 0.000s\n\nOK\n",
+      "red_output": "F\n======================================================================\nFAIL: test_named_head_verified_now_fails (__main__.ExecutionBoardVerifierTests.test_named_head_verified_now_fails)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/tmp/hyg003-mutations-tnex2wqq/scripts/test-execution-board.py\", line 280, in test_named_head_verified_now_fails\n    self.assertEqual(len(defects), 1)\nAssertionError: 0 != 1\n\n----------------------------------------------------------------------\nRan 1 test in 0.000s\n\nFAILED (failures=1)\n"
+    },
+    {
+      "mutation": "live-gate",
+      "source": "stale_claims.py",
+      "test": "ExecutionBoardVerifierTests.test_second_discharge_draft_fails",
+      "green_exit": 0,
+      "red_exit": 1,
+      "green_output": ".\n----------------------------------------------------------------------\nRan 1 test in 0.061s\n\nOK\n",
+      "red_output": "F\n======================================================================\nFAIL: test_second_discharge_draft_fails (__main__.ExecutionBoardVerifierTests.test_second_discharge_draft_fails)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/tmp/hyg003-mutations-tnex2wqq/scripts/test-execution-board.py\", line 265, in test_second_discharge_draft_fails\n    self.assertEqual(code, 1)\nAssertionError: 0 != 1\n\n----------------------------------------------------------------------\nRan 1 test in 0.059s\n\nFAILED (failures=1)\n"
+    },
+    {
+      "mutation": "startable",
+      "source": "stale_claims.py",
+      "test": "ExecutionBoardVerifierTests.test_first_discharge_draft_fails",
+      "green_exit": 0,
+      "red_exit": 1,
+      "green_output": ".\n----------------------------------------------------------------------\nRan 1 test in 0.060s\n\nOK\n",
+      "red_output": "F\n======================================================================\nFAIL: test_first_discharge_draft_fails (__main__.ExecutionBoardVerifierTests.test_first_discharge_draft_fails)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/tmp/hyg003-mutations-tnex2wqq/scripts/test-execution-board.py\", line 258, in test_first_discharge_draft_fails\n    self.assertEqual(code, 1)\nAssertionError: 0 != 1\n\n----------------------------------------------------------------------\nRan 1 test in 0.061s\n\nFAILED (failures=1)\n"
+    },
+    {
+      "mutation": "governance-wording",
+      "source": "stale_claims.py",
+      "test": "ExecutionBoardVerifierTests.test_pre_thaw_governance_claim_fails_after_recorded_lift",
+      "green_exit": 0,
+      "red_exit": 1,
+      "green_output": ".\n----------------------------------------------------------------------\nRan 1 test in 0.063s\n\nOK\n",
+      "red_output": "F\n======================================================================\nFAIL: test_pre_thaw_governance_claim_fails_after_recorded_lift (__main__.ExecutionBoardVerifierTests.test_pre_thaw_governance_claim_fails_after_recorded_lift)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/tmp/hyg003-mutations-tnex2wqq/scripts/test-execution-board.py\", line 302, in test_pre_thaw_governance_claim_fails_after_recorded_lift\n    self.assertEqual(code, 1)\nAssertionError: 0 != 1\n\n----------------------------------------------------------------------\nRan 1 test in 0.061s\n\nFAILED (failures=1)\n"
+    },
+    {
+      "mutation": "expired-window",
+      "source": "stale_claims.py",
+      "test": "ExecutionBoardVerifierTests.test_expired_window_fails_even_without_lift_receipt",
+      "green_exit": 0,
+      "red_exit": 1,
+      "green_output": ".\n----------------------------------------------------------------------\nRan 1 test in 0.062s\n\nOK\n",
+      "red_output": "F\n======================================================================\nFAIL: test_expired_window_fails_even_without_lift_receipt (__main__.ExecutionBoardVerifierTests.test_expired_window_fails_even_without_lift_receipt)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/tmp/hyg003-mutations-tnex2wqq/scripts/test-execution-board.py\", line 318, in test_expired_window_fails_even_without_lift_receipt\n    self.assertEqual(code, 1)\nAssertionError: 0 != 1\n\n----------------------------------------------------------------------\nRan 1 test in 0.062s\n\nFAILED (failures=1)\n"
+    },
+    {
+      "mutation": "early-lift",
+      "source": "stale_claims.py",
+      "test": "ExecutionBoardVerifierTests.test_pre_thaw_governance_claim_fails_after_recorded_lift",
+      "green_exit": 0,
+      "red_exit": 1,
+      "green_output": ".\n----------------------------------------------------------------------\nRan 1 test in 0.063s\n\nOK\n",
+      "red_output": "F\n======================================================================\nFAIL: test_pre_thaw_governance_claim_fails_after_recorded_lift (__main__.ExecutionBoardVerifierTests.test_pre_thaw_governance_claim_fails_after_recorded_lift)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/tmp/hyg003-mutations-tnex2wqq/scripts/test-execution-board.py\", line 302, in test_pre_thaw_governance_claim_fails_after_recorded_lift\n    self.assertEqual(code, 1)\nAssertionError: 0 != 1\n\n----------------------------------------------------------------------\nRan 1 test in 0.064s\n\nFAILED (failures=1)\n"
+    },
+    {
+      "mutation": "every-governance-window",
+      "source": "stale_claims.py",
+      "test": "StaleClaimBoundaryTests.test_later_expired_governance_window_in_paragraph_is_refused",
+      "green_exit": 0,
+      "red_exit": 1,
+      "green_output": ".\n----------------------------------------------------------------------\nRan 1 test in 0.063s\n\nOK\n",
+      "red_output": "F\n======================================================================\nFAIL: test_later_expired_governance_window_in_paragraph_is_refused (__main__.StaleClaimBoundaryTests.test_later_expired_governance_window_in_paragraph_is_refused)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/tmp/hyg003-mutations-tnex2wqq/scripts/test-execution-board.py\", line 217, in test_later_expired_governance_window_in_paragraph_is_refused\n    self.assertEqual(code, 1)\nAssertionError: 0 != 1\n\n----------------------------------------------------------------------\nRan 1 test in 0.062s\n\nFAILED (failures=1)\n"
+    },
+    {
+      "mutation": "invalid-window",
+      "source": "stale_claims.py",
+      "test": "StaleClaimBoundaryTests.test_invalid_governance_date_is_refused",
+      "green_exit": 0,
+      "red_exit": 1,
+      "green_output": ".\n----------------------------------------------------------------------\nRan 1 test in 0.061s\n\nOK\n",
+      "red_output": "F\n======================================================================\nFAIL: test_invalid_governance_date_is_refused (__main__.StaleClaimBoundaryTests.test_invalid_governance_date_is_refused)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/tmp/hyg003-mutations-tnex2wqq/scripts/test-execution-board.py\", line 225, in test_invalid_governance_date_is_refused\n    self.assertEqual(code, 1)\nAssertionError: 0 != 1\n\n----------------------------------------------------------------------\nRan 1 test in 0.062s\n\nFAILED (failures=1)\n"
+    },
+    {
+      "mutation": "comment-count",
+      "source": "stale_claims.py",
+      "test": "StaleCountCommentTests.test_pre_hyg003_comment_is_refused",
+      "green_exit": 0,
+      "red_exit": 1,
+      "green_output": ".\n----------------------------------------------------------------------\nRan 1 test in 0.000s\n\nOK\n",
+      "red_output": "F\n======================================================================\nFAIL: test_pre_hyg003_comment_is_refused (__main__.StaleCountCommentTests.test_pre_hyg003_comment_is_refused)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/tmp/hyg003-mutations-tnex2wqq/scripts/test-ticket-closure-receipts.py\", line 54, in test_pre_hyg003_comment_is_refused\n    self.assertEqual(len(defects), 1)\nAssertionError: 0 != 1\n\n----------------------------------------------------------------------\nRan 1 test in 0.000s\n\nFAILED (failures=1)\n"
+    },
+    {
+      "mutation": "comment-adjacency",
+      "source": "stale_claims.py",
+      "test": "StaleCountCommentTests.test_production_verifier_checks_its_count_comment",
+      "green_exit": 0,
+      "red_exit": 1,
+      "green_output": ".\n----------------------------------------------------------------------\nRan 1 test in 0.007s\n\nOK\n",
+      "red_output": "F\n======================================================================\nFAIL: test_production_verifier_checks_its_count_comment (__main__.StaleCountCommentTests.test_production_verifier_checks_its_count_comment)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/tmp/hyg003-mutations-tnex2wqq/scripts/test-ticket-closure-receipts.py\", line 96, in test_production_verifier_checks_its_count_comment\n    self.assertTrue(any(\"comment beside EXPECTED_TABLES\" in error for error in errors))\nAssertionError: False is not true\n\n----------------------------------------------------------------------\nRan 1 test in 0.006s\n\nFAILED (failures=1)\n"
+    },
+    {
+      "mutation": "missing-count-declarations",
+      "source": "stale_claims.py",
+      "test": "StaleCountCommentTests.test_missing_constant_declarations_fail_closed",
+      "green_exit": 0,
+      "red_exit": 1,
+      "green_output": ".\n----------------------------------------------------------------------\nRan 1 test in 0.000s\n\nOK\n",
+      "red_output": "F\n======================================================================\nFAIL: test_missing_constant_declarations_fail_closed (__main__.StaleCountCommentTests.test_missing_constant_declarations_fail_closed)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/tmp/hyg003-mutations-tnex2wqq/scripts/test-ticket-closure-receipts.py\", line 73, in test_missing_constant_declarations_fail_closed\n    self.assertTrue(expected_tables_comment_defects('TICKET_TABLE_HEADER = \"Ticket\"\\n'))\nAssertionError: [] is not true\n\n----------------------------------------------------------------------\nRan 1 test in 0.000s\n\nFAILED (failures=1)\n"
+    },
+    {
+      "mutation": "invalid-count-source",
+      "source": "stale_claims.py",
+      "test": "StaleCountCommentTests.test_invalid_source_cannot_bypass_count_check",
+      "green_exit": 0,
+      "red_exit": 1,
+      "green_output": ".\n----------------------------------------------------------------------\nRan 1 test in 0.000s\n\nOK\n",
+      "red_output": "F\n======================================================================\nFAIL: test_invalid_source_cannot_bypass_count_check (__main__.StaleCountCommentTests.test_invalid_source_cannot_bypass_count_check)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/tmp/hyg003-mutations-tnex2wqq/scripts/test-ticket-closure-receipts.py\", line 76, in test_invalid_source_cannot_bypass_count_check\n    self.assertTrue(expected_tables_comment_defects('EXPECTED_TABLES = {\\n'))\nAssertionError: [] is not true\n\n----------------------------------------------------------------------\nRan 1 test in 0.000s\n\nFAILED (failures=1)\n"
+    },
+    {
+      "mutation": "handoff-symlink",
+      "source": "stale_claims.py",
+      "test": "ExecutionBoardVerifierTests.test_handoff_symlink_is_refused_without_reading_target",
+      "green_exit": 0,
+      "red_exit": 1,
+      "green_output": ".\n----------------------------------------------------------------------\nRan 1 test in 0.001s\n\nOK\n",
+      "red_output": "F\n======================================================================\nFAIL: test_handoff_symlink_is_refused_without_reading_target (__main__.ExecutionBoardVerifierTests.test_handoff_symlink_is_refused_without_reading_target)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/tmp/hyg003-mutations-tnex2wqq/scripts/test-execution-board.py\", line 330, in test_handoff_symlink_is_refused_without_reading_target\n    self.assertEqual(len(defects), 1)\nAssertionError: 0 != 1\n\n----------------------------------------------------------------------\nRan 1 test in 0.001s\n\nFAILED (failures=1)\n"
+    },
+    {
+      "mutation": "board-entry-integration",
+      "source": "verify-execution-board.py",
+      "test": "ExecutionBoardVerifierTests.test_first_discharge_draft_fails",
+      "green_exit": 0,
+      "red_exit": 1,
+      "green_output": ".\n----------------------------------------------------------------------\nRan 1 test in 0.061s\n\nOK\n",
+      "red_output": "F\n======================================================================\nFAIL: test_first_discharge_draft_fails (__main__.ExecutionBoardVerifierTests.test_first_discharge_draft_fails)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/tmp/hyg003-mutations-tnex2wqq/scripts/test-execution-board.py\", line 258, in test_first_discharge_draft_fails\n    self.assertEqual(code, 1)\nAssertionError: 0 != 1\n\n----------------------------------------------------------------------\nRan 1 test in 0.017s\n\nFAILED (failures=1)\n"
+    },
+    {
+      "mutation": "clock-propagation",
+      "source": "verify-execution-board.py",
+      "test": "ExecutionBoardVerifierTests.test_pre_thaw_governance_claim_fails_after_recorded_lift",
+      "green_exit": 0,
+      "red_exit": 1,
+      "green_output": ".\n----------------------------------------------------------------------\nRan 1 test in 0.064s\n\nOK\n",
+      "red_output": "F\n======================================================================\nFAIL: test_pre_thaw_governance_claim_fails_after_recorded_lift (__main__.ExecutionBoardVerifierTests.test_pre_thaw_governance_claim_fails_after_recorded_lift)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/tmp/hyg003-mutations-tnex2wqq/scripts/test-execution-board.py\", line 303, in test_pre_thaw_governance_claim_fails_after_recorded_lift\n    self.assertIn(\"recorded early lift\", stderr)\nAssertionError: 'recorded early lift' not found in 'execution-board error: /tmp/tmpkkr1m72n/docs/handoffs/CURRENT.md:6: asserts a governance window that has ended\\n'\n\n----------------------------------------------------------------------\nRan 1 test in 0.064s\n\nFAILED (failures=1)\n"
+    },
+    {
+      "mutation": "handoff-head-integration",
+      "source": "stale_claims.py",
+      "test": "StaleClaimBoundaryTests.test_observation_keyword_does_not_excuse_live_assertion",
+      "green_exit": 0,
+      "red_exit": 1,
+      "green_output": ".\n----------------------------------------------------------------------\nRan 1 test in 0.060s\n\nOK\n",
+      "red_output": "F\n======================================================================\nFAIL: test_observation_keyword_does_not_excuse_live_assertion (__main__.StaleClaimBoundaryTests.test_observation_keyword_does_not_excuse_live_assertion)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/tmp/hyg003-mutations-tnex2wqq/scripts/test-execution-board.py\", line 103, in test_observation_keyword_does_not_excuse_live_assertion\n    self.assertEqual(code, 1)\nAssertionError: 0 != 1\n\n----------------------------------------------------------------------\nRan 1 test in 0.061s\n\nFAILED (failures=1)\n"
+    },
+    {
+      "mutation": "handoff-governance-integration",
+      "source": "stale_claims.py",
+      "test": "ExecutionBoardVerifierTests.test_pre_thaw_governance_claim_fails_after_recorded_lift",
+      "green_exit": 0,
+      "red_exit": 1,
+      "green_output": ".\n----------------------------------------------------------------------\nRan 1 test in 0.064s\n\nOK\n",
+      "red_output": "F\n======================================================================\nFAIL: test_pre_thaw_governance_claim_fails_after_recorded_lift (__main__.ExecutionBoardVerifierTests.test_pre_thaw_governance_claim_fails_after_recorded_lift)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/tmp/hyg003-mutations-tnex2wqq/scripts/test-execution-board.py\", line 302, in test_pre_thaw_governance_claim_fails_after_recorded_lift\n    self.assertEqual(code, 1)\nAssertionError: 0 != 1\n\n----------------------------------------------------------------------\nRan 1 test in 0.062s\n\nFAILED (failures=1)\n"
+    },
+    {
+      "mutation": "board-governance-integration",
+      "source": "stale_claims.py",
+      "test": "StaleClaimBoundaryTests.test_expired_window_in_board_fails_real_entry_point",
+      "green_exit": 0,
+      "red_exit": 1,
+      "green_output": ".\n----------------------------------------------------------------------\nRan 1 test in 0.062s\n\nOK\n",
+      "red_output": "F\n======================================================================\nFAIL: test_expired_window_in_board_fails_real_entry_point (__main__.StaleClaimBoundaryTests.test_expired_window_in_board_fails_real_entry_point)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/tmp/hyg003-mutations-tnex2wqq/scripts/test-execution-board.py\", line 199, in test_expired_window_in_board_fails_real_entry_point\n    self.assertEqual(code, 1)\nAssertionError: 0 != 1\n\n----------------------------------------------------------------------\nRan 1 test in 0.050s\n\nFAILED (failures=1)\n"
+    },
+    {
+      "mutation": "closure-entry-integration",
+      "source": "verify-ticket-closure-receipts.py",
+      "test": "StaleCountCommentTests.test_production_verifier_checks_its_count_comment",
+      "green_exit": 0,
+      "red_exit": 1,
+      "green_output": ".\n----------------------------------------------------------------------\nRan 1 test in 0.006s\n\nOK\n",
+      "red_output": "F\n======================================================================\nFAIL: test_production_verifier_checks_its_count_comment (__main__.StaleCountCommentTests.test_production_verifier_checks_its_count_comment)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/tmp/hyg003-mutations-tnex2wqq/scripts/test-ticket-closure-receipts.py\", line 96, in test_production_verifier_checks_its_count_comment\n    self.assertTrue(any(\"comment beside EXPECTED_TABLES\" in error for error in errors))\nAssertionError: False is not true\n\n----------------------------------------------------------------------\nRan 1 test in 0.001s\n\nFAILED (failures=1)\n"
+    },
+    {
+      "mutation": "markdown-emphasis-normalization",
+      "source": "stale_claims.py",
+      "test": "StaleClaimBoundaryTests.test_emphasized_live_head_assertion_is_refused",
+      "green_exit": 0,
+      "red_exit": 1,
+      "green_output": ".\n----------------------------------------------------------------------\nRan 1 test in 0.061s\n\nOK\n",
+      "red_output": "F\n======================================================================\nFAIL: test_emphasized_live_head_assertion_is_refused (__main__.StaleClaimBoundaryTests.test_emphasized_live_head_assertion_is_refused)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/tmp/hyg003-mutations-tnex2wqq/scripts/test-execution-board.py\", line 143, in test_emphasized_live_head_assertion_is_refused\n    self.assertEqual(code, 1)\nAssertionError: 0 != 1\n\n----------------------------------------------------------------------\nRan 1 test in 0.056s\n\nFAILED (failures=1)\n"
+    },
+    {
+      "mutation": "matched-governance-identity",
+      "source": "stale_claims.py",
+      "test": "StaleClaimBoundaryTests.test_future_window_with_unrelated_september_history_passes",
+      "green_exit": 0,
+      "red_exit": 1,
+      "green_output": ".\n----------------------------------------------------------------------\nRan 1 test in 0.063s\n\nOK\n",
+      "red_output": "F\n======================================================================\nFAIL: test_future_window_with_unrelated_september_history_passes (__main__.StaleClaimBoundaryTests.test_future_window_with_unrelated_september_history_passes)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/tmp/hyg003-mutations-tnex2wqq/scripts/test-execution-board.py\", line 167, in test_future_window_with_unrelated_september_history_passes\n    self.assertEqual(code, 0, stderr)\nAssertionError: 1 != 0 : execution-board error: /tmp/tmpj1xv7747/docs/handoffs/CURRENT.md:1: asserts the September freeze still governs after its recorded early lift\n\n\n----------------------------------------------------------------------\nRan 1 test in 0.061s\n\nFAILED (failures=1)\n"
+    },
+    {
+      "mutation": "observation-time-validation",
+      "source": "stale_claims.py",
+      "test": "StaleClaimBoundaryTests.test_invalid_observation_date_cannot_excuse_head_assertion",
+      "green_exit": 0,
+      "red_exit": 1,
+      "green_output": ".\n----------------------------------------------------------------------\nRan 1 test in 0.060s\n\nOK\n",
+      "red_output": "F\n======================================================================\nFAIL: test_invalid_observation_date_cannot_excuse_head_assertion (__main__.StaleClaimBoundaryTests.test_invalid_observation_date_cannot_excuse_head_assertion)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/tmp/hyg003-mutations-tnex2wqq/scripts/test-execution-board.py\", line 121, in test_invalid_observation_date_cannot_excuse_head_assertion\n    self.assertEqual(code, 1)\nAssertionError: 0 != 1\n\n----------------------------------------------------------------------\nRan 1 test in 0.061s\n\nFAILED (failures=1)\n"
+    },
+    {
+      "mutation": "retained-observation-refusal",
+      "source": "stale_claims.py",
+      "test": "ExecutionBoardVerifierTests.test_dated_observation_of_old_head_passes",
+      "green_exit": 0,
+      "red_exit": 1,
+      "green_output": ".\n----------------------------------------------------------------------\nRan 1 test in 0.001s\n\nOK\n",
+      "red_output": "F\n======================================================================\nFAIL: test_dated_observation_of_old_head_passes (__main__.ExecutionBoardVerifierTests.test_dated_observation_of_old_head_passes)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/tmp/hyg003-mutations-tnex2wqq/scripts/test-execution-board.py\", line 272, in test_dated_observation_of_old_head_passes\n    self.assertEqual(\nAssertionError: Lists differ: ['docs/handoffs/2026-09-06-freeze-thaw.md:[103 chars]ead'] != []\n\nFirst list contains 1 additional elements.\nFirst extra element 0:\n'docs/handoffs/2026-09-06-freeze-thaw.md:111: asserts that a named commit is the current head; record a dated observation and recheck the live head'\n\n+ []\n- ['docs/handoffs/2026-09-06-freeze-thaw.md:111: asserts that a named commit is '\n-  'the current head; record a dated observation and recheck the live head']\n\n----------------------------------------------------------------------\nRan 1 test in 0.002s\n\nFAILED (failures=1)\n"
+    },
+    {
+      "mutation": "timed-observation-refusal",
+      "source": "stale_claims.py",
+      "test": "StaleClaimBoundaryTests.test_timed_observation_passes",
+      "green_exit": 0,
+      "red_exit": 1,
+      "green_output": ".\n----------------------------------------------------------------------\nRan 1 test in 0.061s\n\nOK\n",
+      "red_output": "F\n======================================================================\nFAIL: test_timed_observation_passes (__main__.StaleClaimBoundaryTests.test_timed_observation_passes)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/tmp/hyg003-mutations-tnex2wqq/scripts/test-execution-board.py\", line 116, in test_timed_observation_passes\n    self.assertEqual(code, 0, stderr)\nAssertionError: 1 != 0 : execution-board error: docs/handoffs/CURRENT.md:1: asserts that a named commit is the current head; record a dated observation and recheck the live head\n\n\n----------------------------------------------------------------------\nRan 1 test in 0.060s\n\nFAILED (failures=1)\n"
+    },
+    {
+      "mutation": "paragraph-wide-observation-bypass",
+      "source": "stale_claims.py",
+      "test": "StaleClaimBoundaryTests.test_dated_observation_and_current_assertion_in_same_sentence_fails",
+      "green_exit": 0,
+      "red_exit": 1,
+      "green_output": ".\n----------------------------------------------------------------------\nRan 1 test in 0.061s\n\nOK\n",
+      "red_output": "F\n======================================================================\nFAIL: test_dated_observation_and_current_assertion_in_same_sentence_fails (__main__.StaleClaimBoundaryTests.test_dated_observation_and_current_assertion_in_same_sentence_fails)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/tmp/hyg003-mutations-tnex2wqq/scripts/test-execution-board.py\", line 110, in test_dated_observation_and_current_assertion_in_same_sentence_fails\n    self.assertEqual(code, 1)\nAssertionError: 0 != 1\n\n----------------------------------------------------------------------\nRan 1 test in 0.061s\n\nFAILED (failures=1)\n"
+    }
+  ],
+  "historical_sources": [
+    {
+      "fixture": "first_discharge",
+      "commit": "1b88a8857dbf1b17a991052c8d5136a7755ff628",
+      "path": "docs/handoffs/CURRENT.md",
+      "sha256": "870d1a30945e35b8babe565f60fd9ac2594d6e8247854ec2a1cf8864314873b8",
+      "kind": "full-text"
+    },
+    {
+      "fixture": "second_discharge",
+      "commit": "f039d4148aa0152980085415bb34b4bc8ce3c91a",
+      "path": "docs/handoffs/CURRENT.md",
+      "sha256": "3a73543b3a87fdd0d37f4a2dc4b38c91d44589a972dbcecd8546162f25b721b3",
+      "kind": "full-text"
+    },
+    {
+      "fixture": "pre_thaw",
+      "commit": "d534a1b54b7832e1b4a77e1715506256fa404dec",
+      "path": "docs/handoffs/CURRENT.md",
+      "sha256": "99d531e6a145fb0deb927935592f35a0768b921b121b1d4c31cbd387435f9c24",
+      "kind": "full-text"
+    },
+    {
+      "fixture": "pre_count",
+      "commit": "d534a1b54b7832e1b4a77e1715506256fa404dec",
+      "path": "scripts/verify-ticket-closure-receipts.py",
+      "sha256": "bd1312c9bbcc15cf129d916726386db0743a9c13238b00e59070c59cbe7f6a81",
+      "kind": "excerpt"
+    },
+    {
+      "fixture": "merged_current",
+      "commit": "2155a4ea4a9d2418281acfd92890dcc4969a5407",
+      "path": "docs/handoffs/CURRENT.md",
+      "sha256": "485dc11293fd6c1340acfe7899bd3740f64915ff91ff978de605b6bb2c4d27ab",
+      "kind": "full-text"
+    },
+    {
+      "fixture": "merged_thaw",
+      "commit": "2155a4ea4a9d2418281acfd92890dcc4969a5407",
+      "path": "docs/handoffs/2026-09-06-freeze-thaw.md",
+      "sha256": "56a9098fbad3b00c3cb3c9bec68938034e49dc55797519cbd022074a7258f3e0",
+      "kind": "full-text"
+    },
+    {
+      "fixture": "release_ledger",
+      "commit": "baf3b5c1e6446660d231173c2820abca3b416efb",
+      "path": "docs/handoffs/2026-09-06-freeze-thaw.md",
+      "sha256": "c631b222fcc4b9dcf565a3cc3a39d1af85c28a4626bed5bca8f3da6543b1c67e",
+      "kind": "full-text"
+    },
+    {
+      "fixture": "publication",
+      "commit": "d534a1b54b7832e1b4a77e1715506256fa404dec",
+      "path": "docs/handoffs/2026-09-01-september-freeze.md",
+      "sha256": "6b7150a2d97aa7def4bfa4f37dd56932cdf40bbaf5c5fbc72952bf3533d8441c",
+      "kind": "full-text"
+    }
+  ]
+}
