@@ -95,12 +95,15 @@ Each ticket starts after its predecessor is merged and verified on `main`.
 
 | Order | Ticket | What users get | State |
 |---:|---|---|---|
-| 1 | `PAR-003` | Grant and revoke human project roles; the last Owner cannot be revoked; revocation fences live sessions | Pull request #153 open |
+| 1 | `PAR-003` | Grant and revoke human project roles; the last Owner cannot be revoked; revocation fences live sessions | Pull request #153 open ahead of its gate |
 | 2 | `PAR-002` | Native cron schedules with Jenkins-style hashed fields, firing exactly once across controllers | Pending |
 | 3 | `PAR-015` | Later stages run on the first stage's agent and reuse its workspace and checkout | Pending |
 
-`PAR-003`'s start gate is `PAR-005` closed, so #153 should merge after the
-dogfood count completes.
+`PAR-003` is `SERIAL` behind `PAR-005`, and a serial ticket begins only after
+its predecessor is merged and verified, which for `PAR-005` means the ten-push
+count is recorded and the row reads `DONE`. #153 was opened before that gate
+cleared; by the board's rule it pauses, implementation and review included,
+until `PAR-005` closes, rather than continuing and merging later.
 
 ## Phase 2b: hardening follow-ups (parallel)
 
@@ -138,15 +141,20 @@ re-derivation gates them.
 
 ## Phase 4: deferred
 
-Deferred, not cancelled. These resume when a real team runs real pipelines.
+Deferred, not cancelled. The migration-authority, web UI and release lanes
+resume when a real team runs real pipelines (ADR 0016). `GROOVY-001` is
+different; see below.
 
 - **Migration authority:** `CASE-001`, `CASE-002`, `CANARY-001`, `CANARY-002`,
   `MIG-008`, `CUTOVER-001`, `ROLLBACK-001`, `RECUTOVER-001`, `DECOM-001`,
   `MIG-009`, `PROOF-001`.
 - **Web UI rewrite (server-rendered, htmx 4):** `UI-003` to `UI-009`.
 - **Release campaigns:** `WAR-001`, `SEC-004`, `DR-001`, `REL-002`.
-- **Groovy evaluation:** `GROOVY-001` answered NO; Jenkinsfile support stays
-  compile-only (ADR 0006 amendment).
+- **Groovy evaluation:** `GROOVY-001` is decided: NO, Jenkinsfile support
+  stays compile-only (ADR 0006 amendment). It is not waiting on a real team.
+  The row stays `DEFERRED` only until a negative fixture for malformed quoting
+  and its closure receipt are earned; the board assigns that fixture to "the
+  compiler-exposure ticket of the parity phase" (see Gaps).
 
 ## Gaps (proposal, not on the board)
 
@@ -156,10 +164,15 @@ Deferred, not cancelled. These resume when a real team runs real pipelines.
   approval gates. Some may already exist in part; each needs a code check
   before filing. A `PAR-016`+ batch should be filed before `PAR-015` closes so
   the dispatch queue does not run dry.
-- **The first real team is unnamed.** Every Phase 4 lane waits on it; naming
+- **The first real team is unnamed.** The migration-authority, web UI and
+  release lanes wait on it; naming
   it, and the pipeline it would move first, would give Phase 3 a target.
 - **`AGENT-013` and `DOGFOOD-001` are gated on the ticket they unblock.** See
   Phase 1: re-pointing their dependency from `PAR-005` to its merged pull
   request would let the checkout fixes land before the ten-push count.
+- **`GROOVY-001`'s residual points at a ticket that is not filed.** Its board
+  row hands the malformed-quoting negative fixture to "the compiler-exposure
+  ticket of the parity phase", but no parity ticket covers compiler exposure.
+  Filing one, or naming an existing ticket, would give that work an owner.
 - **The fortnightly distance report is due.** The last one is from
   2026-09-10.
