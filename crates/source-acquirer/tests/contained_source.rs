@@ -577,19 +577,37 @@ async fn exact_revision_replay_later_commit_and_sparse_truth() {
             .exists()
     );
 
-    let stale = context.request(&first);
-    let stale_result = context.acquirer.acquire(&stale).await;
-    let revision_substitution_denied = matches!(stale_result, Err(SourceError::RevisionMismatch));
-    assert!(revision_substitution_denied);
+    // Branch tip has moved to `second`, but the request still names `first`.
+    // Fetching by object id materializes that exact commit (Foundation's
+    // behaviour) instead of refusing as revision_mismatch.
+    let historical = context.request(&first);
+    let historical_receipt = context
+        .acquirer
+        .acquire(&historical)
+        .await
+        .expect("exact historical commit after tip moved");
+    assert_eq!(
+        historical_receipt.repository_trees[0].resolved_commit,
+        first
+    );
+    assert_eq!(
+        historical_receipt.content_sha256,
+        receipt.content_sha256,
+        "superseded push must still build the pushed commit"
+    );
+    let historical_exact = historical_receipt.repository_trees[0].resolved_commit == first
+        && historical_receipt.content_sha256 == receipt.content_sha256;
     diff003::record_assertion(
-        "source_revision_substitution_denied",
-        "denied",
+        "source_historical_commit_fetched_after_tip_moved",
+        "preserved",
         serde_json::json!({
             "requested_commit": first,
             "latest_accepted_commit": second,
-            "result": "revision_mismatch",
+            "resolved_commit": historical_receipt.repository_trees[0].resolved_commit,
+            "content_digest_matches_original": historical_receipt.content_sha256
+                == receipt.content_sha256,
         }),
-        revision_substitution_denied,
+        historical_exact,
     );
     if let Ok(root) = std::env::var("MCLOVING_DIFF003_RUNTIME_OUTPUT_DIR") {
         std::fs::write(
@@ -604,6 +622,347 @@ async fn exact_revision_replay_later_commit_and_sparse_truth() {
         )
         .expect("write DIFF-003 source receipts");
     }
+}
+
+
+#[tokio::test]
+async fn killed_acquisition_leftovers_are_reclaimed_by_the_next() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let repositories = tempfile::tempdir().expect("repositories tempdir");
+    let root = RepositoryFixture::new(repositories.path(), "root");
+    root.write("README.md", b"reclaim\n");
+    // Enough files that a mid-materialization kill would leave a partial stage.
+    for index in 0..32 {
+        root.write(&format!("src/f{index}.txt"), format!("blob-{index}\n").as_bytes());
+    }
+    let commit = root.commit("reclaim");
+    let context = Context::new(&root, Vec::new(), Vec::new(), false).await;
+    let killed_id = Uuid::new_v4();
+
+    // Plant the debris a SIGKILL mid-materialization leaves: claim, stage,
+    // transport tree, and stray runtime/git-exec directories that Drop never ran.
+    let claim = context
+        .config
+        .output_root
+        .join(format!("{killed_id}.claim.json"));
+    std::fs::write(
+        &claim,
+        serde_json::to_vec(&serde_json::json!({
+            "protocol_version": PROTOCOL_VERSION,
+            "request_sha256": "0".repeat(64),
+            "publication_deadline_unix_ms": now_ms() + 60_000,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let stage = context
+        .config
+        .output_root
+        .join(format!(".stage-{killed_id}-{}", Uuid::new_v4()));
+    std::fs::create_dir_all(stage.join("tree/src")).unwrap();
+    std::fs::write(stage.join("tree/src/partial.txt"), b"partial\n").unwrap();
+    std::fs::set_permissions(&stage, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let stray_runtime = context
+        .config
+        .output_root
+        .join(format!(".runtime-{}", Uuid::new_v4()));
+    std::fs::create_dir(&stray_runtime).unwrap();
+    std::fs::set_permissions(&stray_runtime, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let stray_git_exec = context
+        .config
+        .output_root
+        .join(format!(".git-exec-{}", Uuid::new_v4()));
+    std::fs::create_dir(&stray_git_exec).unwrap();
+    std::fs::set_permissions(&stray_git_exec, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let transport = context
+        .config
+        .transport_root
+        .join(format!(".transport-{killed_id}-{}", Uuid::new_v4()));
+    std::fs::create_dir_all(transport.join("0.git")).unwrap();
+    std::fs::write(transport.join("0.git/HEAD"), b"ref: refs/heads/main\n").unwrap();
+
+    // Same acquisition id as the killed attempt: reclaim drops the incomplete
+    // claim and the next attempt succeeds.
+    let mut retry = context.request(&commit);
+    retry.acquisition_id = killed_id;
+    let receipt = context
+        .acquirer
+        .acquire(&retry)
+        .await
+        .expect("next acquisition after killed leftovers");
+    assert_eq!(receipt.acquisition_id, killed_id);
+    assert!(receipt.materialized_files >= 33);
+    assert!(!claim.exists(), "incomplete claim must be reclaimed");
+    assert!(!stage.exists(), "stage leftover must be reclaimed");
+    assert!(!stray_runtime.exists(), "stray runtime must be reclaimed");
+    assert!(!stray_git_exec.exists(), "stray git-exec must be reclaimed");
+    assert!(!transport.exists(), "transport leftover must be reclaimed");
+    let transport_names: Vec<_> = std::fs::read_dir(&context.config.transport_root)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(
+        transport_names.len(),
+        1,
+        "transport leftovers must be reclaimed: {transport_names:?}"
+    );
+
+    // A distinct acquisition id against the same binding also succeeds when
+    // only transport/stage strays remain (claim already cleared).
+    let stage2 = context
+        .config
+        .output_root
+        .join(format!(".stage-{}-{}", Uuid::new_v4(), Uuid::new_v4()));
+    std::fs::create_dir_all(stage2.join("tree")).unwrap();
+    std::fs::set_permissions(&stage2, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let transport2 = context
+        .config
+        .transport_root
+        .join(format!(".transport-{}-{}", Uuid::new_v4(), Uuid::new_v4()));
+    std::fs::create_dir_all(&transport2).unwrap();
+    let next = context.request(&commit);
+    context
+        .acquirer
+        .acquire(&next)
+        .await
+        .expect("binding recovers for a fresh acquisition id");
+}
+
+
+#[tokio::test]
+async fn sealed_helper_killed_mid_materialization_is_reclaimed() {
+    use tokio::io::AsyncWriteExt as _;
+
+    let temporary = tempfile::tempdir().expect("kill reclaim tempdir");
+    let repository = RepositoryFixture::new(temporary.path(), "kill-root");
+    repository.write("README.md", b"kill reclaim\n");
+    for index in 0..48 {
+        repository.write(
+            &format!("bulk/file-{index}.txt"),
+            format!("payload-{index}\n").repeat(32).as_bytes(),
+        );
+    }
+    let commit = repository.commit("kill reclaim");
+    let binary = PathBuf::from(env!("CARGO_BIN_EXE_mcloving-source-acquirer"));
+    let git = git_executable();
+    let git_remote_https = git_remote_https_executable(&git);
+    let credential_path = temporary.path().join("credential");
+    let signing_key_path = temporary.path().join("signing-key");
+    let marker_path = temporary.path().join("markers");
+    let config_path = temporary.path().join("config.json");
+    let ready_path = temporary.path().join("helper-ready");
+    write_private(&credential_path, CREDENTIAL);
+    write_private(&signing_key_path, SIGNING_KEY);
+    write_private(&marker_path, &[CREDENTIAL, b"\n"].concat());
+    let runtime_closure =
+        inspect_runtime_closure(&[git.clone(), git_remote_https.clone(), binary.clone()])
+            .await
+            .unwrap();
+    let runtime_closure_sha256 = runtime_closure_digest(&runtime_closure).unwrap();
+    let transport_root = bounded_transport_root(TRANSPORT_CAPACITY_16M);
+    // Do not pre-create output_root: ensure_private_output_root creates it at 0700.
+    let output_root = temporary.path().join("output");
+    let config = SourceConfig {
+        protocol_version: PROTOCOL_VERSION.to_owned(),
+        schema_version: "source-acquisition-v1".to_owned(),
+        acquirer_id: "kill-reclaim-acquirer".to_owned(),
+        deployment_identity: "contained/kill-deployment".to_owned(),
+        operator_identity: "contained/kill-operator".to_owned(),
+        generation: 1,
+        primary_repository: RepositoryBinding {
+            provider_identity: "contained-git".to_owned(),
+            repository_identity: "github:superbadlabs/mcloving".to_owned(),
+            repository_url: repository.url(),
+        },
+        allow_untrusted_forks: false,
+        allowed_fork_repositories: Vec::new(),
+        allowed_submodule_repositories: Vec::new(),
+        allowed_ref_prefixes: vec!["refs/heads/".to_owned()],
+        allowed_sparse_roots: Vec::new(),
+        git_executable_path: git.clone(),
+        git_executable_sha256: sha256_file(&git).await.unwrap(),
+        git_remote_https_executable_path: git_remote_https.clone(),
+        git_remote_https_executable_sha256: sha256_file(&git_remote_https).await.unwrap(),
+        runtime_closure,
+        runtime_closure_sha256,
+        git_version: git_output(git.parent().unwrap(), ["--version"]),
+        grant_id: "kill-reclaim-grant".to_owned(),
+        grant_version: "grant-v1".to_owned(),
+        grant_scope: "repository:read".to_owned(),
+        grant_expires_unix_ms: now_ms() + FIXTURE_AUTHORITY_WINDOW_MS,
+        credential_username: "git".to_owned(),
+        credential_sha256: content_sha256(CREDENTIAL),
+        receipt_signing_key_id: "kill-reclaim-signing-key".to_owned(),
+        receipt_signing_key_sha256: content_sha256(SIGNING_KEY),
+        secret_marker_set_sha256: marker_set_digest(&[CREDENTIAL.to_vec()]),
+        max_depth: 8,
+        max_files: 1_000,
+        max_total_bytes: 8 * 1024 * 1024,
+        max_file_bytes: 1024 * 1024,
+        max_transport_bytes: TRANSPORT_CAPACITY_16M,
+        max_path_bytes: 512,
+        max_submodules: 0,
+        command_timeout_ms: 30_000,
+        transport_root: transport_root.clone(),
+        output_root: output_root.clone(),
+        ca_bundle_path: None,
+        ca_bundle_sha256: None,
+        test_allow_file_repositories: true,
+        test_allow_http_loopback: false,
+    };
+    let implementation_sha256 = sha256_file(&binary).await.unwrap();
+    let acquisition_id = Uuid::new_v4();
+    let request = AcquisitionRequest {
+        acquisition_id,
+        organization_id: Uuid::new_v4(),
+        project_id: Uuid::new_v4(),
+        pipeline_id: Uuid::new_v4(),
+        build_id: Uuid::new_v4(),
+        attempt_id: Uuid::new_v4(),
+        checkout_name: "source".to_owned(),
+        acquirer_id: config.acquirer_id.clone(),
+        expected_implementation_sha256: implementation_sha256.clone(),
+        expected_git_sha256: config.git_executable_sha256.clone(),
+        expected_git_remote_https_sha256: config.git_remote_https_executable_sha256.clone(),
+        expected_config_sha256: config.canonical_digest().unwrap(),
+        protocol_version: PROTOCOL_VERSION.to_owned(),
+        schema_version: config.schema_version.clone(),
+        expected_generation: config.generation,
+        rollback_from_generation: None,
+        provider_identity: config.primary_repository.provider_identity.clone(),
+        repository_identity: config.primary_repository.repository_identity.clone(),
+        repository_url: config.primary_repository.repository_url.clone(),
+        authenticated_ref: "refs/heads/main".to_owned(),
+        exact_commit: commit.clone(),
+        source_identity: "trusted/main".to_owned(),
+        trust_class: TrustClass::Trusted,
+        depth: 1,
+        sparse_roots: Vec::new(),
+        submodules: Vec::new(),
+        requested_at_unix_ms: now_ms() - 1_000,
+        expires_at_unix_ms: now_ms() + FIXTURE_AUTHORITY_WINDOW_MS,
+        audit_lineage: "audit/source/kill-reclaim".to_owned(),
+    };
+    std::fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
+    let mut child = tokio::process::Command::new(&binary)
+        .env_clear()
+        .env("MCLOVING_SOURCE_ACQUIRER_CONFIG", &config_path)
+        .env("MCLOVING_SOURCE_ACQUIRER_CREDENTIAL_FILE", &credential_path)
+        .env(
+            "MCLOVING_SOURCE_ACQUIRER_SIGNING_KEY_FILE",
+            &signing_key_path,
+        )
+        .env("MCLOVING_SOURCE_ACQUIRER_SECRET_MARKERS_FILE", &marker_path)
+        .env("MCLOVING_SOURCE_ACQUIRER_TEST_MODE", "1")
+        .env("MCLOVING_SOURCE_ACQUIRER_TEST_READY_FILE", &ready_path)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .expect("kill-reclaim helper");
+    let ready_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
+    loop {
+        if ready_path.exists() {
+            break;
+        }
+        if tokio::time::Instant::now() >= ready_deadline {
+            let _ = child.start_kill();
+            let output = child.wait_with_output().await.unwrap();
+            panic!(
+                "helper readiness timed out; status={:?} stderr={} stdout={}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr),
+                String::from_utf8_lossy(&output.stdout)
+            );
+        }
+        if let Ok(Some(status)) = child.try_wait() {
+            let output = child.wait_with_output().await.unwrap();
+            panic!(
+                "helper exited before ready: status={status:?} stderr={} stdout={}",
+                String::from_utf8_lossy(&output.stderr),
+                String::from_utf8_lossy(&output.stdout)
+            );
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let mut stdin = child.stdin.take().unwrap();
+    stdin
+        .write_all(&serde_json::to_vec(&request).unwrap())
+        .await
+        .unwrap();
+    drop(stdin);
+    // Wait for the stage directory specifically. A claim without a stage is the
+    // controlled-failure shape that must stay ambiguous; reclaim only drops the
+    // claim when a matching stage shows the attempt was killed mid-flight.
+    tokio::time::timeout(std::time::Duration::from_secs(120), async {
+        loop {
+            let staging = output_root.exists()
+                && std::fs::read_dir(&output_root)
+                    .unwrap()
+                    .filter_map(Result::ok)
+                    .any(|entry| {
+                        entry
+                            .file_name()
+                            .to_string_lossy()
+                            .starts_with(&format!(".stage-{acquisition_id}-"))
+                    });
+            if staging {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("helper reached stage");
+    child.start_kill().expect("SIGKILL helper");
+    let _ = child.wait_with_output().await;
+
+    // Reclaim with an in-process acquirer bound to the same roots. Its runtime
+    // closure must come from this test executable (as Context::new does), not
+    // from the helper binary we just killed.
+    let test_exe = std::env::current_exe().expect("test executable");
+    let reclaim_runtime = inspect_runtime_closure(&[
+        git.clone(),
+        git_remote_https.clone(),
+        test_exe.clone(),
+    ])
+    .await
+    .unwrap();
+    let mut reclaim_config = config;
+    reclaim_config.runtime_closure = reclaim_runtime.clone();
+    reclaim_config.runtime_closure_sha256 = runtime_closure_digest(&reclaim_runtime).unwrap();
+    let reclaim_implementation = sha256_file(&test_exe).await.unwrap();
+    let acquirer = SourceAcquirer::new(
+        reclaim_config.clone(),
+        reclaim_implementation.clone(),
+        credential_path,
+        CREDENTIAL,
+        SIGNING_KEY.to_vec(),
+        vec![CREDENTIAL.to_vec()],
+    )
+    .await
+    .expect("reclaiming acquirer");
+    let mut retry = request.clone();
+    retry.acquisition_id = acquisition_id;
+    retry.expected_implementation_sha256 = reclaim_implementation;
+    retry.expected_config_sha256 = acquirer.config_sha256().to_owned();
+    retry.expected_git_sha256 = reclaim_config.git_executable_sha256.clone();
+    retry.expected_git_remote_https_sha256 =
+        reclaim_config.git_remote_https_executable_sha256.clone();
+    let receipt = acquirer
+        .acquire(&retry)
+        .await
+        .expect("acquire after mid-materialization kill");
+    assert_eq!(receipt.repository_trees[0].resolved_commit, commit);
+    assert!(
+        !output_root
+            .join(format!("{acquisition_id}.claim.json"))
+            .exists()
+            || output_root.join(acquisition_id.to_string()).exists(),
+        "killed attempt must not leave an unreclaimed incomplete claim without a published tree"
+    );
 }
 
 #[tokio::test]

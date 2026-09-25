@@ -23,10 +23,17 @@ the host under its own containment, never in the image, and the tree lands in
 the workspace the image steps see at `/workspace`. The literal-shell migration
 planner remains process-only and refuses checkout stages.
 
-The acquirer resolves `ref` and requires it to resolve to exactly `commit`;
-a ref that has moved on is refused as `revision_mismatch` rather than checked
-out at whatever it now points to. Webhook and parameter plumbing that supplies
-the commit is `PAR-001`'s.
+The acquirer fetches `commit` by object id and requires `FETCH_HEAD` to equal
+that id before publication. A ref that has moved on still materializes the
+requested commit when the object is reachable (GitHub serves reachable commits
+by id), matching Foundation; it is never checked out at the ref's new tip.
+`revision_mismatch` remains only when the fetched object is not the requested
+commit. Webhook and parameter plumbing that supplies the commit is `PAR-001`'s.
+Blob materialization uses one `git cat-file --batch` process per repository
+tree so a multi-thousand-file checkout finishes in seconds while keeping
+per-blob size and secret-marker bounds. A killed acquisition's stage, transport,
+runtime, git-exec and incomplete claim debris is reclaimed by the next
+acquisition of the same binding under the coordination locks (`AGENT-013`).
 
 The default controller grants no source authority. Startup configuration pairs
 `MCLOVING_SOURCE_MAPPING_CATALOG` with the exact raw-byte

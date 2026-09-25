@@ -561,6 +561,12 @@ struct RepositoryWork {
     ancestry: Vec<(String, String)>,
 }
 
+struct PendingBlob {
+    path: String,
+    mode: String,
+    object_id: String,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum SourceError {
     #[error("source acquirer configuration is invalid")]
@@ -879,7 +885,15 @@ impl SourceAcquirer {
         let _root_lock = lock_output_root(&self.config.output_root).await?;
         let now = now_unix_ms()?;
         let request_sha256 = self.validate_request(request, now)?;
+        // A prior acquisition of this binding that was killed mid-flight leaves
+        // stage/runtime/git-exec/claim debris that would otherwise poison the
+        // next attempt as state_unavailable. Reclaim under the output lock so
+        // concurrent helpers serialize on the same cleanup.
+        self.reclaim_orphaned_output_state(request.acquisition_id)
+            .await?;
         if claim_path(&self.config.output_root, request.acquisition_id).exists() {
+            // Still present after reclaim means a published tree and claim are
+            // racing, or reclaim refused an unrecoverable shape.
             return Err(SourceError::AmbiguousClaim);
         }
         if let Some(receipt) = self.load_receipt(request.acquisition_id).await? {
@@ -934,6 +948,10 @@ impl SourceAcquirer {
             &self.config.output_root,
             self.config.max_transport_bytes,
         )?;
+        // Transport debris from a killed acquisition fails the clean-root gate
+        // as state_unavailable; reclaim named leftovers under the transport
+        // lock before that gate, so the next binding attempt recovers itself.
+        reclaim_orphaned_transport_state(&self.config.transport_root).await?;
         ensure_clean_transport_root(&self.config.transport_root).await?;
         // Unconditional, and deliberately after the transport lock. Waiting
         // on that lock can take arbitrarily long, and the credential file or
@@ -1104,6 +1122,7 @@ impl SourceAcquirer {
                 )
                 .await?;
             let mut observed_local_gitlinks = BTreeSet::new();
+            let mut pending_blobs = Vec::new();
 
             for entry in entries {
                 let full_path = prefixed_path(&repository.prefix, &entry.path)?;
@@ -1189,50 +1208,26 @@ impl SourceAcquirer {
                     continue;
                 }
                 self.reserve_manifest_path(&full_path, &mut exact_paths, &mut folded_paths)?;
-                let blob_result = self
-                    .run_credential_git_until(
-                        vec![
-                            OsString::from("--git-dir"),
-                            git_dir.as_os_str().to_owned(),
-                            OsString::from("cat-file"),
-                            OsString::from("blob"),
-                            OsString::from(&entry.object_id),
-                        ],
-                        usize::try_from(self.config.max_file_bytes)
-                            .unwrap_or(usize::MAX)
-                            .min(usize::MAX - 1),
-                        &repository.binding.repository_url,
-                        publication_deadline_unix_ms,
-                        repositories_dir,
-                    )
-                    .await;
-                self.ensure_transport_quota(repositories_dir).await?;
-                let blob = blob_result?;
-                let blob_bytes =
-                    u64::try_from(blob.len()).map_err(|_| SourceError::LimitExceeded)?;
-                if blob_bytes > self.config.max_file_bytes {
-                    return Err(SourceError::LimitExceeded);
-                }
-                materialized_bytes = materialized_bytes
-                    .checked_add(blob_bytes)
-                    .ok_or(SourceError::LimitExceeded)?;
-                if materialized_bytes > self.config.max_total_bytes {
-                    return Err(SourceError::LimitExceeded);
-                }
-                self.reject_secret_markers(&blob)?;
-                self.materialize_entry(&tree_dir, &full_path, &entry.mode, &blob)
-                    .await?;
-                manifest.push(ManifestEntry {
+                pending_blobs.push(PendingBlob {
                     path: full_path,
-                    git_mode: entry.mode,
-                    git_object_id: entry.object_id,
-                    bytes: blob_bytes,
-                    sha256: sha256_hex(&blob),
+                    mode: entry.mode,
+                    object_id: entry.object_id,
                 });
-                if manifest.len() > self.config.max_files {
+                if manifest.len().saturating_add(pending_blobs.len()) > self.config.max_files {
                     return Err(SourceError::LimitExceeded);
                 }
             }
+            self.materialize_blobs_batch(
+                &git_dir,
+                &tree_dir,
+                &pending_blobs,
+                &repository.binding.repository_url,
+                publication_deadline_unix_ms,
+                repositories_dir,
+                &mut manifest,
+                &mut materialized_bytes,
+            )
+            .await?;
             if module_declarations.len() != observed_local_gitlinks.len()
                 || module_declarations
                     .keys()
@@ -1460,10 +1455,15 @@ impl SourceAcquirer {
             OsString::from("--force"),
         ];
         arguments.push(OsString::from(format!("--depth={depth}")));
+        // Fetch the requested object by id. GitHub (and any upload-pack that
+        // serves reachable commits by id) returns that exact commit even when
+        // authenticated_ref has moved on since the request was signed, so a
+        // push superseded before its build ran still materializes what was
+        // pushed. FETCH_HEAD must still equal exact_commit below.
         arguments.extend([
             OsString::from("--"),
             OsString::from("origin"),
-            OsString::from(&repository.authenticated_ref),
+            OsString::from(&repository.exact_commit),
         ]);
         let fetch = self
             .run_credential_git_until(
@@ -1570,6 +1570,115 @@ impl SourceAcquirer {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
+    async fn materialize_blobs_batch(
+        &self,
+        git_dir: &Path,
+        tree_dir: &Path,
+        pending: &[PendingBlob],
+        repository_url: &str,
+        deadline: i64,
+        transport_root: &Path,
+        manifest: &mut Vec<ManifestEntry>,
+        materialized_bytes: &mut u64,
+    ) -> Result<(), SourceError> {
+        if pending.is_empty() {
+            return Ok(());
+        }
+        self.ensure_before_deadline(deadline)?;
+        let arguments = vec![
+            OsString::from("--git-dir"),
+            git_dir.as_os_str().to_owned(),
+            OsString::from("cat-file"),
+            OsString::from("--batch"),
+        ];
+        let mut session = self
+            .spawn_credential_git_session(
+                arguments,
+                repository_url,
+                deadline,
+                transport_root,
+            )
+            .await?;
+        let max_file_bytes = usize::try_from(self.config.max_file_bytes)
+            .unwrap_or(usize::MAX)
+            .min(usize::MAX - 1);
+        for blob in pending {
+            self.ensure_before_deadline(deadline)?;
+            session
+                .write_line(blob.object_id.as_bytes())
+                .await?;
+            let (object_id, object_type, bytes) = session
+                .read_batch_object(self, max_file_bytes)
+                .await?;
+            if object_id != blob.object_id || object_type != "blob" {
+                session.terminate().await?;
+                return Err(SourceError::UnsafeTree);
+            }
+            self.ensure_transport_quota(transport_root).await?;
+            let blob_bytes =
+                u64::try_from(bytes.len()).map_err(|_| SourceError::LimitExceeded)?;
+            if blob_bytes > self.config.max_file_bytes {
+                session.terminate().await?;
+                return Err(SourceError::LimitExceeded);
+            }
+            *materialized_bytes = materialized_bytes
+                .checked_add(blob_bytes)
+                .ok_or(SourceError::LimitExceeded)?;
+            if *materialized_bytes > self.config.max_total_bytes {
+                session.terminate().await?;
+                return Err(SourceError::LimitExceeded);
+            }
+            if let Err(error) = self.reject_secret_markers(&bytes) {
+                session.terminate().await?;
+                return Err(error);
+            }
+            if let Err(error) = self
+                .materialize_entry(tree_dir, &blob.path, &blob.mode, &bytes)
+                .await
+            {
+                session.terminate().await?;
+                return Err(error);
+            }
+            manifest.push(ManifestEntry {
+                path: blob.path.clone(),
+                git_mode: blob.mode.clone(),
+                git_object_id: blob.object_id.clone(),
+                bytes: blob_bytes,
+                sha256: sha256_hex(&bytes),
+            });
+            if manifest.len() > self.config.max_files {
+                session.terminate().await?;
+                return Err(SourceError::LimitExceeded);
+            }
+        }
+        session.finish(deadline, transport_root).await?;
+        self.ensure_transport_quota(transport_root).await?;
+        Ok(())
+    }
+
+    async fn reclaim_orphaned_output_state(
+        &self,
+        acquisition_id: Uuid,
+    ) -> Result<(), SourceError> {
+        #[cfg(unix)]
+        {
+            reclaim_named_output_leftovers(
+                &self.config.output_root,
+                acquisition_id,
+                Some(&self.runtime_directory.path),
+                Some(&self.git_exec_directory.path),
+            )
+            .await
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = acquisition_id;
+            Err(SourceError::InvalidConfig)
+        }
+    }
+
+
     fn reserve_manifest_path(
         &self,
         path: &str,
@@ -1675,6 +1784,217 @@ impl SourceAcquirer {
             Some(transport_root),
         )
         .await
+    }
+
+
+    async fn spawn_credential_git_session(
+        &self,
+        arguments: Vec<OsString>,
+        repository_url: &str,
+        deadline_unix_ms: i64,
+        transport_root: &Path,
+    ) -> Result<GitBatchSession, SourceError> {
+        self.verify_runtime_authority(true).await?;
+        self.git_exec_directory.verify(
+            &self.git_executable.invocation_path,
+            &self.git_remote_https_executable.invocation_path,
+        )?;
+        #[cfg(unix)]
+        let credential_monotonic_anchor = ClockId::CLOCK_MONOTONIC
+            .now()
+            .map_err(|_| SourceError::StateUnavailable)?;
+        let command_anchor = tokio::time::Instant::now();
+        let wall_anchor = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| SourceError::StateUnavailable)?;
+        let wall_anchor_unix_ms =
+            i64::try_from(wall_anchor.as_millis()).map_err(|_| SourceError::StateUnavailable)?;
+        let command_timeout = Duration::from_millis(self.config.command_timeout_ms);
+        let now = now_unix_ms()?;
+        if now >= deadline_unix_ms {
+            return Err(SourceError::ExpiredRequest);
+        }
+        let remaining_ms = u64::try_from(deadline_unix_ms - now)
+            .map_err(|_| SourceError::ExpiredRequest)?;
+        let remaining = Duration::from_millis(remaining_ms);
+        let (timeout, deadline_limited) = (
+            command_timeout.min(remaining),
+            remaining <= command_timeout,
+        );
+        let timeout_milliseconds =
+            i64::try_from(timeout.as_millis()).map_err(|_| SourceError::StateUnavailable)?;
+        let credential_deadline_unix_ms = wall_anchor_unix_ms
+            .checked_add(timeout_milliseconds)
+            .ok_or(SourceError::StateUnavailable)?;
+        #[cfg(unix)]
+        let credential_deadline_monotonic_ns = credential_monotonic_anchor
+            .num_nanoseconds()
+            .checked_add(
+                i64::try_from(timeout.as_nanos()).map_err(|_| SourceError::StateUnavailable)?,
+            )
+            .ok_or(SourceError::StateUnavailable)?;
+        let command_deadline = command_anchor
+            .checked_add(timeout)
+            .ok_or(SourceError::StateUnavailable)?;
+        let endpoint_resolutions = self
+            .resolve_network_endpoint(repository_url, command_deadline)
+            .await?;
+        let remaining = command_deadline
+            .checked_duration_since(tokio::time::Instant::now())
+            .unwrap_or(Duration::ZERO);
+        if remaining.is_zero() {
+            return Err(if deadline_limited {
+                SourceError::ExpiredRequest
+            } else {
+                SourceError::SourceUnavailable
+            });
+        }
+        #[cfg(unix)]
+        let requires_kernel_transport_deadline = Url::parse(repository_url)
+            .ok()
+            .is_some_and(|value| matches!(value.scheme(), "http" | "https"));
+        #[cfg(not(unix))]
+        let requires_kernel_transport_deadline = false;
+        #[cfg(unix)]
+        if requires_kernel_transport_deadline
+            && !self
+                .kernel_transport_namespace_usable(Some(deadline_unix_ms))
+                .await?
+        {
+            return Err(SourceError::TransportNamespaceUnavailable);
+        }
+        let command_executable = if requires_kernel_transport_deadline {
+            &self.askpass_executable.invocation_path
+        } else {
+            &self.git_executable.invocation_path
+        };
+        let mut command = Command::new(command_executable);
+        command
+            .env_clear()
+            .env("LANG", "C")
+            .env("LC_ALL", "C")
+            .env("PATH", &self.git_exec_directory.invocation_path)
+            .env("HOME", "/nonexistent")
+            .env("LD_BIND_NOW", "1")
+            .env("LD_LIBRARY_PATH", &self.runtime_directory.invocation_path)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_EXEC_PATH", &self.git_exec_directory.invocation_path)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("GIT_OPTIONAL_LOCKS", "0")
+            .env("NO_PROXY", "*")
+            .args([
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-c",
+                "credential.helper=",
+                "-c",
+                "http.followRedirects=false",
+                "-c",
+                "protocol.version=2",
+                "-c",
+                "gc.auto=0",
+                "-c",
+                "maintenance.auto=false",
+                "-c",
+                "core.fsmonitor=false",
+                "-c",
+                "transfer.fsckObjects=true",
+                "-c",
+                "fetch.fsckObjects=true",
+                "-c",
+                "fetch.unpackLimit=1",
+                "-c",
+                "transfer.unpackLimit=1",
+                "-c",
+                "protocol.allow=never",
+                "-c",
+                "protocol.https.allow=always",
+            ]);
+        for resolution in endpoint_resolutions {
+            command.args(["-c", &format!("http.curloptResolve={resolution}")]);
+        }
+        command
+            .env("GIT_ASKPASS", &self.askpass_executable.invocation_path)
+            .env("MCLOVING_SOURCE_ACQUIRER_ASKPASS", "1")
+            .env(
+                "MCLOVING_SOURCE_ACQUIRER_CREDENTIAL_FILE",
+                &self.credential_path,
+            )
+            .env(
+                "MCLOVING_SOURCE_ACQUIRER_CREDENTIAL_USERNAME",
+                &self.config.credential_username,
+            )
+            .env(
+                "MCLOVING_SOURCE_ACQUIRER_CREDENTIAL_SHA256",
+                &self.config.credential_sha256,
+            )
+            .env(
+                CREDENTIAL_DEADLINE_ENV,
+                credential_deadline_unix_ms.to_string(),
+            );
+        #[cfg(unix)]
+        command.env(
+            CREDENTIAL_MONOTONIC_DEADLINE_ENV,
+            credential_deadline_monotonic_ns.to_string(),
+        );
+        if requires_kernel_transport_deadline {
+            command.env(TRANSPORT_LAUNCHER_MODE_ENV, "1").env(
+                TRANSPORT_EXECUTABLE_ENV,
+                &self.git_executable.invocation_path,
+            );
+        }
+        if self.config.test_allow_http_loopback {
+            command.args(["-c", "protocol.http.allow=always"]);
+        }
+        if self.config.test_allow_file_repositories {
+            command.args(["-c", "protocol.file.allow=always"]);
+        }
+        if let Some(ca_bundle) = &self.ca_bundle {
+            command.env("GIT_SSL_CAINFO", &ca_bundle.invocation_path);
+        }
+        command
+            .args(arguments)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        #[cfg(unix)]
+        command.process_group(0);
+        if command_deadline <= tokio::time::Instant::now() {
+            return Err(if deadline_limited {
+                SourceError::ExpiredRequest
+            } else {
+                SourceError::SourceUnavailable
+            });
+        }
+        let mut child = command
+            .spawn()
+            .map_err(|_| SourceError::SourceUnavailable)?;
+        #[cfg(unix)]
+        let process_group_id = Some(
+            i32::try_from(child.id().ok_or(SourceError::SourceUnavailable)?)
+                .map_err(|_| SourceError::SourceUnavailable)?,
+        );
+        #[cfg(not(unix))]
+        let process_group_id = None;
+        #[cfg(target_os = "linux")]
+        if requires_kernel_transport_deadline {
+            admit_transport_namespace(&mut child, command_deadline, process_group_id).await?;
+        }
+        let stdin = child.stdin.take().ok_or(SourceError::StateUnavailable)?;
+        let stdout = child.stdout.take().ok_or(SourceError::StateUnavailable)?;
+        let stderr = child.stderr.take().ok_or(SourceError::StateUnavailable)?;
+        Ok(GitBatchSession {
+            child,
+            stdin,
+            stdout,
+            stderr,
+            process_group_id,
+            command_deadline,
+            deadline_limited,
+            transport_root: transport_root.to_owned(),
+        })
     }
 
     async fn run_git_with_deadline(
@@ -3163,19 +3483,23 @@ async fn admit_transport_namespace(
             .write_all(&[2])
             .await
             .map_err(|_| SourceError::SourceUnavailable)?;
-        input
-            .shutdown()
-            .await
-            .map_err(|_| SourceError::SourceUnavailable)?;
-        Ok(())
+        // Keep stdin open: the launcher has finished its handshake and git
+        // (exec'd inside the namespace) inherits this pipe. Batch cat-file
+        // needs it; argv-only commands simply leave it unread.
+        Ok(input)
     }
     .await;
-    if let Err(error) = result {
-        let _ = terminate_child(child, process_group_id).await;
-        return Err(error);
+    match result {
+        Ok(input) => {
+            child.stdin = Some(input);
+            child.stdout = Some(output);
+            Ok(())
+        }
+        Err(error) => {
+            let _ = terminate_child(child, process_group_id).await;
+            Err(error)
+        }
     }
-    child.stdout = Some(output);
-    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -4241,6 +4565,319 @@ fn validate_transport_filesystem(
         let _ = (root, output_root, expected_capacity);
         Err(SourceError::InvalidConfig)
     }
+}
+
+
+struct GitBatchSession {
+    child: tokio::process::Child,
+    stdin: tokio::process::ChildStdin,
+    stdout: tokio::process::ChildStdout,
+    stderr: tokio::process::ChildStderr,
+    process_group_id: Option<i32>,
+    command_deadline: tokio::time::Instant,
+    deadline_limited: bool,
+    transport_root: PathBuf,
+}
+
+impl GitBatchSession {
+    async fn write_line(&mut self, object_id: &[u8]) -> Result<(), SourceError> {
+        self.ensure_time()?;
+        self.stdin
+            .write_all(object_id)
+            .await
+            .map_err(|_| SourceError::SourceUnavailable)?;
+        self.stdin
+            .write_all(b"\n")
+            .await
+            .map_err(|_| SourceError::SourceUnavailable)?;
+        self.stdin
+            .flush()
+            .await
+            .map_err(|_| SourceError::SourceUnavailable)?;
+        Ok(())
+    }
+
+    async fn read_batch_object(
+        &mut self,
+        acquirer: &SourceAcquirer,
+        max_file_bytes: usize,
+    ) -> Result<(String, String, Vec<u8>), SourceError> {
+        self.ensure_time()?;
+        let header = self.read_header_line(acquirer).await?;
+        let parts = header.split(' ').collect::<Vec<_>>();
+        if parts.len() == 2 && parts[1] == "missing" {
+            return Err(SourceError::SourceUnavailable);
+        }
+        if parts.len() != 3 {
+            return Err(SourceError::SourceUnavailable);
+        }
+        let object_id = parts[0].to_owned();
+        let object_type = parts[1].to_owned();
+        let size = parts[2]
+            .parse::<usize>()
+            .map_err(|_| SourceError::SourceUnavailable)?;
+        if size > max_file_bytes {
+            // Drain is impossible to bound safely once oversize; kill the batch
+            // process and refuse by the same limit the per-blob path used.
+            return Err(SourceError::LimitExceeded);
+        }
+        let mut bytes = vec![0_u8; size];
+        self.read_exact_deadline(acquirer, &mut bytes).await?;
+        let mut newline = [0_u8; 1];
+        self.read_exact_deadline(acquirer, &mut newline).await?;
+        if &newline != b"\n" {
+            return Err(SourceError::SourceUnavailable);
+        }
+        Ok((object_id, object_type, bytes))
+    }
+
+    async fn read_header_line(
+        &mut self,
+        acquirer: &SourceAcquirer,
+    ) -> Result<String, SourceError> {
+        let mut line = Vec::new();
+        loop {
+            self.ensure_time()?;
+            let remaining = self
+                .command_deadline
+                .checked_duration_since(tokio::time::Instant::now())
+                .unwrap_or(Duration::ZERO);
+            if remaining.is_zero() {
+                return Err(self.timeout_error());
+            }
+            let mut byte = [0_u8; 1];
+            let read = tokio::select! {
+                result = self.stdout.read_exact(&mut byte) => result,
+                _ = tokio::time::sleep(remaining.min(TRANSPORT_QUOTA_POLL_INTERVAL)) => {
+                    acquirer
+                        .ensure_transport_quota(&self.transport_root)
+                        .await?;
+                    continue;
+                }
+            };
+            match read {
+                Ok(_) => {
+                    if byte[0] == b'\n' {
+                        break;
+                    }
+                    if line.len() >= 256 {
+                        return Err(SourceError::SourceUnavailable);
+                    }
+                    line.push(byte[0]);
+                }
+                Err(_) => {
+                    return Err(self.unavailable_or_quota(acquirer).await);
+                }
+            }
+        }
+        String::from_utf8(line).map_err(|_| SourceError::SourceUnavailable)
+    }
+
+    async fn read_exact_deadline(
+        &mut self,
+        acquirer: &SourceAcquirer,
+        buffer: &mut [u8],
+    ) -> Result<(), SourceError> {
+        let mut read = 0;
+        while read < buffer.len() {
+            self.ensure_time()?;
+            let remaining = self
+                .command_deadline
+                .checked_duration_since(tokio::time::Instant::now())
+                .unwrap_or(Duration::ZERO);
+            if remaining.is_zero() {
+                return Err(self.timeout_error());
+            }
+            let chunk = tokio::select! {
+                result = self.stdout.read(&mut buffer[read..]) => result,
+                _ = tokio::time::sleep(remaining.min(TRANSPORT_QUOTA_POLL_INTERVAL)) => {
+                    acquirer
+                        .ensure_transport_quota(&self.transport_root)
+                        .await?;
+                    continue;
+                }
+            };
+            match chunk {
+                Ok(0) => return Err(self.unavailable_or_quota(acquirer).await),
+                Ok(count) => read += count,
+                Err(_) => return Err(self.unavailable_or_quota(acquirer).await),
+            }
+        }
+        Ok(())
+    }
+
+    async fn unavailable_or_quota(&self, acquirer: &SourceAcquirer) -> SourceError {
+        match acquirer.ensure_transport_quota(&self.transport_root).await {
+            Err(SourceError::LimitExceeded) => SourceError::LimitExceeded,
+            _ => SourceError::SourceUnavailable,
+        }
+    }
+
+    async fn finish(
+        mut self,
+        deadline_unix_ms: i64,
+        transport_root: &Path,
+    ) -> Result<(), SourceError> {
+        let _ = deadline_unix_ms;
+        let _ = transport_root;
+        let deadline_limited = self.deadline_limited;
+        let command_deadline = self.command_deadline;
+        let process_group_id = self.process_group_id;
+        let timeout_error = || {
+            if deadline_limited {
+                SourceError::ExpiredRequest
+            } else {
+                SourceError::SourceUnavailable
+            }
+        };
+        // Closing stdin ends the batch stream; git exits 0 after draining.
+        drop(self.stdin);
+        if command_deadline <= tokio::time::Instant::now() {
+            terminate_child(&mut self.child, process_group_id).await?;
+            return Err(timeout_error());
+        }
+        let remaining = command_deadline
+            .checked_duration_since(tokio::time::Instant::now())
+            .unwrap_or(Duration::ZERO);
+        if remaining.is_zero() {
+            terminate_child(&mut self.child, process_group_id).await?;
+            return Err(timeout_error());
+        }
+        // Bound residual stderr so a noisy helper cannot pin memory.
+        let stderr_task = tokio::spawn(read_bounded(self.stderr, MAX_GIT_STDERR_BYTES));
+        let status = match tokio::time::timeout(remaining, self.child.wait()).await {
+            Ok(Ok(status)) => status,
+            Ok(Err(_)) => {
+                stderr_task.abort();
+                let _ = stderr_task.await;
+                return Err(SourceError::SourceUnavailable);
+            }
+            Err(_) => {
+                terminate_child(&mut self.child, process_group_id).await?;
+                stderr_task.abort();
+                let _ = stderr_task.await;
+                return Err(timeout_error());
+            }
+        };
+        let _ = stderr_task
+            .await
+            .map_err(|_| SourceError::SourceUnavailable)?
+            .map_err(|_| SourceError::SourceUnavailable)?;
+        if !status.success() {
+            return Err(SourceError::SourceUnavailable);
+        }
+        Ok(())
+    }
+
+    async fn terminate(mut self) -> Result<(), SourceError> {
+        terminate_child(&mut self.child, self.process_group_id).await
+    }
+
+    fn ensure_time(&self) -> Result<(), SourceError> {
+        if self.command_deadline <= tokio::time::Instant::now() {
+            Err(self.timeout_error())
+        } else {
+            Ok(())
+        }
+    }
+
+    fn timeout_error(&self) -> SourceError {
+        if self.deadline_limited {
+            SourceError::ExpiredRequest
+        } else {
+            SourceError::SourceUnavailable
+        }
+    }
+}
+
+async fn reclaim_orphaned_transport_state(root: &Path) -> Result<(), SourceError> {
+    let mut entries = tokio::fs::read_dir(root)
+        .await
+        .map_err(|_| SourceError::StateUnavailable)?;
+    let mut leftovers = Vec::new();
+    while let Some(entry) = entries
+        .next_entry()
+        .await
+        .map_err(|_| SourceError::StateUnavailable)?
+    {
+        let name = entry.file_name();
+        let name_text = name.to_string_lossy();
+        if name_text == COORDINATION_LOCK_FILE {
+            continue;
+        }
+        if name_text.starts_with(".transport-") {
+            leftovers.push(entry.path());
+        }
+        // Anything else is left for ensure_clean_transport_root to refuse.
+    }
+    for path in leftovers {
+        make_tree_owner_writable(&path).await?;
+        tokio::fs::remove_dir_all(&path)
+            .await
+            .map_err(|_| SourceError::StateUnavailable)?;
+    }
+    Ok(())
+}
+
+async fn reclaim_named_output_leftovers(
+    root: &Path,
+    acquisition_id: Uuid,
+    keep_runtime: Option<&Path>,
+    keep_git_exec: Option<&Path>,
+) -> Result<(), SourceError> {
+    let claim = claim_path(root, acquisition_id);
+    let published = acquisition_path(root, acquisition_id);
+    let stage_prefix = format!(".stage-{acquisition_id}-");
+
+    let mut entries = tokio::fs::read_dir(root)
+        .await
+        .map_err(|_| SourceError::StateUnavailable)?;
+    let mut remove = Vec::new();
+    let mut saw_matching_stage = false;
+    while let Some(entry) = entries
+        .next_entry()
+        .await
+        .map_err(|_| SourceError::StateUnavailable)?
+    {
+        let name = entry.file_name();
+        let name_text = name.to_string_lossy();
+        let path = entry.path();
+        if name_text.starts_with(&stage_prefix) {
+            saw_matching_stage = true;
+        }
+        let reclaim = name_text.starts_with(".stage-")
+            || name_text.starts_with(".expired-")
+            || (name_text.starts_with(".runtime-")
+                && keep_runtime != Some(path.as_path()))
+            || (name_text.starts_with(".git-exec-")
+                && keep_git_exec != Some(path.as_path()));
+        if reclaim {
+            remove.push(path);
+        }
+    }
+    // A controlled failure keeps its claim and cleans its stage; that claim
+    // must stay so the same id is refused as ambiguous_claim. A killed
+    // attempt leaves a stage beside the claim: only then drop the incomplete
+    // claim so the same id can retry without an operator.
+    if claim.exists() && !published.exists() && saw_matching_stage {
+        let _ = tokio::fs::remove_file(&claim).await;
+    }
+    for path in remove {
+        let metadata = tokio::fs::symlink_metadata(&path)
+            .await
+            .map_err(|_| SourceError::StateUnavailable)?;
+        if metadata.file_type().is_dir() {
+            make_tree_owner_writable(&path).await?;
+            tokio::fs::remove_dir_all(&path)
+                .await
+                .map_err(|_| SourceError::StateUnavailable)?;
+        } else {
+            tokio::fs::remove_file(&path)
+                .await
+                .map_err(|_| SourceError::StateUnavailable)?;
+        }
+    }
+    sync_directory(root).await
 }
 
 async fn ensure_clean_transport_root(root: &Path) -> Result<(), SourceError> {

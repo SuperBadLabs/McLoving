@@ -1285,8 +1285,9 @@ request the agent wrote, and only a typed public summary reaches the log; the
 acquirer's message is dropped and unknown failure codes collapse to one);
 TM-016/TM-023 (source and workspace: the repository, credential and executable
 come from the binding and never from the job; the ref must be inside the
-binding's allowed prefixes and must resolve to exactly the requested commit,
-so a moved branch is refused rather than checked out at its new tip; the tree
+binding's allowed prefixes and the fetch names the requested commit by object
+id so a moved branch still materializes that commit when reachable, never the
+new tip (`AGENT-013`); the tree
 is published by a descriptor-relative `RENAME_NOREPLACE` move with the
 destination checked absent before and by inode after, so a preceding untrusted
 step cannot pre-create or race-replace the destination with a link and write
@@ -1316,4 +1317,19 @@ bound are not deadline- or journal-bound, and the zero-budget checkout record
 does not carry its termination through finalization. The published tree is
 owner-writable by design, and plain process steps remain uncontained
 (`SEC-005`).
+
+## AGENT-013 source acquirer throughput and retained state
+
+Hardens the sealed acquirer without widening its protocol: selected blobs are
+read through one `git cat-file --batch` session per repository tree (per-blob
+byte and secret-marker bounds unchanged); incomplete stage, transport, runtime,
+git-exec and claim debris from a killed acquisition is reclaimed under the
+binding's coordination locks by the next attempt (same incomplete claim id
+retries; unknown transport entries still fail closed as `state_unavailable`);
+fetch names the requested commit by object id so a superseded push still builds
+what was pushed when the object is reachable. Boundaries touched remain
+TM-016/TM-023 (source materialization and retained state) and the PAR-012
+checkout path above; no new residual trust in the job, credential, or network
+endpoint selection. Proof: contained reclaim and mid-materialization kill
+tests in `crates/source-acquirer/tests/contained_source.rs`.
 

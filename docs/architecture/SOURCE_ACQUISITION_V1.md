@@ -241,9 +241,15 @@ the acquirer never accepts an unfiltered fallback. The private volume must
 reserve the materialization ceiling separately from the dedicated transport
 mount.
 `FETCH_HEAD^{commit}` must equal the
-request's full commit before any source is published. A later movement of the
-same ref is delivered only by a new request naming the later exact commit; a
-stale request cannot silently receive it.
+request's full commit before any source is published. The fetch names that
+exact commit object (not only the authenticated ref tip), so a request whose
+ref moved on still receives the commit it named when the object is reachable.
+A later tip is delivered only by a new request naming the later exact commit;
+a stale request cannot silently receive the new tip. Selected blobs are read
+through one `git cat-file --batch` session per repository tree, preserving
+per-blob byte and secret-marker bounds. Incomplete stage, transport, runtime,
+git-exec and claim debris left by a killed acquisition is reclaimed or refused
+by name under the binding's coordination locks before the next attempt.
 
 The credential reaches Git byte-for-byte only through the acquirer's bounded,
 implementation-hash-revalidated askpass mode; non-UTF-8 or newline-bearing
