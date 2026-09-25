@@ -70,7 +70,11 @@ pipeline and deployment merged in #152; the verdict table is empty.
 What stands in the way:
 
 1. **Collect ten matching verdicts** with `scripts/dogfood/verdicts.sh`. This
-   is the only thing the board requires to close `PAR-005`.
+   is the remaining acceptance evidence. Closing `PAR-005` also needs what
+   every ticket needs under the board's working rules (the reviewed merge,
+   exact-main Foundation and native Windows runs, and a closure update
+   recording them) plus the receipt in
+   `docs/evidence/PAR-005_SECURITY_REVIEW.md` the threat model names.
 2. **The checkout is too slow and fragile for a reliable count.** Checking this
    repository out took the source acquirer past a fifteen-minute step timeout
    because it reads blobs one process per file. A killed acquisition leaves
