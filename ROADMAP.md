@@ -1,6 +1,8 @@
 # McLoving roadmap
 
-As of 2026-09-25, protected `main` at `1b0da107`.
+Written 2026-09-25 from a snapshot of the execution board and ADRs at commit
+`1b0da107`. That is the snapshot this file was derived from, not a claim about
+the current head of `main`; later commits may have moved the board.
 
 This roadmap is a reading aid. It lines up the objectives recorded in
 [ADR 0016](docs/adr/0016-product-parity-before-migration-authority.md) and the
