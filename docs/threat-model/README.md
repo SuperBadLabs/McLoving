@@ -1317,3 +1317,19 @@ does not carry its termination through finalization. The published tree is
 owner-writable by design, and plain process steps remain uncontained
 (`SEC-005`).
 
+
+## HYG-003 candidate no-change assessment
+
+This hygiene change reviews the documentation side of TM-052's merge-authority
+boundary. A stale statement that a prior commit is still the current verified
+head can cause a custodian to skip the required exact-main Foundation and
+Windows observation. The proposed mitigation is a bounded repository text
+check for live-head and discharged-gate assertions, plus a written convention
+for external GitHub runs and unrecorded owner decisions. Historical dated
+observations are retained. Focused historical negative tests and a current-tree
+false-alarm check provide candidate verification in
+`docs/evidence/HYG-003_SECURITY_REVIEW.md`. The technical branch-protection and
+workflow mitigations in TM-052 do not change. Residual risk remains differently
+phrased prose and external state changing after the local check; the live
+exact-head readback is still mandatory. HYG-003 is `ACTIVE`; this section is not
+a closure attribution or independent review receipt.
