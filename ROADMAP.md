@@ -86,8 +86,8 @@ What stands in the way:
    refuses to dispatch a ticket whose dependencies are not `DONE`, so neither
    can take a slot until the ten-push count completes. As written, the count
    has to be collected with the current acquirer (operator cleanup included),
-   or the owner changes those two dependencies so the fixes can land first.
-   That is a board decision; this file does not make it.
+   or the owner changes those two rows so the fixes can land first (see
+   Gaps). That is a board decision; this file does not make it.
 
 `DOGFOOD-001` stops a push being delivered twice when the deployment switches
 between public hook and bridge mode, and makes `verify-lanes.py` compare
@@ -172,8 +172,16 @@ different; see below.
   release lanes wait on it; naming
   it, and the pipeline it would move first, would give Phase 3 a target.
 - **`AGENT-013` and `DOGFOOD-001` are gated on the ticket they unblock.** See
-  Phase 1: re-pointing their dependency from `PAR-005` to its merged pull
-  request would let the checkout fixes land before the ten-push count.
+  Phase 1. The board verifier reads dependencies only as ticket IDs in the
+  "Depends on" cell, so a pull request cannot stand in for `PAR-005` there:
+  writing #152 alone silently drops the edge, and leaving `PAR-005` anywhere
+  in the cell keeps blocking dispatch. A representable change is to replace
+  `PAR-005` in both rows with the `DONE` ticket whose code each one hardens
+  (`PAR-012` for the acquirer, `PAR-001` for the webhook ingress), keep the
+  already-merged implementation as the lane's start gate ("`PAR-005` merged as
+  `1b0da107`" in the parallel-lanes table, where it already reads "`PAR-005`
+  merged"). Applied to a scratch copy of the board at `1b0da107`, that
+  two-cell change passes `scripts/verify-execution-board.py` unchanged.
 - **`GROOVY-001`'s residual points at a ticket that is not filed.** Its board
   row hands the malformed-quoting negative fixture to "the compiler-exposure
   ticket of the parity phase", but no parity ticket covers compiler exposure.
