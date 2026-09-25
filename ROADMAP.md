@@ -35,7 +35,7 @@ Progress is reported as **distance**: the count of unclosed tickets up to
 | 0 | Durable core and the first parity tickets | Done |
 | 1 | McLoving builds itself (`PAR-005`) | Active |
 | 2 | Finish the parity chain (`PAR-003`, `PAR-002`, `PAR-015`) | Next, serial |
-| 2b | Hardening follow-ups from parity review | Parallel, any time |
+| 2b | Hardening follow-ups from parity review | Parallel, any time; `HYG-003` coordinated with phase closures |
 | 3 | Production readiness | `SECRET-002` can start now, `SEC-005` after it; release rows wait on re-derivation |
 | 4 | Migration authority, new web UI, release campaigns | Deferred |
 
