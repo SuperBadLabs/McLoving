@@ -37,11 +37,10 @@ list --workflow Foundation --branch main`: the one run of the commit
 created within fifteen minutes after the push time the bridge recorded);
 `McLoving` is `mcloving status` for the dogfood build the same push was
 admitted as. The count of
-consecutive matches is the acceptance. A push the branch
-moved past before its build ran fails its checkout as `revision_mismatch`
-(the acquirer fetches the branch and requires it to still resolve to the
-pushed commit); such a row is a mismatch, not a match, until `AGENT-013`
-fetches the exact object.
+consecutive matches is the acceptance. A push the branch moved past before
+its build ran still checks out the pushed commit once `AGENT-013` fetches
+that object by id (Foundation's behaviour); before that fix such a row failed
+as `revision_mismatch` and counted as a mismatch.
 
 | # | Commit | Build created (UTC) | Foundation run | Foundation | McLoving build | McLoving | Match |
 |---|---|---|---|---|---|---|---|
