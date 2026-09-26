@@ -731,7 +731,6 @@ async fn a_session_bound_caller_is_revalidated_under_the_whole_predicate() {
     );
 }
 
-
 #[tokio::test]
 async fn mapped_policy_generation_is_reauthorized_under_the_policy_lock() {
     let Some(admin) = test_store().await else {
@@ -903,11 +902,7 @@ async fn mapped_policy_generation_is_reauthorized_under_the_policy_lock() {
             &tenant,
             3,
             Some(2),
-            vec![service_mapping(
-                Uuid::new_v4(),
-                service_id,
-                configure_again,
-            )],
+            vec![service_mapping(Uuid::new_v4(), service_id, configure_again)],
         ))
         .await
         .expect("install generation 3 with ProjectConfigure");

@@ -108,9 +108,9 @@ impl MembershipAuthority {
             Self::Delegated {
                 caller: None,
                 policy_generation: Some(_),
-            } => denied(
-                "a mapped-policy membership write requires the caller's durable credential",
-            ),
+            } => {
+                denied("a mapped-policy membership write requires the caller's durable credential")
+            }
             Self::Delegated {
                 caller: Some(caller),
                 policy_generation: None,
@@ -744,9 +744,7 @@ async fn reauthorize_mapped_configure(
     .fetch_optional(&mut **tx)
     .await?;
     if allowed.is_none() {
-        return denied(
-            "the caller's imported ProjectConfigure grant is no longer current",
-        );
+        return denied("the caller's imported ProjectConfigure grant is no longer current");
     }
     Ok(())
 }
