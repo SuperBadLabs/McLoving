@@ -591,8 +591,7 @@ async fn exact_revision_replay_later_commit_and_sparse_truth() {
         first
     );
     assert_eq!(
-        historical_receipt.content_sha256,
-        receipt.content_sha256,
+        historical_receipt.content_sha256, receipt.content_sha256,
         "superseded push must still build the pushed commit"
     );
     let historical_exact = historical_receipt.repository_trees[0].resolved_commit == first
@@ -624,7 +623,6 @@ async fn exact_revision_replay_later_commit_and_sparse_truth() {
     }
 }
 
-
 #[tokio::test]
 async fn killed_acquisition_leftovers_are_reclaimed_by_the_next() {
     use std::os::unix::fs::PermissionsExt as _;
@@ -634,7 +632,10 @@ async fn killed_acquisition_leftovers_are_reclaimed_by_the_next() {
     root.write("README.md", b"reclaim\n");
     // Enough files that a mid-materialization kill would leave a partial stage.
     for index in 0..32 {
-        root.write(&format!("src/f{index}.txt"), format!("blob-{index}\n").as_bytes());
+        root.write(
+            &format!("src/f{index}.txt"),
+            format!("blob-{index}\n").as_bytes(),
+        );
     }
     let commit = root.commit("reclaim");
     let context = Context::new(&root, Vec::new(), Vec::new(), false).await;
@@ -710,16 +711,18 @@ async fn killed_acquisition_leftovers_are_reclaimed_by_the_next() {
 
     // A distinct acquisition id against the same binding also succeeds when
     // only transport/stage strays remain (claim already cleared).
-    let stage2 = context
-        .config
-        .output_root
-        .join(format!(".stage-{}-{}", Uuid::new_v4(), Uuid::new_v4()));
+    let stage2 =
+        context
+            .config
+            .output_root
+            .join(format!(".stage-{}-{}", Uuid::new_v4(), Uuid::new_v4()));
     std::fs::create_dir_all(stage2.join("tree")).unwrap();
     std::fs::set_permissions(&stage2, std::fs::Permissions::from_mode(0o500)).unwrap();
-    let transport2 = context
-        .config
-        .transport_root
-        .join(format!(".transport-{}-{}", Uuid::new_v4(), Uuid::new_v4()));
+    let transport2 = context.config.transport_root.join(format!(
+        ".transport-{}-{}",
+        Uuid::new_v4(),
+        Uuid::new_v4()
+    ));
     std::fs::create_dir_all(&transport2).unwrap();
     let next = context.request(&commit);
     context
@@ -729,6 +732,80 @@ async fn killed_acquisition_leftovers_are_reclaimed_by_the_next() {
         .expect("binding recovers for a fresh acquisition id");
 }
 
+#[tokio::test]
+async fn exact_commit_only_reachable_from_other_ref_is_refused() {
+    // allowed_ref_prefixes admits only refs/heads/main. A commit that exists
+    // solely on refs/heads/other must not be fetchable by pairing that SHA with
+    // the allowed authenticated_ref name.
+    let repositories = tempfile::tempdir().expect("repositories tempdir");
+    let root = RepositoryFixture::new(repositories.path(), "root");
+    root.write("README.md", b"main-only\n");
+    let main_commit = root.commit("main");
+    run_git(&root.work, ["checkout", "-b", "other"]);
+    root.write("other.txt", b"secret-other\n");
+    run_git(&root.work, ["add", "--all"]);
+    run_git(&root.work, ["commit", "-m", "other"]);
+    let other_commit = git_output(&root.work, ["rev-parse", "HEAD"]);
+    run_git(&root.work, ["push", "--force", "origin", "other"]);
+    run_git(&root.work, ["checkout", "main"]);
+    assert_ne!(main_commit, other_commit);
+
+    let context = Context::new(&root, Vec::new(), Vec::new(), false).await;
+    let mut config = context.config.clone();
+    config.allowed_ref_prefixes = vec!["refs/heads/main".to_owned()];
+    let acquirer = context.acquirer_for(config).await;
+
+    let mut request = context.request(&other_commit);
+    request.authenticated_ref = "refs/heads/main".to_owned();
+    request.expected_config_sha256 = acquirer.config_sha256().to_owned();
+    let error = acquirer
+        .acquire(&request)
+        .await
+        .expect_err("commit only on other ref must not bind to main");
+    assert!(
+        matches!(error, SourceError::RevisionMismatch),
+        "expected revision_mismatch, got {error:?}"
+    );
+
+    // Control: the same SHA with its true admitted ref still works when that
+    // ref prefix is allowed.
+    let mut allowed = context.config.clone();
+    allowed.allowed_ref_prefixes = vec!["refs/heads/other".to_owned()];
+    let other_acquirer = context.acquirer_for(allowed).await;
+    let mut ok = context.request(&other_commit);
+    ok.authenticated_ref = "refs/heads/other".to_owned();
+    ok.expected_config_sha256 = other_acquirer.config_sha256().to_owned();
+    other_acquirer
+        .acquire(&ok)
+        .await
+        .expect("commit on its own admitted ref must succeed");
+}
+
+#[tokio::test]
+async fn reclaim_preserves_live_waiting_helper_runtime_dirs() {
+    // Two acquirers share an output root. The first to reclaim under the lock
+    // must not delete the waiting helper's .runtime-* / .git-exec-* directories.
+    let repositories = tempfile::tempdir().expect("repositories tempdir");
+    let root = RepositoryFixture::new(repositories.path(), "root");
+    root.write("README.md", b"live-helper\n");
+    let commit = root.commit("live-helper");
+    let context = Context::new(&root, Vec::new(), Vec::new(), false).await;
+    let waiting = context.second_acquirer().await;
+
+    let first = context
+        .acquirer
+        .acquire(&context.request(&commit))
+        .await
+        .expect("first acquisition under shared output root");
+    assert!(first.materialized_files >= 1);
+
+    let second = waiting
+        .acquire(&context.request(&commit))
+        .await
+        .expect("waiting helper runtime must survive peer reclaim");
+    assert!(second.materialized_files >= 1);
+    assert_ne!(first.acquisition_id, second.acquisition_id);
+}
 
 #[tokio::test]
 async fn sealed_helper_killed_mid_materialization_is_reclaimed() {
@@ -923,13 +1000,10 @@ async fn sealed_helper_killed_mid_materialization_is_reclaimed() {
     // closure must come from this test executable (as Context::new does), not
     // from the helper binary we just killed.
     let test_exe = std::env::current_exe().expect("test executable");
-    let reclaim_runtime = inspect_runtime_closure(&[
-        git.clone(),
-        git_remote_https.clone(),
-        test_exe.clone(),
-    ])
-    .await
-    .unwrap();
+    let reclaim_runtime =
+        inspect_runtime_closure(&[git.clone(), git_remote_https.clone(), test_exe.clone()])
+            .await
+            .unwrap();
     let mut reclaim_config = config;
     reclaim_config.runtime_closure = reclaim_runtime.clone();
     reclaim_config.runtime_closure_sha256 = runtime_closure_digest(&reclaim_runtime).unwrap();

@@ -23,12 +23,15 @@ the host under its own containment, never in the image, and the tree lands in
 the workspace the image steps see at `/workspace`. The literal-shell migration
 planner remains process-only and refuses checkout stages.
 
-The acquirer fetches `commit` by object id and requires `FETCH_HEAD` to equal
-that id before publication. A ref that has moved on still materializes the
-requested commit when the object is reachable (GitHub serves reachable commits
-by id), matching Foundation; it is never checked out at the ref's new tip.
-`revision_mismatch` remains only when the fetched object is not the requested
-commit. Webhook and parameter plumbing that supplies the commit is `PAR-001`'s.
+The acquirer fetches `commit` by object id together with the authenticated
+ref tip, requires the fetched commit object to equal the requested id, and
+requires that id to equal or be an ancestor of the authenticated ref tip so
+`allowed_ref_prefixes` cannot be bypassed by pairing an allowed ref name with a
+SHA only reachable from another ref. A ref that has moved on still materializes
+the requested commit when it remains on that ref's history, matching Foundation;
+it is never checked out at the ref's new tip. `revision_mismatch` remains when
+the fetched object is not the requested commit or is not on the authenticated
+ref's history. Webhook and parameter plumbing that supplies the commit is `PAR-001`'s.
 Blob materialization uses one `git cat-file --batch` process per repository
 tree so a multi-thousand-file checkout finishes in seconds while keeping
 per-blob size and secret-marker bounds. A killed acquisition's stage, transport,

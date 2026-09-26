@@ -1455,15 +1455,24 @@ impl SourceAcquirer {
             OsString::from("--force"),
         ];
         arguments.push(OsString::from(format!("--depth={depth}")));
-        // Fetch the requested object by id. GitHub (and any upload-pack that
-        // serves reachable commits by id) returns that exact commit even when
-        // authenticated_ref has moved on since the request was signed, so a
-        // push superseded before its build ran still materializes what was
-        // pushed. FETCH_HEAD must still equal exact_commit below.
+        // Fetch the requested object by id and the authenticated ref tip into
+        // private local refs. Naming only the SHA would let a job pair an
+        // allowed ref name with a commit reachable solely from a disallowed
+        // ref (upload-pack serves any reachable want). Binding both, then
+        // requiring exact_commit to equal or be an ancestor of the admitted
+        // ref tip, keeps allowed_ref_prefixes meaningful while still
+        // materializing a superseded push whose commit remains on that ref's
+        // history. The wanted ref must equal exact_commit below.
+        let wanted_ref = "refs/mcloving/wanted";
+        let authenticated_local_ref = "refs/mcloving/authenticated";
         arguments.extend([
             OsString::from("--"),
             OsString::from("origin"),
-            OsString::from(&repository.exact_commit),
+            OsString::from(format!("+{}:{wanted_ref}", repository.exact_commit)),
+            OsString::from(format!(
+                "+{}:{authenticated_local_ref}",
+                repository.authenticated_ref
+            )),
         ]);
         let fetch = self
             .run_credential_git_until(
@@ -1484,7 +1493,7 @@ impl SourceAcquirer {
                     git_dir.as_os_str().to_owned(),
                     OsString::from("rev-parse"),
                     OsString::from("--verify"),
-                    OsString::from("FETCH_HEAD^{commit}"),
+                    OsString::from(format!("{wanted_ref}^{{commit}}")),
                 ],
                 256,
             )
@@ -1492,7 +1501,130 @@ impl SourceAcquirer {
         if resolved != repository.exact_commit {
             return Err(SourceError::RevisionMismatch);
         }
+        self.ensure_exact_commit_on_authenticated_ref(
+            repository,
+            git_dir,
+            wanted_ref,
+            authenticated_local_ref,
+            depth,
+            deadline,
+            transport_root,
+        )
+        .await?;
         Ok(())
+    }
+
+    async fn ensure_exact_commit_on_authenticated_ref(
+        &self,
+        repository: &RepositoryWork,
+        git_dir: &Path,
+        _wanted_ref: &str,
+        authenticated_local_ref: &str,
+        depth: u32,
+        deadline: i64,
+        transport_root: &Path,
+    ) -> Result<(), SourceError> {
+        if self
+            .commit_is_on_authenticated_ref(
+                git_dir,
+                &repository.exact_commit,
+                authenticated_local_ref,
+            )
+            .await?
+        {
+            return Ok(());
+        }
+        // A tip that advanced beyond the request depth can leave the connecting
+        // parents missing from a shallow fetch even when the commit is still on
+        // the admitted ref. One refetch at the configured depth bound fills the
+        // ancestry window; a commit only reachable from another ref still fails.
+        if depth < self.config.max_depth {
+            self.ensure_before_deadline(deadline)?;
+            let deepen = self
+                .run_credential_git_until(
+                    vec![
+                        OsString::from("--git-dir"),
+                        git_dir.as_os_str().to_owned(),
+                        OsString::from("fetch"),
+                        OsString::from("--filter=blob:none"),
+                        OsString::from("--no-tags"),
+                        OsString::from("--force"),
+                        OsString::from(format!("--depth={}", self.config.max_depth)),
+                        OsString::from("--"),
+                        OsString::from("origin"),
+                        OsString::from(format!(
+                            "+{}:{authenticated_local_ref}",
+                            repository.authenticated_ref
+                        )),
+                    ],
+                    MAX_GIT_METADATA_BYTES,
+                    &repository.binding.repository_url,
+                    deadline,
+                    transport_root,
+                )
+                .await;
+            self.ensure_transport_quota(transport_root).await?;
+            deepen?;
+            self.ensure_before_deadline(deadline)?;
+            if self
+                .commit_is_on_authenticated_ref(
+                    git_dir,
+                    &repository.exact_commit,
+                    authenticated_local_ref,
+                )
+                .await?
+            {
+                return Ok(());
+            }
+        }
+        Err(SourceError::RevisionMismatch)
+    }
+
+    async fn commit_is_on_authenticated_ref(
+        &self,
+        git_dir: &Path,
+        exact_commit: &str,
+        authenticated_local_ref: &str,
+    ) -> Result<bool, SourceError> {
+        let auth_tip = self
+            .git_text(
+                vec![
+                    OsString::from("--git-dir"),
+                    git_dir.as_os_str().to_owned(),
+                    OsString::from("rev-parse"),
+                    OsString::from("--verify"),
+                    OsString::from(format!("{authenticated_local_ref}^{{commit}}")),
+                ],
+                256,
+            )
+            .await?;
+        if auth_tip == exact_commit {
+            return Ok(true);
+        }
+        // Non-empty when exact_commit is an ancestor of the admitted tip and
+        // the connecting objects are present locally. Use the portable
+        // `A..B` + `--ancestry-path` form (not `--ancestry-path=A`) so older
+        // sealed git builds behave the same as current ones.
+        // Treat SourceUnavailable as "not yet proven" so a shallow hole can
+        // deepen and retry; other errors still fail closed.
+        match self
+            .git_text(
+                vec![
+                    OsString::from("--git-dir"),
+                    git_dir.as_os_str().to_owned(),
+                    OsString::from("rev-list"),
+                    OsString::from("-1"),
+                    OsString::from("--ancestry-path"),
+                    OsString::from(format!("{exact_commit}..{authenticated_local_ref}")),
+                ],
+                256,
+            )
+            .await
+        {
+            Ok(on_path) => Ok(!on_path.is_empty()),
+            Err(SourceError::SourceUnavailable) => Ok(false),
+            Err(error) => Err(error),
+        }
     }
 
     async fn list_tree(
@@ -1593,31 +1725,24 @@ impl SourceAcquirer {
             OsString::from("--batch"),
         ];
         let mut session = self
-            .spawn_credential_git_session(
-                arguments,
-                repository_url,
-                deadline,
-                transport_root,
-            )
+            .spawn_credential_git_session(arguments, repository_url, deadline, transport_root)
             .await?;
         let max_file_bytes = usize::try_from(self.config.max_file_bytes)
             .unwrap_or(usize::MAX)
             .min(usize::MAX - 1);
+        // Any early return drops `session`; GitBatchSession::Drop terminates the
+        // process group so a failed read_batch_object cannot leak helpers.
         for blob in pending {
             self.ensure_before_deadline(deadline)?;
-            session
-                .write_line(blob.object_id.as_bytes())
-                .await?;
-            let (object_id, object_type, bytes) = session
-                .read_batch_object(self, max_file_bytes)
-                .await?;
+            session.write_line(blob.object_id.as_bytes()).await?;
+            let (object_id, object_type, bytes) =
+                session.read_batch_object(self, max_file_bytes).await?;
             if object_id != blob.object_id || object_type != "blob" {
                 session.terminate().await?;
                 return Err(SourceError::UnsafeTree);
             }
             self.ensure_transport_quota(transport_root).await?;
-            let blob_bytes =
-                u64::try_from(bytes.len()).map_err(|_| SourceError::LimitExceeded)?;
+            let blob_bytes = u64::try_from(bytes.len()).map_err(|_| SourceError::LimitExceeded)?;
             if blob_bytes > self.config.max_file_bytes {
                 session.terminate().await?;
                 return Err(SourceError::LimitExceeded);
@@ -1657,10 +1782,7 @@ impl SourceAcquirer {
         Ok(())
     }
 
-    async fn reclaim_orphaned_output_state(
-        &self,
-        acquisition_id: Uuid,
-    ) -> Result<(), SourceError> {
+    async fn reclaim_orphaned_output_state(&self, acquisition_id: Uuid) -> Result<(), SourceError> {
         #[cfg(unix)]
         {
             reclaim_named_output_leftovers(
@@ -1677,7 +1799,6 @@ impl SourceAcquirer {
             Err(SourceError::InvalidConfig)
         }
     }
-
 
     fn reserve_manifest_path(
         &self,
@@ -1786,7 +1907,6 @@ impl SourceAcquirer {
         .await
     }
 
-
     async fn spawn_credential_git_session(
         &self,
         arguments: Vec<OsString>,
@@ -1814,13 +1934,11 @@ impl SourceAcquirer {
         if now >= deadline_unix_ms {
             return Err(SourceError::ExpiredRequest);
         }
-        let remaining_ms = u64::try_from(deadline_unix_ms - now)
-            .map_err(|_| SourceError::ExpiredRequest)?;
+        let remaining_ms =
+            u64::try_from(deadline_unix_ms - now).map_err(|_| SourceError::ExpiredRequest)?;
         let remaining = Duration::from_millis(remaining_ms);
-        let (timeout, deadline_limited) = (
-            command_timeout.min(remaining),
-            remaining <= command_timeout,
-        );
+        let (timeout, deadline_limited) =
+            (command_timeout.min(remaining), remaining <= command_timeout);
         let timeout_milliseconds =
             i64::try_from(timeout.as_millis()).map_err(|_| SourceError::StateUnavailable)?;
         let credential_deadline_unix_ms = wall_anchor_unix_ms
@@ -1985,15 +2103,19 @@ impl SourceAcquirer {
         let stdin = child.stdin.take().ok_or(SourceError::StateUnavailable)?;
         let stdout = child.stdout.take().ok_or(SourceError::StateUnavailable)?;
         let stderr = child.stderr.take().ok_or(SourceError::StateUnavailable)?;
+        // Drain stderr while blobs are read so a chatty promisor/helper cannot
+        // fill the pipe and stall stdout headers until the deadline.
+        let stderr_task = tokio::spawn(read_bounded(stderr, MAX_GIT_STDERR_BYTES));
         Ok(GitBatchSession {
             child,
-            stdin,
+            stdin: Some(stdin),
             stdout,
-            stderr,
+            stderr_task: Some(stderr_task),
             process_group_id,
             command_deadline,
             deadline_limited,
             transport_root: transport_root.to_owned(),
+            terminate_on_drop: true,
         })
     }
 
@@ -4567,30 +4689,31 @@ fn validate_transport_filesystem(
     }
 }
 
-
 struct GitBatchSession {
     child: tokio::process::Child,
-    stdin: tokio::process::ChildStdin,
+    stdin: Option<tokio::process::ChildStdin>,
     stdout: tokio::process::ChildStdout,
-    stderr: tokio::process::ChildStderr,
+    stderr_task: Option<tokio::task::JoinHandle<Result<Vec<u8>, std::io::Error>>>,
     process_group_id: Option<i32>,
     command_deadline: tokio::time::Instant,
     deadline_limited: bool,
     transport_root: PathBuf,
+    terminate_on_drop: bool,
 }
 
 impl GitBatchSession {
     async fn write_line(&mut self, object_id: &[u8]) -> Result<(), SourceError> {
         self.ensure_time()?;
-        self.stdin
+        let stdin = self.stdin.as_mut().ok_or(SourceError::SourceUnavailable)?;
+        stdin
             .write_all(object_id)
             .await
             .map_err(|_| SourceError::SourceUnavailable)?;
-        self.stdin
+        stdin
             .write_all(b"\n")
             .await
             .map_err(|_| SourceError::SourceUnavailable)?;
-        self.stdin
+        stdin
             .flush()
             .await
             .map_err(|_| SourceError::SourceUnavailable)?;
@@ -4631,10 +4754,7 @@ impl GitBatchSession {
         Ok((object_id, object_type, bytes))
     }
 
-    async fn read_header_line(
-        &mut self,
-        acquirer: &SourceAcquirer,
-    ) -> Result<String, SourceError> {
+    async fn read_header_line(&mut self, acquirer: &SourceAcquirer) -> Result<String, SourceError> {
         let mut line = Vec::new();
         loop {
             self.ensure_time()?;
@@ -4731,9 +4851,11 @@ impl GitBatchSession {
             }
         };
         // Closing stdin ends the batch stream; git exits 0 after draining.
-        drop(self.stdin);
+        drop(self.stdin.take());
         if command_deadline <= tokio::time::Instant::now() {
             terminate_child(&mut self.child, process_group_id).await?;
+            self.abort_stderr_task().await;
+            self.terminate_on_drop = false;
             return Err(timeout_error());
         }
         let remaining = command_deadline
@@ -4741,28 +4863,33 @@ impl GitBatchSession {
             .unwrap_or(Duration::ZERO);
         if remaining.is_zero() {
             terminate_child(&mut self.child, process_group_id).await?;
+            self.abort_stderr_task().await;
+            self.terminate_on_drop = false;
             return Err(timeout_error());
         }
-        // Bound residual stderr so a noisy helper cannot pin memory.
-        let stderr_task = tokio::spawn(read_bounded(self.stderr, MAX_GIT_STDERR_BYTES));
         let status = match tokio::time::timeout(remaining, self.child.wait()).await {
             Ok(Ok(status)) => status,
             Ok(Err(_)) => {
-                stderr_task.abort();
-                let _ = stderr_task.await;
+                self.abort_stderr_task().await;
+                self.terminate_on_drop = false;
                 return Err(SourceError::SourceUnavailable);
             }
             Err(_) => {
                 terminate_child(&mut self.child, process_group_id).await?;
-                stderr_task.abort();
-                let _ = stderr_task.await;
+                self.abort_stderr_task().await;
+                self.terminate_on_drop = false;
                 return Err(timeout_error());
             }
         };
+        let stderr_task = self
+            .stderr_task
+            .take()
+            .ok_or(SourceError::SourceUnavailable)?;
         let _ = stderr_task
             .await
             .map_err(|_| SourceError::SourceUnavailable)?
             .map_err(|_| SourceError::SourceUnavailable)?;
+        self.terminate_on_drop = false;
         if !status.success() {
             return Err(SourceError::SourceUnavailable);
         }
@@ -4770,7 +4897,17 @@ impl GitBatchSession {
     }
 
     async fn terminate(mut self) -> Result<(), SourceError> {
-        terminate_child(&mut self.child, self.process_group_id).await
+        self.abort_stderr_task().await;
+        let result = terminate_child(&mut self.child, self.process_group_id).await;
+        self.terminate_on_drop = false;
+        result
+    }
+
+    async fn abort_stderr_task(&mut self) {
+        if let Some(stderr_task) = self.stderr_task.take() {
+            stderr_task.abort();
+            let _ = stderr_task.await;
+        }
     }
 
     fn ensure_time(&self) -> Result<(), SourceError> {
@@ -4787,6 +4924,28 @@ impl GitBatchSession {
         } else {
             SourceError::SourceUnavailable
         }
+    }
+}
+
+impl Drop for GitBatchSession {
+    fn drop(&mut self) {
+        if !self.terminate_on_drop {
+            return;
+        }
+        if let Some(stderr_task) = self.stderr_task.take() {
+            stderr_task.abort();
+        }
+        #[cfg(unix)]
+        if let Some(process_group_id) = self.process_group_id {
+            match nix::sys::signal::killpg(
+                nix::unistd::Pid::from_raw(process_group_id),
+                nix::sys::signal::Signal::SIGKILL,
+            ) {
+                Ok(()) | Err(nix::errno::Errno::ESRCH) => {}
+                Err(_) => {}
+            }
+        }
+        let _ = self.child.start_kill();
     }
 }
 
@@ -4819,6 +4978,47 @@ async fn reclaim_orphaned_transport_state(root: &Path) -> Result<(), SourceError
     Ok(())
 }
 
+fn output_path_held_open(path: &Path) -> bool {
+    // Live helpers keep an O_DIRECTORY fd on their `.runtime-*` / `.git-exec-*`
+    // directories. Reclaim must not delete those while another waiting helper
+    // shares the output root; only debris from killed attempts (no open fd)
+    // is eligible. Scanning /proc is Linux-only; elsewhere refuse to reclaim
+    // named runtime/git-exec leftovers so we never delete a live peer's dirs.
+    #[cfg(target_os = "linux")]
+    {
+        let Ok(canonical) = std::fs::canonicalize(path) else {
+            return false;
+        };
+        let Ok(proc_entries) = std::fs::read_dir("/proc") else {
+            return true;
+        };
+        for entry in proc_entries.flatten() {
+            let name = entry.file_name();
+            let name_text = name.to_string_lossy();
+            if !name_text.bytes().all(|byte| byte.is_ascii_digit()) {
+                continue;
+            }
+            let Ok(fds) = std::fs::read_dir(entry.path().join("fd")) else {
+                continue;
+            };
+            for fd in fds.flatten() {
+                let Ok(target) = std::fs::read_link(fd.path()) else {
+                    continue;
+                };
+                if target == canonical {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = path;
+        true
+    }
+}
+
 async fn reclaim_named_output_leftovers(
     root: &Path,
     acquisition_id: Uuid,
@@ -4848,9 +5048,11 @@ async fn reclaim_named_output_leftovers(
         let reclaim = name_text.starts_with(".stage-")
             || name_text.starts_with(".expired-")
             || (name_text.starts_with(".runtime-")
-                && keep_runtime != Some(path.as_path()))
+                && keep_runtime != Some(path.as_path())
+                && !output_path_held_open(&path))
             || (name_text.starts_with(".git-exec-")
-                && keep_git_exec != Some(path.as_path()));
+                && keep_git_exec != Some(path.as_path())
+                && !output_path_held_open(&path));
         if reclaim {
             remove.push(path);
         }
@@ -5986,5 +6188,34 @@ mod tests {
                 "ordinary runtime owner regression: correct-hash caller-owned regular file refused"
             );
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn reclaim_skips_runtime_dirs_with_open_directory_fds() {
+        use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+
+        let root = tempfile::tempdir().expect("reclaim root");
+        let acquisition_id = Uuid::new_v4();
+        let live = root.path().join(format!(".runtime-{}", Uuid::new_v4()));
+        let dead = root.path().join(format!(".runtime-{}", Uuid::new_v4()));
+        for path in [&live, &dead] {
+            std::fs::create_dir(path).unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o500)).unwrap();
+        }
+        let _hold = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(nix::libc::O_DIRECTORY | nix::libc::O_NOFOLLOW)
+            .open(&live)
+            .expect("hold live runtime directory open");
+
+        reclaim_named_output_leftovers(root.path(), acquisition_id, None, None)
+            .await
+            .expect("reclaim");
+        assert!(live.exists(), "live helper runtime must be preserved");
+        assert!(
+            !dead.exists(),
+            "killed-attempt runtime debris must be reclaimed"
+        );
     }
 }
