@@ -18,6 +18,7 @@ use sqlx::{Postgres, Transaction};
 use uuid::Uuid;
 
 use super::audit::append_audit_record;
+use super::authorization_mapping::authorization_policy_lock_key;
 use super::authz::ProjectRole;
 use super::identity::lock_identity_provider;
 use super::{Store, StoreError};
@@ -50,7 +51,17 @@ pub enum MembershipAuthority {
     /// credential that passed the project's configure action: acts as an
     /// Admin and never as an Owner. A durable caller is revalidated like a
     /// principal; a static credential names no identity and is not.
-    Delegated { caller: Option<DurableCaller> },
+    ///
+    /// When the caller was authorized through an imported project policy,
+    /// `policy_generation` binds the generation that authorized
+    /// `ProjectConfigure`. The write takes the authorization-policy lock,
+    /// requires that generation still current, and reauthorizes the grant
+    /// inside the transaction so a policy install that removes the grant
+    /// cannot race a role mutation.
+    Delegated {
+        caller: Option<DurableCaller>,
+        policy_generation: Option<i64>,
+    },
 }
 
 /// The authority's role in the project as resolved under the lock: `None`
@@ -65,9 +76,10 @@ struct ResolvedAuthority {
 impl MembershipAuthority {
     fn caller_identity(self) -> Option<Uuid> {
         match self {
-            Self::Bootstrap | Self::Delegated { caller: None } => None,
+            Self::Bootstrap | Self::Delegated { caller: None, .. } => None,
             Self::Delegated {
                 caller: Some(caller),
+                ..
             }
             | Self::Principal(caller) => Some(caller.identity_id),
         }
@@ -85,14 +97,43 @@ impl MembershipAuthority {
                 role: None,
                 identity_id: None,
             }),
-            Self::Delegated { caller: None } => Ok(ResolvedAuthority {
+            Self::Delegated {
+                caller: None,
+                policy_generation: None,
+            } => Ok(ResolvedAuthority {
                 kind: "delegated",
                 role: Some(ProjectRole::Admin),
                 identity_id: None,
             }),
             Self::Delegated {
+                caller: None,
+                policy_generation: Some(_),
+            } => denied(
+                "a mapped-policy membership write requires the caller's durable credential",
+            ),
+            Self::Delegated {
                 caller: Some(caller),
+                policy_generation: None,
             } => {
+                caller.revalidate(tx, organization_id).await?;
+                Ok(ResolvedAuthority {
+                    kind: "delegated",
+                    role: Some(ProjectRole::Admin),
+                    identity_id: Some(caller.identity_id),
+                })
+            }
+            Self::Delegated {
+                caller: Some(caller),
+                policy_generation: Some(policy_generation),
+            } => {
+                reauthorize_mapped_configure(
+                    tx,
+                    organization_id,
+                    project_id,
+                    caller.identity_id,
+                    policy_generation,
+                )
+                .await?;
                 caller.revalidate(tx, organization_id).await?;
                 Ok(ResolvedAuthority {
                     kind: "delegated",
@@ -615,6 +656,97 @@ fn validate_text(value: &str, label: &str, max: usize) -> Result<(), StoreError>
         return Err(StoreError::InvalidIdentityOperation(format!(
             "{label} is empty, non-canonical, or too long"
         )));
+    }
+    Ok(())
+}
+
+/// Under the authorization-policy lock (the same lock
+/// `install_authorization_policy` takes before it advances
+/// `current_generation`), requires the bound generation still current and
+/// the caller's imported `ProjectConfigure` decision still Allow under that
+/// generation's immutable mappings and provenance.
+async fn reauthorize_mapped_configure(
+    tx: &mut Transaction<'_, Postgres>,
+    organization_id: Uuid,
+    project_id: Uuid,
+    identity_id: Uuid,
+    expected_generation: i64,
+) -> Result<(), StoreError> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(authorization_policy_lock_key(organization_id, project_id))
+        .execute(&mut **tx)
+        .await?;
+    // The advisory lock above is the same lock install_authorization_policy
+    // takes for its whole transaction, so a plain SELECT is serialized
+    // against a generation advance. FOR UPDATE is not available to the
+    // runtime role (it has SELECT only on these tables).
+    let current = sqlx::query_scalar::<_, i64>(
+        "SELECT current_generation
+         FROM authorization_project_policies
+         WHERE organization_id = $1 AND project_id = $2",
+    )
+    .bind(organization_id)
+    .bind(project_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    if current != Some(expected_generation) {
+        return denied(
+            "the project's imported authorization policy changed after the caller authenticated",
+        );
+    }
+    let allowed = sqlx::query_scalar::<_, i32>(
+        "SELECT 1
+         FROM authorization_project_policies current_policy
+         JOIN authorization_policy_versions policy
+           ON policy.organization_id = current_policy.organization_id
+          AND policy.project_id = current_policy.project_id
+          AND policy.generation = current_policy.current_generation
+         JOIN authorization_principal_mappings mapping
+           ON mapping.organization_id = current_policy.organization_id
+          AND mapping.project_id = current_policy.project_id
+          AND mapping.policy_generation = current_policy.current_generation
+         JOIN authorization_action_grants grants
+           ON grants.organization_id = mapping.organization_id
+          AND grants.project_id = mapping.project_id
+          AND grants.policy_generation = mapping.policy_generation
+          AND grants.mapping_id = mapping.mapping_id
+         JOIN identities identity
+           ON identity.organization_id = mapping.organization_id
+          AND identity.id = mapping.target_identity_id
+         WHERE current_policy.organization_id = $1
+           AND current_policy.project_id = $2
+           AND current_policy.current_generation = $3
+           AND mapping.target_identity_id = $4
+           AND grants.action = 'project_configure'
+           AND grants.decision = 'allow'
+           AND identity.lifecycle_state = 'active'
+           AND identity.lifecycle_generation = mapping.target_lifecycle_generation
+           AND identity.group_generation = mapping.target_group_generation
+           AND identity.provider_id IS NOT DISTINCT FROM mapping.target_provider_id
+           AND identity.external_subject IS NOT DISTINCT FROM mapping.target_external_subject
+           AND (
+               identity.kind = 'service'
+               OR (
+                   identity.kind = 'human'
+                   AND identity.source_realm_digest = policy.source_realm_digest
+                   AND identity.source_identity_id = mapping.source_identity_id
+                   AND identity.source_membership_generation = mapping.source_membership_generation
+                   AND identity.alias_history = mapping.source_alias_history
+                   AND identity.provenance_digest = mapping.target_provenance_digest
+               )
+           )
+         LIMIT 1",
+    )
+    .bind(organization_id)
+    .bind(project_id)
+    .bind(expected_generation)
+    .bind(identity_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    if allowed.is_none() {
+        return denied(
+            "the caller's imported ProjectConfigure grant is no longer current",
+        );
     }
     Ok(())
 }

@@ -271,6 +271,29 @@ impl Store {
             grant_count,
         })
     }
+
+    /// The project's active imported authorization policy generation, if any.
+    /// Membership writers bind this into `MembershipAuthority::Delegated` when
+    /// the caller was authorized through mapped policy, then reauthorize it
+    /// under the authorization-policy lock inside the write transaction.
+    pub async fn authorization_policy_current_generation(
+        &self,
+        organization_id: Uuid,
+        project_id: Uuid,
+    ) -> Result<Option<i64>, StoreError> {
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        let generation = sqlx::query_scalar::<_, i64>(
+            "SELECT current_generation
+             FROM authorization_project_policies
+             WHERE organization_id = $1 AND project_id = $2",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(generation)
+    }
 }
 
 pub(super) fn authorization_policy_lock_key(organization_id: Uuid, project_id: Uuid) -> String {
