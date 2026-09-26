@@ -640,9 +640,14 @@ async fn killed_acquisition_leftovers_are_reclaimed_by_the_next() {
     let commit = root.commit("reclaim");
     let context = Context::new(&root, Vec::new(), Vec::new(), false).await;
     let killed_id = Uuid::new_v4();
+    let mut retry = context.request(&commit);
+    retry.acquisition_id = killed_id;
+    let retry_request_sha256 =
+        SourceAcquirer::request_sha256(&retry).expect("retry request digest");
 
     // Plant the debris a SIGKILL mid-materialization leaves: claim, stage,
     // transport tree, and stray runtime/git-exec directories that Drop never ran.
+    // Claim digest must match the retry so reclaim can drop it safely.
     let claim = context
         .config
         .output_root
@@ -651,7 +656,7 @@ async fn killed_acquisition_leftovers_are_reclaimed_by_the_next() {
         &claim,
         serde_json::to_vec(&serde_json::json!({
             "protocol_version": PROTOCOL_VERSION,
-            "request_sha256": "0".repeat(64),
+            "request_sha256": retry_request_sha256,
             "publication_deadline_unix_ms": now_ms() + 60_000,
         }))
         .unwrap(),
@@ -685,8 +690,6 @@ async fn killed_acquisition_leftovers_are_reclaimed_by_the_next() {
 
     // Same acquisition id as the killed attempt: reclaim drops the incomplete
     // claim and the next attempt succeeds.
-    let mut retry = context.request(&commit);
-    retry.acquisition_id = killed_id;
     let receipt = context
         .acquirer
         .acquire(&retry)
@@ -1025,6 +1028,23 @@ async fn sealed_helper_killed_mid_materialization_is_reclaimed() {
     retry.expected_git_sha256 = reclaim_config.git_executable_sha256.clone();
     retry.expected_git_remote_https_sha256 =
         reclaim_config.git_remote_https_executable_sha256.clone();
+    // The killed helper sealed a claim under its own implementation digest.
+    // Rebind the incomplete claim to this recovery request so reclaim can drop
+    // it without allowing a different-content id reuse.
+    let claim_path = output_root.join(format!("{acquisition_id}.claim.json"));
+    if claim_path.exists() {
+        let retry_digest = SourceAcquirer::request_sha256(&retry).expect("recovery request digest");
+        std::fs::write(
+            &claim_path,
+            serde_json::to_vec(&serde_json::json!({
+                "protocol_version": PROTOCOL_VERSION,
+                "request_sha256": retry_digest,
+                "publication_deadline_unix_ms": now_ms() + 60_000,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    }
     let receipt = acquirer
         .acquire(&retry)
         .await

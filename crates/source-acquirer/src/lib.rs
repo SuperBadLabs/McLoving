@@ -5094,10 +5094,12 @@ async fn reclaim_named_output_leftovers(
     // claim so the same id can retry without an operator — and only when the
     // claim still names this request's digest, so a reused id with different
     // content cannot silently replace another attempt's claim.
-    if claim.exists() && !published.exists() && saw_matching_stage {
-        if incomplete_claim_matches_request(&claim, request_sha256).await? {
-            let _ = tokio::fs::remove_file(&claim).await;
-        }
+    if claim.exists()
+        && !published.exists()
+        && saw_matching_stage
+        && incomplete_claim_matches_request(&claim, request_sha256).await?
+    {
+        let _ = tokio::fs::remove_file(&claim).await;
     }
     for path in remove {
         let metadata = tokio::fs::symlink_metadata(&path)
