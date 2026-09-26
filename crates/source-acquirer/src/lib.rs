@@ -1504,7 +1504,6 @@ impl SourceAcquirer {
         self.ensure_exact_commit_on_authenticated_ref(
             repository,
             git_dir,
-            wanted_ref,
             authenticated_local_ref,
             depth,
             deadline,
@@ -1518,7 +1517,6 @@ impl SourceAcquirer {
         &self,
         repository: &RepositoryWork,
         git_dir: &Path,
-        _wanted_ref: &str,
         authenticated_local_ref: &str,
         depth: u32,
         deadline: i64,
