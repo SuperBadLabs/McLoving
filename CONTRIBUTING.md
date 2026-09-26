@@ -15,6 +15,34 @@ behavior must remain explicit and must never be represented as successful.
 Use `codex/` for Codex implementation branches. Keep commits coherent and do
 not mix unrelated repairs into a ticket.
 
+## Claims that can expire
+
+Record a commit, workflow result, or governance decision as an observation with
+its date and scope. Do not turn that observation into a standing claim that the
+commit is the current protected head, that its successor-head gate is discharged,
+or that a ticket is startable now. Before starting work, query the live head and
+its Foundation and Windows Agent runs as the current handoff requires. A review
+or merge moves the head; the prior receipt then describes its parent.
+
+Keep derived table counts in their verifier constants. Historical prose may
+record a dated count with a fixed denominator, but comments beside a live
+constant must not repeat it. An external workflow ledger needs an explicit
+start and end time, an enumeration checked against the stated count, and a
+statement about later pull-request runs. A running PR's workflow count rises
+with each push, so a count without a closed window is not a durable receipt.
+
+For governance windows, re-read owner decisions before relying on an expiry
+date. An early lift or extension changes the decision before the printed date.
+After publishing a handoff or freeze through a pull request, observe the new
+protected-main commit's workflows and record those results separately. The
+pre-publication head cannot verify the commit that publishes its own receipt.
+
+The repository checks known text patterns and the recorded September 2026
+early lift. It cannot infer an owner decision that was never recorded here or
+query GitHub's evolving workflow history from a local verifier. Those cases
+require the live checks and dated receipts above; a green local gate does not
+claim to have performed them.
+
 ## Closing a ticket
 
 Two artifacts are checked mechanically by

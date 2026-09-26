@@ -27,6 +27,8 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+from stale_claims import expected_tables_comment_defects
+
 SCRIPTS = Path(__file__).resolve().parent
 REPOSITORY = SCRIPTS.parent
 # Importing the verifier by path would otherwise drop a version-specific
@@ -39,6 +41,26 @@ _spec = importlib.util.spec_from_file_location(
 VERIFY = importlib.util.module_from_spec(_spec)
 assert _spec.loader is not None
 _spec.loader.exec_module(VERIFY)
+
+
+class StaleCountCommentTests(unittest.TestCase):
+    def test_pre_hyg003_comment_is_refused(self) -> None:
+        # d534a1b5:scripts/verify-ticket-closure-receipts.py, immediately
+        # above EXPECTED_TABLES before the first ratchet raise made it stale.
+        historical = """\
+# The board's 16 tables in 4 row formats. Only the nine whose first header
+# cell is `Ticket` carry authoritative status; the lane, batch and dispatch
+# tables are redundant views and are cross-checked against them.
+TICKET_TABLE_HEADER = "Ticket"
+EXPECTED_TABLES = {TICKET_TABLE_HEADER: 9}
+"""
+        defects = expected_tables_comment_defects(historical)
+        self.assertEqual(len(defects), 1)
+        self.assertIn("restates a table or format count", defects[0])
+
+    def test_current_comment_has_no_repeated_count(self) -> None:
+        source = (SCRIPTS / "verify-ticket-closure-receipts.py").read_text(encoding="utf-8")
+        self.assertEqual(expected_tables_comment_defects(source), [])
 
 
 BOARD = """\

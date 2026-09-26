@@ -12,6 +12,8 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from typing import Callable
 
+from stale_claims import document_defects, governance_defects, head_claim_defects
+
 
 REPOSITORY = Path(__file__).resolve().parents[1]
 SCRIPT = Path(__file__).with_name("verify-execution-board.py")
@@ -37,6 +39,7 @@ class VerifierHarness(unittest.TestCase):
         self,
         board_transform: BoardTransform = lambda text: text,
         readme_transform: ReadmeTransform = lambda text: text,
+        handoffs: dict[str, str] | None = None,
     ) -> tuple[int, str, str]:
         board_text = board_transform(
             (REPOSITORY / "docs" / "EXECUTION_BOARD.md").read_text(encoding="utf-8")
@@ -55,6 +58,10 @@ class VerifierHarness(unittest.TestCase):
             synthetic_script.write_text("# verifier fixture\n", encoding="utf-8")
             (docs / "EXECUTION_BOARD.md").write_text(board_text, encoding="utf-8")
             (root / "README.md").write_text(readme_text, encoding="utf-8")
+            if handoffs:
+                (docs / "handoffs").mkdir()
+                for name, content in handoffs.items():
+                    (docs / "handoffs" / name).write_text(content, encoding="utf-8")
 
             original_file = VERIFY.__file__
             stdout = io.StringIO()
@@ -79,6 +86,112 @@ class ExecutionBoardVerifierTests(VerifierHarness):
         code, stdout, stderr = self.run_verifier()
         self.assertEqual(code, 0, stderr)
         self.assertIn("execution-board-ok", stdout)
+        board = (REPOSITORY / "docs" / "EXECUTION_BOARD.md").read_text(encoding="utf-8")
+        self.assertEqual(document_defects(REPOSITORY, board), [])
+
+    def test_first_discharge_draft_fails(self) -> None:
+        # 1b88a885:docs/handoffs/CURRENT.md, before the #120 review correction.
+        historical = """\
+# Current custodian handoff
+
+- Authoring baseline: protected `main`
+  `c17bbafafe4f983b6e936cd2f57245edabfb1ffd`, tree
+  `dddf3c31edd2aa6f41d1614e119367beaa8dca5b`, GitHub-verified with reason
+  `valid`.
+- The board verifier reports 107 tickets and 21 remaining. `EXEC-005` is the
+  selected next ticket and remains `PENDING`; it was re-read at thaw and is
+  still the earliest-ready work. It is now startable on a fresh `codex/` branch.
+"""
+        code, _, stderr = self.run_verifier(handoffs={"CURRENT.md": historical})
+        self.assertEqual(code, 1)
+        self.assertIn("declares work startable", stderr)
+
+    def test_second_discharge_draft_fails(self) -> None:
+        # f039d414:docs/handoffs/CURRENT.md, before the #121 review correction.
+        historical = """\
+# Current custodian handoff
+
+- The board verifier reports 108 tickets and 22 remaining. `EXEC-005` is the
+  selected dispatch ticket and remains `PENDING`; it was re-read at thaw, is
+  still the earliest-ready work, and its successor-head verification condition
+  is now **discharged** -- see "Safe next action".
+
+**That condition is discharged, by observation.** The thaw merged as protected-main
+`a5ffdb5`, and that head produced push-triggered `Foundation` `34060521970`
+**success**, `Windows Agent` `34060521979` **success**.
+"""
+        code, _, stderr = self.run_verifier(handoffs={"CURRENT.md": historical})
+        self.assertEqual(code, 1)
+        self.assertIn("declares a head-dependent gate discharged", stderr)
+
+    def test_dated_observation_of_old_head_passes(self) -> None:
+        # 2026-09-06-freeze-thaw.md records a past audit; the live gate must
+        # leave this and the merged CURRENT.md observation readable.
+        historical = """\
+**Gap found, and it predates the thaw.** The current protected-main head
+`d534a1b` has **no `Foundation` run, no `Windows` run** at the audit.
+"""
+        self.assertEqual(
+            head_claim_defects(Path("docs/handoffs/2026-09-06-freeze-thaw.md"), historical),
+            [],
+        )
+
+    def test_named_head_verified_now_fails(self) -> None:
+        text = "The successor head `a5ffdb5` is now verified.\n"
+        defects = head_claim_defects(Path("docs/handoffs/CURRENT.md"), text)
+        self.assertEqual(len(defects), 1)
+        self.assertIn("current head", defects[0])
+
+    def test_pre_thaw_governance_claim_fails_after_recorded_lift(self) -> None:
+        # d534a1b5:docs/handoffs/CURRENT.md; the window had not expired on
+        # September 6, but the owner had already lifted it.
+        historical = """\
+McLoving is governed by the
+[`September 2026 code-freeze contract`](SEPTEMBER_2026_CODE_FREEZE.md) through
+2026-09-30 23:59:59 America/Chicago, unless the owner explicitly changes that
+decision.
+"""
+        thaw_text = (
+            REPOSITORY / "docs" / "handoffs" / "2026-09-06-freeze-thaw.md"
+        ).read_text(encoding="utf-8")
+        code, _, stderr = self.run_verifier(
+            handoffs={"CURRENT.md": historical, "2026-09-06-freeze-thaw.md": thaw_text}
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("recorded early lift", stderr)
+        with tempfile.TemporaryDirectory() as root_text:
+            current = Path(root_text) / "CURRENT.md"
+            thaw = Path(root_text) / "2026-09-06-freeze-thaw.md"
+            current.write_text(historical, encoding="utf-8")
+            thaw.write_text(thaw_text, encoding="utf-8")
+            defects = governance_defects(current, thaw, today=VERIFY.date(2026, 9, 24))
+        self.assertEqual(len(defects), 1)
+        self.assertIn("recorded early lift", defects[0])
+
+    def test_expired_window_fails_even_without_lift_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as root_text:
+            current = Path(root_text) / "CURRENT.md"
+            current.write_text(
+                "McLoving is governed by the October contract through 2026-10-31.\n",
+                encoding="utf-8",
+            )
+            defects = governance_defects(
+                current, Path(root_text) / "absent-thaw.md", today=VERIFY.date(2026, 11, 1)
+            )
+        self.assertEqual(len(defects), 1)
+        self.assertIn("window that has ended", defects[0])
+
+    def test_handoff_symlink_is_refused_without_reading_target(self) -> None:
+        with tempfile.TemporaryDirectory() as root_text:
+            root = Path(root_text)
+            handoffs = root / "docs" / "handoffs"
+            handoffs.mkdir(parents=True)
+            target = root / "outside.md"
+            target.write_text("The current head is `aaaaaaaa`.\n", encoding="utf-8")
+            (handoffs / "linked.md").symlink_to(target)
+            defects = document_defects(root, "# Board\n")
+        self.assertEqual(len(defects), 1)
+        self.assertIn("handoff symlink", defects[0])
 
     def test_stale_current_slot_status_fails(self) -> None:
         expected_message = ""
@@ -236,7 +349,7 @@ class ExecutionBoardVerifierTests(VerifierHarness):
 
         code, _, stderr = self.run_verifier(board_transform=pin_head)
         self.assertEqual(code, 1)
-        self.assertIn("pins protected main to a commit", stderr)
+        self.assertIn("asserts that a named commit is the current head", stderr)
 
     def test_invalid_updated_date_fails(self) -> None:
         def invalidate_date(text: str) -> str:

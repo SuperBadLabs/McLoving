@@ -9,6 +9,8 @@ import sys
 from datetime import date
 from pathlib import Path
 
+from stale_claims import document_defects
+
 
 TICKET_STATUSES = ("PENDING", "ACTIVE", "BLOCKED", "DONE", "DEFERRED")
 TICKET_STATUS_PATTERN = "|".join(TICKET_STATUSES)
@@ -348,11 +350,7 @@ def main() -> None:
             if updated > date.today():
                 errors.append(f"execution board Updated date is in the future: {updated}")
 
-    if re.search(r"Protected `main` is `[0-9a-f]{40}`", text):
-        errors.append(
-            "current-state prose pins protected main to a commit; use ticket and "
-            "batch status instead"
-        )
+    errors += document_defects(repository, text)
     for marker in OBSOLETE_README_MARKERS:
         if marker in readme_text:
             errors.append(f"README contains obsolete implementation claim: {marker}")
