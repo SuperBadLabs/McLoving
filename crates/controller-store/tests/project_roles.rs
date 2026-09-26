@@ -2,11 +2,12 @@
 //! and by project principals, under the rules the ticket states, and a
 //! revocation fences the identity's live sessions at once.
 
-use mcloving_controller_store::authz::ProjectRole;
+use mcloving_controller_store::authz::{Action, GrantDecision, ProjectRole, ServiceScope};
 use mcloving_controller_store::{
-    DurableCaller, IdentityProviderWrite, MembershipAuthority, NewHumanIdentity,
-    OidcIdentityClaims, ProjectRoleGrant, ProjectRoleGrantOutcome, ProjectRoleRevocation,
-    SessionIssue, Store, StoreError,
+    AuthorizationPolicyWrite, AuthorizationPrincipalMappingWrite, DurableCaller,
+    IdentityProviderWrite, MembershipAuthority, NewHumanIdentity, NewServiceCredential,
+    NewServiceIdentity, OidcIdentityClaims, ProjectRoleGrant, ProjectRoleGrantOutcome,
+    ProjectRoleRevocation, SessionIssue, Store, StoreError, compute_authorization_policy_digest,
 };
 use sha2::{Digest, Sha256};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
@@ -227,7 +228,10 @@ async fn as_principal(admin: &Store, tenant: &Tenant, identity_id: Uuid) -> Memb
     })
 }
 
-const DELEGATED: MembershipAuthority = MembershipAuthority::Delegated { caller: None };
+const DELEGATED: MembershipAuthority = MembershipAuthority::Delegated {
+    caller: None,
+    policy_generation: None,
+};
 
 fn is_denied<T: std::fmt::Debug>(result: Result<T, StoreError>) -> bool {
     matches!(result, Err(StoreError::ProjectRoleDenied(_)))
@@ -312,6 +316,7 @@ async fn owners_are_bootstrapped_offline_and_managed_only_by_owners() {
                         session_id: None,
                         service_credential_id: None,
                     }),
+                    policy_generation: None,
                 },
                 "fenced service caller"
             ))
@@ -724,4 +729,262 @@ async fn a_session_bound_caller_is_revalidated_under_the_whole_predicate() {
             .collect::<Vec<_>>(),
         vec![ProjectRole::Owner, ProjectRole::Viewer]
     );
+}
+
+
+#[tokio::test]
+async fn mapped_policy_generation_is_reauthorized_under_the_policy_lock() {
+    let Some(admin) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let tenant = tenant(&admin).await;
+    let runtime = runtime_store(&admin).await;
+    let owner = human(&admin, &tenant, "owner").await;
+    let viewer = human(&admin, &tenant, "viewer").await;
+    let target = human(&admin, &tenant, "target").await;
+    admin
+        .grant_project_role(&grant(
+            &tenant,
+            owner,
+            ProjectRole::Owner,
+            MembershipAuthority::Bootstrap,
+            "bootstrap owner",
+        ))
+        .await
+        .unwrap();
+
+    let service_id = Uuid::new_v4();
+    admin
+        .provision_service_identity(&NewServiceIdentity {
+            organization_id: tenant.organization_id,
+            identity_id: service_id,
+            subject: "service:par003-mapped".to_owned(),
+            scopes: [ServiceScope::ProjectAdmin].into(),
+            actor_subject: "reviewer:par003".to_owned(),
+        })
+        .await
+        .expect("provision mapped service");
+    let credential_id = Uuid::new_v4();
+    admin
+        .provision_service_credential(&NewServiceCredential {
+            organization_id: tenant.organization_id,
+            credential_id,
+            identity_id: service_id,
+            generation: 1,
+            token_digest: digest("par003-mapped-service-token"),
+            issued_at_unix_ms: 1_000,
+            expires_at_unix_ms: None,
+            actor_subject: "reviewer:par003".to_owned(),
+        })
+        .await
+        .expect("provision service credential");
+
+    let configure_decisions = [
+        (Action::ProjectView, GrantDecision::Allow),
+        (Action::ProjectConfigure, GrantDecision::Allow),
+    ]
+    .into_iter()
+    .collect();
+    admin
+        .install_authorization_policy(&mapped_policy(
+            &tenant,
+            1,
+            None,
+            vec![service_mapping(
+                Uuid::new_v4(),
+                service_id,
+                configure_decisions,
+            )],
+        ))
+        .await
+        .expect("install generation 1 with ProjectConfigure");
+
+    let mapped = MembershipAuthority::Delegated {
+        caller: Some(DurableCaller {
+            identity_id: service_id,
+            lifecycle_generation: 1,
+            session_id: None,
+            service_credential_id: Some(credential_id),
+        }),
+        policy_generation: Some(1),
+    };
+    // Cap: mapped/service delegated authority is Admin, never Owner.
+    assert!(is_denied(
+        runtime
+            .grant_project_role(&grant(
+                &tenant,
+                viewer,
+                ProjectRole::Owner,
+                mapped,
+                "mapped cannot mint owner",
+            ))
+            .await
+    ));
+    assert!(matches!(
+        runtime
+            .grant_project_role(&grant(
+                &tenant,
+                viewer,
+                ProjectRole::Viewer,
+                mapped,
+                "mapped grants viewer under generation 1",
+            ))
+            .await
+            .unwrap(),
+        ProjectRoleGrantOutcome::Granted(_)
+    ));
+
+    // Race window: a new policy commits without ProjectConfigure after the
+    // caller authenticated under generation 1. The bound generation must
+    // refuse the write.
+    let view_only = [(Action::ProjectView, GrantDecision::Allow)]
+        .into_iter()
+        .collect();
+    admin
+        .install_authorization_policy(&mapped_policy(
+            &tenant,
+            2,
+            Some(1),
+            vec![service_mapping(Uuid::new_v4(), service_id, view_only)],
+        ))
+        .await
+        .expect("install generation 2 without ProjectConfigure");
+    assert!(
+        is_denied(
+            runtime
+                .grant_project_role(&grant(
+                    &tenant,
+                    target,
+                    ProjectRole::Viewer,
+                    mapped,
+                    "stale mapped generation must not grant",
+                ))
+                .await
+        ),
+        "a grant bound to a superseded policy generation must be refused"
+    );
+
+    // Binding the current generation still reauthorizes: without
+    // ProjectConfigure the write is refused even when the pointer matches.
+    let stale_current = MembershipAuthority::Delegated {
+        caller: Some(DurableCaller {
+            identity_id: service_id,
+            lifecycle_generation: 1,
+            session_id: None,
+            service_credential_id: Some(credential_id),
+        }),
+        policy_generation: Some(2),
+    };
+    assert!(
+        is_denied(
+            runtime
+                .grant_project_role(&grant(
+                    &tenant,
+                    target,
+                    ProjectRole::Viewer,
+                    stale_current,
+                    "current generation without configure",
+                ))
+                .await
+        ),
+        "reauthorization must refuse when ProjectConfigure is no longer Allow"
+    );
+
+    // Restoring ProjectConfigure at generation 3 admits Admin again.
+    let configure_again = [
+        (Action::ProjectView, GrantDecision::Allow),
+        (Action::ProjectConfigure, GrantDecision::Allow),
+    ]
+    .into_iter()
+    .collect();
+    admin
+        .install_authorization_policy(&mapped_policy(
+            &tenant,
+            3,
+            Some(2),
+            vec![service_mapping(
+                Uuid::new_v4(),
+                service_id,
+                configure_again,
+            )],
+        ))
+        .await
+        .expect("install generation 3 with ProjectConfigure");
+    let current = MembershipAuthority::Delegated {
+        caller: Some(DurableCaller {
+            identity_id: service_id,
+            lifecycle_generation: 1,
+            session_id: None,
+            service_credential_id: Some(credential_id),
+        }),
+        policy_generation: Some(3),
+    };
+    assert!(matches!(
+        runtime
+            .grant_project_role(&grant(
+                &tenant,
+                target,
+                ProjectRole::Viewer,
+                current,
+                "mapped grants under current generation",
+            ))
+            .await
+            .unwrap(),
+        ProjectRoleGrantOutcome::Granted(_)
+    ));
+}
+
+fn mapped_policy(
+    tenant: &Tenant,
+    generation: i64,
+    expected_current_generation: Option<i64>,
+    mappings: Vec<AuthorizationPrincipalMappingWrite>,
+) -> AuthorizationPolicyWrite {
+    let mut write = AuthorizationPolicyWrite {
+        organization_id: tenant.organization_id,
+        project_id: tenant.project_id,
+        generation,
+        expected_current_generation,
+        source_realm_implementation: "jenkins.security.HudsonPrivateSecurityRealm".to_owned(),
+        source_realm_digest: digest("par003-authz-source-realm"),
+        source_inventory_digest: digest("par003-authz-inventory"),
+        reviewer: "reviewer:par003".to_owned(),
+        actor_subject: "service:par003-importer".to_owned(),
+        restored_from_generation: None,
+        mappings,
+        expected_policy_digest: [0; 32],
+    };
+    write.expected_policy_digest =
+        compute_authorization_policy_digest(&write).expect("canonical policy digest");
+    write
+}
+
+fn service_mapping(
+    mapping_id: Uuid,
+    identity_id: Uuid,
+    decisions: std::collections::BTreeMap<Action, GrantDecision>,
+) -> AuthorizationPrincipalMappingWrite {
+    AuthorizationPrincipalMappingWrite {
+        mapping_id,
+        target_identity_id: identity_id,
+        source_identity_id: "jenkins-service-par003".to_owned(),
+        source_alias_history: serde_json::json!([]),
+        source_membership_generation: 1,
+        source_lifecycle_state: "active".to_owned(),
+        source_acl_entry_id: "folder/par003:service/mapped".to_owned(),
+        source_acl_scope: "folder/par003".to_owned(),
+        source_acl_generation: "acl-par003-1".to_owned(),
+        source_permissions: ["job.read", "job.configure"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+        target_provider_id: None,
+        target_external_subject: None,
+        target_lifecycle_generation: 1,
+        target_group_generation: 1,
+        target_provenance_digest: [0; 32],
+        resulting_role: "owner".to_owned(),
+        decisions,
+    }
 }

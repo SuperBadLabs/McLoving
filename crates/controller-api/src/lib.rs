@@ -3692,7 +3692,34 @@ async fn authorize_membership_writer(
         {
             MembershipAuthority::Principal(caller)
         }
-        caller => MembershipAuthority::Delegated { caller },
+        caller => {
+            // An imported policy disables lattice fallback for the project.
+            // Bind the generation that authorized ProjectConfigure so the
+            // membership write can serialize on the authorization-policy
+            // lock and reauthorize before it grants Admin.
+            let policy_generation = if principal.mapped_projects.contains(&project_id) {
+                Some(
+                    state
+                        .store
+                        .authorization_policy_current_generation(organization_id, project_id)
+                        .await
+                        .map_err(internal)?
+                        .ok_or_else(|| {
+                            ApiError::new(
+                                StatusCode::FORBIDDEN,
+                                "forbidden",
+                                "the project has no current imported authorization policy",
+                            )
+                        })?,
+                )
+            } else {
+                None
+            };
+            MembershipAuthority::Delegated {
+                caller,
+                policy_generation,
+            }
+        }
     };
     Ok((principal, authority))
 }
