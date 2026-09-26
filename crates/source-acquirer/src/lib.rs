@@ -889,7 +889,7 @@ impl SourceAcquirer {
         // stage/runtime/git-exec/claim debris that would otherwise poison the
         // next attempt as state_unavailable. Reclaim under the output lock so
         // concurrent helpers serialize on the same cleanup.
-        self.reclaim_orphaned_output_state(request.acquisition_id)
+        self.reclaim_orphaned_output_state(request.acquisition_id, &request_sha256)
             .await?;
         if claim_path(&self.config.output_root, request.acquisition_id).exists() {
             // Still present after reclaim means a published tree and claim are
@@ -1775,17 +1775,22 @@ impl SourceAcquirer {
                 return Err(SourceError::LimitExceeded);
             }
         }
-        session.finish(deadline, transport_root).await?;
+        session.finish(self, deadline, transport_root).await?;
         self.ensure_transport_quota(transport_root).await?;
         Ok(())
     }
 
-    async fn reclaim_orphaned_output_state(&self, acquisition_id: Uuid) -> Result<(), SourceError> {
+    async fn reclaim_orphaned_output_state(
+        &self,
+        acquisition_id: Uuid,
+        request_sha256: &str,
+    ) -> Result<(), SourceError> {
         #[cfg(unix)]
         {
             reclaim_named_output_leftovers(
                 &self.config.output_root,
                 acquisition_id,
+                request_sha256,
                 Some(&self.runtime_directory.path),
                 Some(&self.git_exec_directory.path),
             )
@@ -1793,7 +1798,7 @@ impl SourceAcquirer {
         }
         #[cfg(not(unix))]
         {
-            let _ = acquisition_id;
+            let _ = (acquisition_id, request_sha256);
             Err(SourceError::InvalidConfig)
         }
     }
@@ -4833,6 +4838,7 @@ impl GitBatchSession {
 
     async fn finish(
         mut self,
+        acquirer: &SourceAcquirer,
         deadline_unix_ms: i64,
         transport_root: &Path,
     ) -> Result<(), SourceError> {
@@ -4883,12 +4889,21 @@ impl GitBatchSession {
             .stderr_task
             .take()
             .ok_or(SourceError::SourceUnavailable)?;
-        let _ = stderr_task
+        let stderr = stderr_task
             .await
             .map_err(|_| SourceError::SourceUnavailable)?
             .map_err(|_| SourceError::SourceUnavailable)?;
         self.terminate_on_drop = false;
         if !status.success() {
+            return Err(SourceError::SourceUnavailable);
+        }
+        // Match the argv credential-bearing runner: refuse unfiltered fallback
+        // and secret markers that arrived on the batch helper's stderr.
+        acquirer.reject_secret_markers(&stderr)?;
+        if stderr
+            .windows(FILTER_IGNORED_WARNING.len())
+            .any(|window| window == FILTER_IGNORED_WARNING)
+        {
             return Err(SourceError::SourceUnavailable);
         }
         Ok(())
@@ -5017,9 +5032,25 @@ fn output_path_held_open(path: &Path) -> bool {
     }
 }
 
+async fn incomplete_claim_matches_request(
+    claim: &Path,
+    request_sha256: &str,
+) -> Result<bool, SourceError> {
+    let bytes = match read_bounded_regular_file(claim, MAX_GIT_METADATA_BYTES).await {
+        Ok(bytes) => bytes,
+        Err(_) => return Ok(false),
+    };
+    let parsed: AcquisitionClaim = match serde_json::from_slice(&bytes) {
+        Ok(parsed) => parsed,
+        Err(_) => return Ok(false),
+    };
+    Ok(parsed.protocol_version == PROTOCOL_VERSION && parsed.request_sha256 == request_sha256)
+}
+
 async fn reclaim_named_output_leftovers(
     root: &Path,
     acquisition_id: Uuid,
+    request_sha256: &str,
     keep_runtime: Option<&Path>,
     keep_git_exec: Option<&Path>,
 ) -> Result<(), SourceError> {
@@ -5043,7 +5074,9 @@ async fn reclaim_named_output_leftovers(
         if name_text.starts_with(&stage_prefix) {
             saw_matching_stage = true;
         }
-        let reclaim = name_text.starts_with(".stage-")
+        // Only this acquisition's stages: removing another id's stage while
+        // leaving its claim would permanently AmbiguousClaim that retry.
+        let reclaim = name_text.starts_with(&stage_prefix)
             || name_text.starts_with(".expired-")
             || (name_text.starts_with(".runtime-")
                 && keep_runtime != Some(path.as_path())
@@ -5058,9 +5091,13 @@ async fn reclaim_named_output_leftovers(
     // A controlled failure keeps its claim and cleans its stage; that claim
     // must stay so the same id is refused as ambiguous_claim. A killed
     // attempt leaves a stage beside the claim: only then drop the incomplete
-    // claim so the same id can retry without an operator.
+    // claim so the same id can retry without an operator — and only when the
+    // claim still names this request's digest, so a reused id with different
+    // content cannot silently replace another attempt's claim.
     if claim.exists() && !published.exists() && saw_matching_stage {
-        let _ = tokio::fs::remove_file(&claim).await;
+        if incomplete_claim_matches_request(&claim, request_sha256).await? {
+            let _ = tokio::fs::remove_file(&claim).await;
+        }
     }
     for path in remove {
         let metadata = tokio::fs::symlink_metadata(&path)
@@ -6207,7 +6244,7 @@ mod tests {
             .open(&live)
             .expect("hold live runtime directory open");
 
-        reclaim_named_output_leftovers(root.path(), acquisition_id, None, None)
+        reclaim_named_output_leftovers(root.path(), acquisition_id, &("a".repeat(64)), None, None)
             .await
             .expect("reclaim");
         assert!(live.exists(), "live helper runtime must be preserved");
