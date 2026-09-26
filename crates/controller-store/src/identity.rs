@@ -290,6 +290,7 @@ impl Store {
             return invalid("expected provider configuration generation must be positive");
         }
         let mut tx = self.tenant_transaction(organization_id).await?;
+        lock_identity_provider(&mut tx, organization_id, provider_id).await?;
         let current = sqlx::query_as::<_, (i64, bool)>(
             "SELECT configuration_generation, enabled
              FROM identity_providers
@@ -1276,6 +1277,17 @@ impl Store {
             return Ok(false);
         };
         lock_session_family(&mut tx, organization_id, family_id).await?;
+        // The session's identity row is locked too: a project-role write
+        // that revalidated this session holds that row until it commits, so
+        // the revocation and the write have a defined order (PAR-003).
+        lock_credential_identity(
+            &mut tx,
+            organization_id,
+            "identity_sessions",
+            "session_id",
+            session_id,
+        )
+        .await?;
         let revocation_reason = sqlx::query_scalar::<_, Option<String>>(
             "SELECT revocation_reason
              FROM identity_sessions
@@ -1589,6 +1601,7 @@ async fn provision_identity_provider_in_transaction(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     input: &IdentityProviderWrite,
 ) -> Result<IdentityProviderConfig, StoreError> {
+    lock_identity_provider(tx, input.organization_id, input.provider_id).await?;
     let current = sqlx::query_as::<_, ProviderRow>(
         "SELECT provider_id, issuer, audience, authorization_endpoint,
                 token_endpoint, jwks_uri, client_id, group_claim,
@@ -2090,6 +2103,23 @@ async fn session_family_for_refresh_digest(
     .await?)
 }
 
+/// Serializes the writes that change what a session is validated against
+/// (the provider's enabled flag, configuration and JWKS generations) with
+/// a project-role write that revalidates the caller's session (PAR-003).
+pub(crate) async fn lock_identity_provider(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    organization_id: Uuid,
+    provider_id: Uuid,
+) -> Result<(), StoreError> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(format!(
+            "mcloving.identity-provider.{organization_id}.{provider_id}"
+        ))
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
 async fn lock_session_family(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     organization_id: Uuid,
@@ -2217,6 +2247,9 @@ async fn revoke_credential_record(
         return invalid("revocation timestamp is invalid");
     }
     let mut tx = store.tenant_transaction(organization_id).await?;
+    // The credential's identity row is locked first, the row a project-role
+    // write holds while it revalidates the credential (PAR-003).
+    lock_credential_identity(&mut tx, organization_id, table, key_column, record_id).await?;
     let query = format!(
         "UPDATE {table}
          SET revoked_at_unix_ms = GREATEST(issued_at_unix_ms, $3), revocation_reason = $4
@@ -2284,6 +2317,31 @@ fn digest_array(value: &[u8]) -> Result<[u8; 32], StoreError> {
 
 fn timestamp_bounds(values: &[i64]) -> (Option<i64>, Option<i64>) {
     (values.iter().min().copied(), values.iter().max().copied())
+}
+
+/// Locks the identity row a credential (a session or a service credential)
+/// belongs to, for the rest of the transaction. Revocations take it before
+/// they write, and a project-role write holds it while it revalidates the
+/// caller's credential, so the two never interleave.
+async fn lock_credential_identity(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    organization_id: Uuid,
+    table: &str,
+    key_column: &str,
+    record_id: Uuid,
+) -> Result<(), StoreError> {
+    let query = format!(
+        "SELECT i.id FROM identities i
+         JOIN {table} c ON c.organization_id = i.organization_id AND c.identity_id = i.id
+         WHERE c.organization_id = $1 AND c.{key_column} = $2
+         FOR UPDATE OF i"
+    );
+    sqlx::query_scalar::<_, Uuid>(&query)
+        .bind(organization_id)
+        .bind(record_id)
+        .fetch_optional(&mut **tx)
+        .await?;
+    Ok(())
 }
 
 fn validate_canonical(value: &str, label: &str, max: usize) -> Result<(), StoreError> {

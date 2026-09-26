@@ -3929,9 +3929,7 @@ async fn unprivileged_runtime_role_admits_but_cannot_bootstrap() {
     let can_mutate_grants = sqlx::query_scalar::<_, bool>(
         "SELECT
            has_table_privilege('mcloving_tenant', 'identities', 'INSERT')
-           OR has_table_privilege(
-             'mcloving_tenant', 'project_memberships', 'INSERT'
-           )
+           OR has_table_privilege('mcloving_tenant', 'identities', 'DELETE')
            OR has_table_privilege(
              'mcloving_tenant', 'service_scopes', 'INSERT'
            )",
@@ -3940,6 +3938,21 @@ async fn unprivileged_runtime_role_admits_but_cannot_bootstrap() {
     .await
     .expect("inspect authorization-table privileges");
     assert!(!can_mutate_grants);
+    // PAR-003: project memberships are the one authorization table the
+    // runtime role writes (role grants and revocations through the API);
+    // identities and service scopes stay the admin tool's.
+    let membership_privileges = sqlx::query_scalar::<_, bool>(
+        "SELECT has_table_privilege('mcloving_tenant', 'project_memberships', 'INSERT')
+            AND has_table_privilege('mcloving_tenant', 'project_memberships', 'UPDATE')
+            AND has_table_privilege('mcloving_tenant', 'project_memberships', 'DELETE')",
+    )
+    .fetch_one(store.pool())
+    .await
+    .expect("inspect membership privileges");
+    assert!(
+        membership_privileges,
+        "runtime role must grant and revoke project roles"
+    );
     let can_read_service_credentials = sqlx::query_scalar::<_, bool>(
         "SELECT has_table_privilege('mcloving_tenant', 'service_credentials', 'SELECT')",
     )
