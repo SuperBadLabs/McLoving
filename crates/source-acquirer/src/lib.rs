@@ -1782,14 +1782,8 @@ impl SourceAcquirer {
         // want per oid (~1.7 files/s on GitHub), which blows past the step
         // timeout for a multi-thousand-file tree even though the session is
         // already batched. Explicit oid wants keep the partial-clone filter.
-        self.prefetch_selected_blobs(
-            git_dir,
-            pending,
-            repository_url,
-            deadline,
-            transport_root,
-        )
-        .await?;
+        self.prefetch_selected_blobs(git_dir, pending, repository_url, deadline, transport_root)
+            .await?;
         self.ensure_before_deadline(deadline)?;
         let arguments = vec![
             OsString::from("--git-dir"),

@@ -623,7 +623,6 @@ async fn exact_revision_replay_later_commit_and_sparse_truth() {
     }
 }
 
-
 #[tokio::test]
 async fn many_unique_blobs_materialize_through_bulk_prefetch_and_batch() {
     // Regression for the Luigi/HeMan dogfood path: a tree with dozens of
