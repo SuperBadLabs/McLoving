@@ -57,8 +57,8 @@ const FILTER_IGNORED_WARNING: &[u8] = b"warning: filtering not recognized by ser
 /// time over smart HTTP (~0.5s/blob on GitHub), so AGENT-013's batch session
 /// alone cannot meet the <60s dogfood acceptance. One fetch of the selected
 /// oids packs them in a single round-trip; the batch session then reads locally.
-/// Chunk size stays under typical ARG_MAX with 40-hex oids while covering the
-/// McLoving tree (~2k files) in a couple of commands.
+/// Chunk size stays under typical ARG_MAX for hex object ids (SHA-1 or
+/// SHA-256) while covering the McLoving tree (~2k files) in a couple of commands.
 const BLOB_PREFETCH_CHUNK_OIDS: usize = 1_024;
 #[cfg(target_os = "linux")]
 const SYSTEM_PRELOAD_PATH: &[u8] = b"/etc/ld.so.preload\0";

@@ -249,7 +249,7 @@ still receives the commit it named when the commit remains on the admitted
 ref's history, and a SHA reachable only from a disallowed ref cannot ride an
 allowed ref name. A later tip is delivered only by a new request naming the
 later exact commit; a stale request cannot silently receive the new tip. Selected blob object ids are first wanted in bulk through one or more
-chunked credential-bearing `git fetch -c fetch.negotiationAlgorithm=noop`
+chunked credential-bearing `git -c fetch.negotiationAlgorithm=noop fetch`
 commands (bare oid wants, no destination refspec; the repository stays a
 `blob:none` partial clone from the earlier fetch, so the endpoint never falls
 back to an unfiltered pack), then read through one `git cat-file --batch`
