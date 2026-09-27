@@ -1699,7 +1699,7 @@ impl SourceAcquirer {
     ) -> Result<(), SourceError> {
         let mut unique_oids = BTreeSet::new();
         for blob in pending {
-            unique_oids.insert(blob.object_id.as_str());
+            unique_oids.insert(blob.object_id.clone());
         }
         if unique_oids.is_empty() {
             return Ok(());
@@ -1707,16 +1707,26 @@ impl SourceAcquirer {
         let oids = unique_oids.into_iter().collect::<Vec<_>>();
         for chunk in oids.chunks(BLOB_PREFETCH_CHUNK_OIDS) {
             self.ensure_before_deadline(deadline)?;
+            // After the dual-ref `exact_commit` + authenticated-ref fetch,
+            // plain `git fetch origin <blob-oid>…` negotiates against those
+            // tips and fails with "bad revision" / "did not send all necessary
+            // objects" on both GitHub smart HTTP and file:// fixtures. Promisor
+            // lazy fetches from `cat-file` still work one oid at a time (~0.5s
+            // each on GitHub). `fetch.negotiationAlgorithm=noop` skips that
+            // broken negotiation and wants the selected blobs in one pack,
+            // which is what AGENT-013 acceptance needs. Bare oid refspecs (no
+            // destination, no `--filter`) match git's own promisor fetch.
             let mut arguments = vec![
                 OsString::from("--git-dir"),
                 git_dir.as_os_str().to_owned(),
+                OsString::from("-c"),
+                OsString::from("fetch.negotiationAlgorithm=noop"),
                 OsString::from("fetch"),
-                OsString::from("--filter=blob:none"),
                 OsString::from("--no-tags"),
                 OsString::from("--"),
                 OsString::from("origin"),
             ];
-            arguments.extend(chunk.iter().map(|oid| OsString::from(*oid)));
+            arguments.extend(chunk.iter().map(|oid| OsString::from(oid.as_str())));
             let prefetch = self
                 .run_credential_git_until(
                     arguments,
