@@ -826,9 +826,6 @@ async fn reauthorize_mapped_configure(
     Ok(())
 }
 
-/// Every membership write for a project enters here first, so the Owner
-/// count a decision reads cannot change under it.
-
 /// When the authority was authorized through an imported policy, take the
 /// authorization-policy advisory lock before identity row locks so this path
 /// and `install_authorization_policy` (policy lock, then identity FOR SHARE)
@@ -852,6 +849,8 @@ async fn lock_mapped_policy_if_needed(
     Ok(())
 }
 
+/// Every membership write for a project enters here first, so the Owner
+/// count a decision reads cannot change under it.
 async fn lock_project_memberships(
     tx: &mut Transaction<'_, Postgres>,
     organization_id: Uuid,
