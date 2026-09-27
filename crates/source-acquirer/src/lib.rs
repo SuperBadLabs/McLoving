@@ -52,6 +52,14 @@ const MAX_AUTHORITY_BYTES: usize = 64 * 1_024;
 const MAX_MARKERS: usize = 256;
 const MAX_MARKER_BYTES: usize = 256 * 1_024;
 const FILTER_IGNORED_WARNING: &[u8] = b"warning: filtering not recognized by server, ignoring";
+/// How many selected blob object ids to want in one credential-bearing
+/// `git fetch`. `git cat-file --batch` still asks the promisor one oid at a
+/// time over smart HTTP (~0.5s/blob on GitHub), so AGENT-013's batch session
+/// alone cannot meet the <60s dogfood acceptance. One fetch of the selected
+/// oids packs them in a single round-trip; the batch session then reads locally.
+/// Chunk size stays under typical ARG_MAX for hex object ids (SHA-1 or
+/// SHA-256) while covering the McLoving tree (~2k files) in a couple of commands.
+const BLOB_PREFETCH_CHUNK_OIDS: usize = 1_024;
 #[cfg(target_os = "linux")]
 const SYSTEM_PRELOAD_PATH: &[u8] = b"/etc/ld.so.preload\0";
 const MAX_RESOLVER_OUTPUT_BYTES: usize = 4 * 1_024;
@@ -1681,6 +1689,59 @@ impl SourceAcquirer {
         parse_gitmodules(&bytes, self.config.max_path_bytes)
     }
 
+    async fn prefetch_selected_blobs(
+        &self,
+        git_dir: &Path,
+        pending: &[PendingBlob],
+        repository_url: &str,
+        deadline: i64,
+        transport_root: &Path,
+    ) -> Result<(), SourceError> {
+        let mut unique_oids = BTreeSet::new();
+        for blob in pending {
+            unique_oids.insert(blob.object_id.clone());
+        }
+        if unique_oids.is_empty() {
+            return Ok(());
+        }
+        let oids = unique_oids.into_iter().collect::<Vec<_>>();
+        for chunk in oids.chunks(BLOB_PREFETCH_CHUNK_OIDS) {
+            self.ensure_before_deadline(deadline)?;
+            // After the dual-ref `exact_commit` + authenticated-ref fetch,
+            // plain `git fetch origin <blob-oid>…` negotiates against those
+            // tips and fails with "bad revision" / "did not send all necessary
+            // objects" on both GitHub smart HTTP and file:// fixtures. Promisor
+            // lazy fetches from `cat-file` still work one oid at a time (~0.5s
+            // each on GitHub). `fetch.negotiationAlgorithm=noop` skips that
+            // broken negotiation and wants the selected blobs in one pack,
+            // which is what AGENT-013 acceptance needs. Bare oid refspecs (no
+            // destination, no `--filter`) match git's own promisor fetch.
+            let mut arguments = vec![
+                OsString::from("--git-dir"),
+                git_dir.as_os_str().to_owned(),
+                OsString::from("-c"),
+                OsString::from("fetch.negotiationAlgorithm=noop"),
+                OsString::from("fetch"),
+                OsString::from("--no-tags"),
+                OsString::from("--"),
+                OsString::from("origin"),
+            ];
+            arguments.extend(chunk.iter().map(|oid| OsString::from(oid.as_str())));
+            let prefetch = self
+                .run_credential_git_until(
+                    arguments,
+                    MAX_GIT_METADATA_BYTES,
+                    repository_url,
+                    deadline,
+                    transport_root,
+                )
+                .await;
+            self.ensure_transport_quota(transport_root).await?;
+            prefetch?;
+        }
+        Ok(())
+    }
+
     async fn materialize_entry(
         &self,
         root: &Path,
@@ -1715,6 +1776,14 @@ impl SourceAcquirer {
         if pending.is_empty() {
             return Ok(());
         }
+        self.ensure_before_deadline(deadline)?;
+        // Prefetch selected blobs in bulk before the batch reader. Without this,
+        // `cat-file --batch` against a blob:none promisor does one smart-HTTP
+        // want per oid (~1.7 files/s on GitHub), which blows past the step
+        // timeout for a multi-thousand-file tree even though the session is
+        // already batched. Explicit oid wants keep the partial-clone filter.
+        self.prefetch_selected_blobs(git_dir, pending, repository_url, deadline, transport_root)
+            .await?;
         self.ensure_before_deadline(deadline)?;
         let arguments = vec![
             OsString::from("--git-dir"),
