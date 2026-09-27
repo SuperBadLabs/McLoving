@@ -234,12 +234,13 @@ impl DurableCaller {
             }
         }
         if let Some(credential_id) = self.service_credential_id {
+            // service_credentials is SELECT-only for mcloving_tenant; do not
+            // FOR UPDATE (PostgreSQL requires UPDATE privilege to row-lock).
             let live = sqlx::query_scalar::<_, i32>(
                 "SELECT 1 FROM service_credentials
                  WHERE organization_id = $1 AND credential_id = $2 AND revoked_at_unix_ms IS NULL
                    AND (expires_at_unix_ms IS NULL
-                        OR expires_at_unix_ms > (extract(epoch FROM clock_timestamp()) * 1000)::bigint)
-                 FOR UPDATE",
+                        OR expires_at_unix_ms > (extract(epoch FROM clock_timestamp()) * 1000)::bigint)",
             )
             .bind(organization_id)
             .bind(credential_id)
@@ -826,27 +827,59 @@ async fn reauthorize_mapped_configure(
     Ok(())
 }
 
-/// When the authority was authorized through an imported policy, take the
-/// authorization-policy advisory lock before identity row locks so this path
-/// and `install_authorization_policy` (policy lock, then identity FOR SHARE)
-/// share one lock order and cannot deadlock.
+/// Take the authorization-policy advisory lock before identity row locks so
+/// this path and `install_authorization_policy` share one lock order. When the
+/// caller claimed no imported policy, refuse if one is now current so a first
+/// install between authentication and this write cannot leave lattice/unbound
+/// Delegated authority in force. When the caller bound a generation, keep that
+/// lock held for `reauthorize_mapped_configure`.
 async fn lock_mapped_policy_if_needed(
     tx: &mut Transaction<'_, Postgres>,
     organization_id: Uuid,
     project_id: Uuid,
     authority: MembershipAuthority,
 ) -> Result<(), StoreError> {
-    if let MembershipAuthority::Delegated {
-        policy_generation: Some(_),
-        ..
-    } = authority
-    {
-        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-            .bind(authorization_policy_lock_key(organization_id, project_id))
-            .execute(&mut **tx)
-            .await?;
+    match authority {
+        MembershipAuthority::Bootstrap => Ok(()),
+        MembershipAuthority::Delegated {
+            policy_generation: Some(_),
+            ..
+        }
+        | MembershipAuthority::Delegated {
+            policy_generation: None,
+            ..
+        }
+        | MembershipAuthority::Principal(_) => {
+            sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+                .bind(authorization_policy_lock_key(organization_id, project_id))
+                .execute(&mut **tx)
+                .await?;
+            if matches!(
+                authority,
+                MembershipAuthority::Principal(_)
+                    | MembershipAuthority::Delegated {
+                        policy_generation: None,
+                        ..
+                    }
+            ) {
+                let current = sqlx::query_scalar::<_, i64>(
+                    "SELECT current_generation
+                     FROM authorization_project_policies
+                     WHERE organization_id = $1 AND project_id = $2",
+                )
+                .bind(organization_id)
+                .bind(project_id)
+                .fetch_optional(&mut **tx)
+                .await?;
+                if current.is_some() {
+                    return denied(
+                        "the project gained an imported authorization policy after the caller authenticated; retry",
+                    );
+                }
+            }
+            Ok(())
+        }
     }
-    Ok(())
 }
 
 /// Every membership write for a project enters here first, so the Owner

@@ -3685,41 +3685,29 @@ async fn authorize_membership_writer(
         Action::ProjectConfigure,
     )
     .map_err(|error| ApiError::new(StatusCode::FORBIDDEN, "forbidden", error.to_string()))?;
-    let authority = match caller {
-        Some(caller)
-            if principal.kind == PrincipalKind::Human
-                && !principal.mapped_projects.contains(&project_id) =>
+    // Observe the project's current imported policy even when authentication
+    // saw none: a first policy install between auth and this write must not
+    // leave the caller on lattice/unbound Delegated authority. The store
+    // re-checks under the authorization-policy lock.
+    let current_policy_generation = state
+        .store
+        .authorization_policy_current_generation(organization_id, project_id)
+        .await
+        .map_err(internal)?;
+    let authority = match (caller, current_policy_generation, principal.kind) {
+        (Some(caller), None, PrincipalKind::Human)
+            if !principal.mapped_projects.contains(&project_id) =>
         {
             MembershipAuthority::Principal(caller)
         }
-        caller => {
-            // An imported policy disables lattice fallback for the project.
-            // Bind the generation that authorized ProjectConfigure so the
-            // membership write can serialize on the authorization-policy
-            // lock and reauthorize before it grants Admin.
-            let policy_generation = if principal.mapped_projects.contains(&project_id) {
-                Some(
-                    state
-                        .store
-                        .authorization_policy_current_generation(organization_id, project_id)
-                        .await
-                        .map_err(internal)?
-                        .ok_or_else(|| {
-                            ApiError::new(
-                                StatusCode::FORBIDDEN,
-                                "forbidden",
-                                "the project has no current imported authorization policy",
-                            )
-                        })?,
-                )
-            } else {
-                None
-            };
-            MembershipAuthority::Delegated {
-                caller,
-                policy_generation,
-            }
-        }
+        (caller, Some(policy_generation), _) => MembershipAuthority::Delegated {
+            caller,
+            policy_generation: Some(policy_generation),
+        },
+        (caller, None, _) => MembershipAuthority::Delegated {
+            caller,
+            policy_generation: None,
+        },
     };
     Ok((principal, authority))
 }
