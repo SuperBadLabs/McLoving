@@ -220,7 +220,8 @@ impl DurableCaller {
                    AND s.group_generation = i.group_generation
                    AND p.enabled
                    AND s.provider_configuration_generation = p.configuration_generation
-                   AND s.provider_jwks_generation = p.jwks_generation",
+                   AND s.provider_jwks_generation = p.jwks_generation
+                 FOR UPDATE OF s",
             )
             .bind(organization_id)
             .bind(session_id)
@@ -237,7 +238,8 @@ impl DurableCaller {
                 "SELECT 1 FROM service_credentials
                  WHERE organization_id = $1 AND credential_id = $2 AND revoked_at_unix_ms IS NULL
                    AND (expires_at_unix_ms IS NULL
-                        OR expires_at_unix_ms > (extract(epoch FROM clock_timestamp()) * 1000)::bigint)",
+                        OR expires_at_unix_ms > (extract(epoch FROM clock_timestamp()) * 1000)::bigint)
+                 FOR UPDATE",
             )
             .bind(organization_id)
             .bind(credential_id)
@@ -369,6 +371,13 @@ impl Store {
         let mut tx = self.tenant_transaction(grant.organization_id).await?;
         lock_project_memberships(&mut tx, grant.organization_id, grant.project_id).await?;
         require_project(&mut tx, grant.organization_id, grant.project_id).await?;
+        lock_mapped_policy_if_needed(
+            &mut tx,
+            grant.organization_id,
+            grant.project_id,
+            grant.authority,
+        )
+        .await?;
         lock_identity_rows(
             &mut tx,
             grant.organization_id,
@@ -539,6 +548,13 @@ impl Store {
         lock_project_memberships(&mut tx, revocation.organization_id, revocation.project_id)
             .await?;
         require_project(&mut tx, revocation.organization_id, revocation.project_id).await?;
+        lock_mapped_policy_if_needed(
+            &mut tx,
+            revocation.organization_id,
+            revocation.project_id,
+            revocation.authority,
+        )
+        .await?;
         lock_identity_rows(
             &mut tx,
             revocation.organization_id,
@@ -812,6 +828,30 @@ async fn reauthorize_mapped_configure(
 
 /// Every membership write for a project enters here first, so the Owner
 /// count a decision reads cannot change under it.
+
+/// When the authority was authorized through an imported policy, take the
+/// authorization-policy advisory lock before identity row locks so this path
+/// and `install_authorization_policy` (policy lock, then identity FOR SHARE)
+/// share one lock order and cannot deadlock.
+async fn lock_mapped_policy_if_needed(
+    tx: &mut Transaction<'_, Postgres>,
+    organization_id: Uuid,
+    project_id: Uuid,
+    authority: MembershipAuthority,
+) -> Result<(), StoreError> {
+    if let MembershipAuthority::Delegated {
+        policy_generation: Some(_),
+        ..
+    } = authority
+    {
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(authorization_policy_lock_key(organization_id, project_id))
+            .execute(&mut **tx)
+            .await?;
+    }
+    Ok(())
+}
+
 async fn lock_project_memberships(
     tx: &mut Transaction<'_, Postgres>,
     organization_id: Uuid,
