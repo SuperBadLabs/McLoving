@@ -1079,6 +1079,29 @@ impl Store {
         {
             lock_session_family(&mut tx, organization_id, family_id).await?;
         }
+        // Lock the identity row before the session row so this path and
+        // membership writes (identity FOR UPDATE, then session FOR UPDATE)
+        // share one lock order and cannot deadlock on the session insert's
+        // identity foreign key.
+        let identity_id = sqlx::query_scalar::<_, Uuid>(
+            "SELECT s.identity_id FROM identity_sessions s
+             WHERE s.organization_id = $1 AND s.refresh_token_digest = $2",
+        )
+        .bind(organization_id)
+        .bind(current_refresh_token_digest.as_slice())
+        .fetch_optional(&mut *tx)
+        .await?;
+        if let Some(identity_id) = identity_id {
+            sqlx::query(
+                "SELECT 1 FROM identities
+                 WHERE organization_id = $1 AND id = $2
+                 FOR UPDATE",
+            )
+            .bind(organization_id)
+            .bind(identity_id)
+            .execute(&mut *tx)
+            .await?;
+        }
         let current = sqlx::query_as::<_, SessionRefreshRow>(
             "SELECT s.session_id, s.identity_id, i.subject,
                     s.provider_configuration_generation,
