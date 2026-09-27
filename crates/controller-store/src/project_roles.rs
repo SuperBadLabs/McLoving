@@ -163,8 +163,9 @@ impl DurableCaller {
     /// lifecycle transition, a fence, a group-generation change, a session
     /// revocation and a credential revocation also lock), requires the
     /// identity active at the authenticated generation, the session valid
-    /// under authentication's whole predicate (with the provider's lock
-    /// held) and the service credential not revoked.
+    /// under authentication's whole predicate including expiry (with the
+    /// provider's lock held) and the service credential unrevoked and
+    /// unexpired.
     async fn revalidate(
         self,
         tx: &mut Transaction<'_, Postgres>,
@@ -213,6 +214,7 @@ impl DurableCaller {
                                           AND p.provider_id = i.provider_id
                  WHERE s.organization_id = $1 AND s.session_id = $2
                    AND s.revoked_at_unix_ms IS NULL
+                   AND s.expires_at_unix_ms > (extract(epoch FROM clock_timestamp()) * 1000)::bigint
                    AND i.lifecycle_state = 'active'
                    AND s.identity_lifecycle_generation = i.lifecycle_generation
                    AND s.group_generation = i.group_generation
@@ -233,7 +235,9 @@ impl DurableCaller {
         if let Some(credential_id) = self.service_credential_id {
             let live = sqlx::query_scalar::<_, i32>(
                 "SELECT 1 FROM service_credentials
-                 WHERE organization_id = $1 AND credential_id = $2 AND revoked_at_unix_ms IS NULL",
+                 WHERE organization_id = $1 AND credential_id = $2 AND revoked_at_unix_ms IS NULL
+                   AND (expires_at_unix_ms IS NULL
+                        OR expires_at_unix_ms > (extract(epoch FROM clock_timestamp()) * 1000)::bigint)",
             )
             .bind(organization_id)
             .bind(credential_id)
@@ -745,6 +749,63 @@ async fn reauthorize_mapped_configure(
     .await?;
     if allowed.is_none() {
         return denied("the caller's imported ProjectConfigure grant is no longer current");
+    }
+    // Deny wins across mappings, matching authentication's aggregation in
+    // identity::load_principal_action_grants. An Allow under one mapping must
+    // not authorize a write when another provenance-valid mapping Denies.
+    let denied_row = sqlx::query_scalar::<_, i32>(
+        "SELECT 1
+         FROM authorization_project_policies current_policy
+         JOIN authorization_policy_versions policy
+           ON policy.organization_id = current_policy.organization_id
+          AND policy.project_id = current_policy.project_id
+          AND policy.generation = current_policy.current_generation
+         JOIN authorization_principal_mappings mapping
+           ON mapping.organization_id = current_policy.organization_id
+          AND mapping.project_id = current_policy.project_id
+          AND mapping.policy_generation = current_policy.current_generation
+         JOIN authorization_action_grants grants
+           ON grants.organization_id = mapping.organization_id
+          AND grants.project_id = mapping.project_id
+          AND grants.policy_generation = mapping.policy_generation
+          AND grants.mapping_id = mapping.mapping_id
+         JOIN identities identity
+           ON identity.organization_id = mapping.organization_id
+          AND identity.id = mapping.target_identity_id
+         WHERE current_policy.organization_id = $1
+           AND current_policy.project_id = $2
+           AND current_policy.current_generation = $3
+           AND mapping.target_identity_id = $4
+           AND grants.action = 'project_configure'
+           AND grants.decision = 'deny'
+           AND identity.lifecycle_state = 'active'
+           AND identity.lifecycle_generation = mapping.target_lifecycle_generation
+           AND identity.group_generation = mapping.target_group_generation
+           AND identity.provider_id IS NOT DISTINCT FROM mapping.target_provider_id
+           AND identity.external_subject IS NOT DISTINCT FROM mapping.target_external_subject
+           AND (
+               identity.kind = 'service'
+               OR (
+                   identity.kind = 'human'
+                   AND identity.source_realm_digest = policy.source_realm_digest
+                   AND identity.source_identity_id = mapping.source_identity_id
+                   AND identity.source_membership_generation = mapping.source_membership_generation
+                   AND identity.alias_history = mapping.source_alias_history
+                   AND identity.provenance_digest = mapping.target_provenance_digest
+               )
+           )
+         LIMIT 1",
+    )
+    .bind(organization_id)
+    .bind(project_id)
+    .bind(expected_generation)
+    .bind(identity_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    if denied_row.is_some() {
+        return denied(
+            "the caller's imported ProjectConfigure decision is denied under the current policy",
+        );
     }
     Ok(())
 }
