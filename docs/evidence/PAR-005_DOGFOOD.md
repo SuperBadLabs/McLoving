@@ -40,14 +40,23 @@ Sealed checkout of this repository at that tip (AGENT-013):
 | Host | materialize wall (attempt start → receipt) | files | `source_unavailable` | build |
 |---|---|---|---|---|
 | HeMan | **13.0 s** | 2138 | false | `b8e6055b-0e34-452e-9183-6ff147c4c928` |
-| Luigi | 64–72 s (under concurrent cargo load on first probe; quiet retry 64.5 s) | 2138 | false | `76343578…` / `cd230caf…` (checkout succeeded; lanes failed/cancelled) |
+| Luigi | 64–72 s under load; quiet probe 2026-09-27 ~64.6 s (attempt start → rust-lint start on `4f65905`, build `a66da48a…`) | 2138 | false | `76343578…` / `a66da48a…` (checkout ok; lanes flaky — see notes) |
 
 HeMan meets the <60 s acceptance. Luigi no longer fails closed with `source_unavailable`
 (the pre-#159 failure mode / ~14 min drip); residual wall above 60 s on Luigi is noted for a
 quieter follow-up probe, not a reopen of the promisor-drip bug. Row 1's ~14 min HeMan note
 on `4a234c6f` is superseded for throughput by #159.
 
-Consecutive match count after row 2: **2 / 10**.
+Consecutive match count after row 3: **3 / 10**.
+Luigi follow-up (2026-09-27 quiet probe): host load ~0.8–1.0, sealed checkout of
+`4f65905` still ~64.6 s wall (attempt start → first lane log). Residual &gt;60 s is
+not load-only. rust-tests exit 101 on build `76343578…` was
+`mcloving-input-adapter` `contained_boundary_is_typed_bounded_replay_safe_and_read_only`
+panicking `ExpiredGrant`; a later build’s rust-tests passed and
+`controller-postgres` failed in `remote_work::container_stage_runs_in_the_pinned_image_and_sees_only_the_workspace`.
+Preserve Luigi-local `heman-up.sh` dirty patches (luigi-dogfood profile, gh token
+fallback, PATH for bridge).
+
 
 ## Verdicts
 
@@ -66,3 +75,4 @@ as `revision_mismatch` and counted as a mismatch.
 |---|---|---|---|---|---|---|---|
 | 1 | `4a234c6f7f1f` | 2026-09-26T09:07:51.317Z | 36218738244 | success | `b26d79f5-64f2-4625-8314-69189ecc3e37` | succeeded | yes |
 | 2 | `0220759a6669` | 2026-09-27T05:52:49.348Z | 36298039770 | success | `b8e6055b-0e34-452e-9183-6ff147c4c928` | succeeded | yes |
+| 3 | `4f65905a27b5` | 2026-09-27T17:27:04.724Z | 36336956714 | success | `cf3af674-d6a1-4fe3-96a0-5050497f5622` | succeeded | yes |
