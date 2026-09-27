@@ -624,6 +624,51 @@ async fn exact_revision_replay_later_commit_and_sparse_truth() {
 }
 
 #[tokio::test]
+async fn many_unique_blobs_materialize_through_bulk_prefetch_and_batch() {
+    // Regression for the Luigi/HeMan dogfood path: a tree with dozens of
+    // distinct blobs must succeed through blob:none + bulk oid prefetch +
+    // cat-file --batch. Before prefetch, each blob was a separate promisor
+    // smart-HTTP round-trip (~0.5s on GitHub); this fixture keeps the same
+    // partial-clone shape over file:// so the prefetch command path stays
+    // covered without needing a live network.
+    let repositories = tempfile::tempdir().expect("repositories tempdir");
+    let root = RepositoryFixture::new(repositories.path(), "bulk");
+    const FILE_COUNT: usize = 48;
+    for index in 0..FILE_COUNT {
+        root.write(
+            &format!("src/blob-{index:02}.txt"),
+            format!("unique-blob-body-{index}\n").as_bytes(),
+        );
+    }
+    let commit = root.commit("many unique blobs");
+    let context = Context::new(&root, Vec::new(), Vec::new(), false).await;
+    let mut request = context.request(&commit);
+    request.sparse_roots = vec!["src".to_owned()];
+    let started = Instant::now();
+    let receipt = context
+        .acquirer
+        .acquire(&request)
+        .await
+        .expect("bulk prefetch acquisition");
+    let elapsed = started.elapsed();
+    assert_eq!(receipt.materialized_files, FILE_COUNT);
+    assert!(
+        elapsed < Duration::from_secs(30),
+        "bulk prefetch materialization took {elapsed:?}"
+    );
+    for index in 0..FILE_COUNT {
+        let path = context
+            .config
+            .output_root
+            .join(receipt.acquisition_id.to_string())
+            .join("tree")
+            .join(format!("src/blob-{index:02}.txt"));
+        let bytes = std::fs::read(&path).unwrap_or_else(|_| panic!("missing {path:?}"));
+        assert_eq!(bytes, format!("unique-blob-body-{index}\n").as_bytes());
+    }
+}
+
+#[tokio::test]
 async fn killed_acquisition_leftovers_are_reclaimed_by_the_next() {
     use std::os::unix::fs::PermissionsExt as _;
 

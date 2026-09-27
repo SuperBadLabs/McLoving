@@ -232,7 +232,8 @@ the complete Git process group is killed when it observes a breach, child exit
 and the exact command/request deadline remain concurrent with every traversal,
 and a disappearing entry restarts measurement from the repository root before
 three failed restarts fail closed. Only selected blobs and required
-`.gitmodules` content are fetched lazily, and a quota breach fails before
+`.gitmodules` content are fetched (selected blobs via one bulk want list, then
+the batch reader; `.gitmodules` still on demand), and a quota breach fails before
 publication. An
 admitted repository endpoint must support filtered fetch and exact reachable
 promisor-object wants. A successful server response that warns it ignored
@@ -247,9 +248,18 @@ commit to equal or be an ancestor of that tip, so a request whose ref moved on
 still receives the commit it named when the commit remains on the admitted
 ref's history, and a SHA reachable only from a disallowed ref cannot ride an
 allowed ref name. A later tip is delivered only by a new request naming the
-later exact commit; a stale request cannot silently receive the new tip. Selected blobs are read
-through one `git cat-file --batch` session per repository tree, preserving
-per-blob byte and secret-marker bounds. Incomplete stage, transport, runtime,
+later exact commit; a stale request cannot silently receive the new tip. Selected blob object ids are first wanted in bulk through one or more
+chunked credential-bearing `git -c fetch.negotiationAlgorithm=noop fetch`
+commands (bare oid wants, no destination refspec; the repository stays a
+`blob:none` partial clone from the earlier fetch, so the endpoint never falls
+back to an unfiltered pack), then read through one `git cat-file --batch`
+session per repository tree, preserving per-blob byte and secret-marker bounds.
+The bulk want is required because `cat-file --batch` against a promisor remote
+still issues one smart-HTTP fetch per oid; without prefetch, a multi-thousand-file
+GitHub checkout drips at roughly two files per second and misses the acquisition
+deadline. `noop` negotiation is required after the dual-ref exact-commit fetch:
+default negotiation against those tips rejects bare blob wants as
+`bad revision` on both GitHub smart HTTP and file:// fixtures. Incomplete stage, transport, runtime,
 git-exec and claim debris left by a killed acquisition is reclaimed or refused
 by name under the binding's coordination locks before the next attempt.
 

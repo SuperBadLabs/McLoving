@@ -32,9 +32,11 @@ the requested commit when it remains on that ref's history, matching Foundation;
 it is never checked out at the ref's new tip. `revision_mismatch` remains when
 the fetched object is not the requested commit or is not on the authenticated
 ref's history. Webhook and parameter plumbing that supplies the commit is `PAR-001`'s.
-Blob materialization uses one `git cat-file --batch` process per repository
+Blob materialization prefetches the selected blob object ids in one (or a few
+chunked) credential-bearing `git -c fetch.negotiationAlgorithm=noop fetch` want
+lists, then reads them through one `git cat-file --batch` process per repository
 tree so a multi-thousand-file checkout finishes in seconds while keeping
-per-blob size and secret-marker bounds. A killed acquisition's stage, transport,
+per-blob size and secret-marker bounds and the `blob:none` partial-clone filter. A killed acquisition's stage, transport,
 runtime, git-exec and incomplete claim debris is reclaimed by the next
 acquisition of the same binding under the coordination locks (`AGENT-013`).
 
