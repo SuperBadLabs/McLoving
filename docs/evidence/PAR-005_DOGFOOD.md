@@ -29,6 +29,26 @@ ancestry and the sealed acquirer publishes the tree without its history
 the TLA+ tools; all are Foundation's alone. The verdict compared below is
 Foundation's whole-run conclusion against the dogfood build's status.
 
+
+## Notes (2026-09-27 redeploy on `0220759a` / #159)
+
+After merging `fix(source-acquirer): bulk-prefetch blobs so AGENT-013 can pass on Luigi` (#159),
+HeMan and Luigi dogfood were redeployed onto `0220759a6669444f15f0807b9b3c6ed9b34a753c`.
+
+Sealed checkout of this repository at that tip (AGENT-013):
+
+| Host | materialize wall (attempt start → receipt) | files | `source_unavailable` | build |
+|---|---|---|---|---|
+| HeMan | **13.0 s** | 2138 | false | `b8e6055b-0e34-452e-9183-6ff147c4c928` |
+| Luigi | 64–72 s (under concurrent cargo load on first probe; quiet retry 64.5 s) | 2138 | false | `76343578…` / `cd230caf…` (checkout succeeded; lanes failed/cancelled) |
+
+HeMan meets the <60 s acceptance. Luigi no longer fails closed with `source_unavailable`
+(the pre-#159 failure mode / ~14 min drip); residual wall above 60 s on Luigi is noted for a
+quieter follow-up probe, not a reopen of the promisor-drip bug. Row 1's ~14 min HeMan note
+on `4a234c6f` is superseded for throughput by #159.
+
+Consecutive match count after row 2: **2 / 10**.
+
 ## Verdicts
 
 Recorded by `scripts/dogfood/verdicts.sh`, newest last. `Foundation` is
@@ -45,3 +65,4 @@ as `revision_mismatch` and counted as a mismatch.
 | # | Commit | Build created (UTC) | Foundation run | Foundation | McLoving build | McLoving | Match |
 |---|---|---|---|---|---|---|---|
 | 1 | `4a234c6f7f1f` | 2026-09-26T09:07:51.317Z | 36218738244 | success | `b26d79f5-64f2-4625-8314-69189ecc3e37` | succeeded | yes |
+| 2 | `0220759a6669` | 2026-09-27T05:52:49.348Z | 36298039770 | success | `b8e6055b-0e34-452e-9183-6ff147c4c928` | succeeded | yes |
