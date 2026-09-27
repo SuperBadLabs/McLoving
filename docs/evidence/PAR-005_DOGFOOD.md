@@ -49,7 +49,7 @@ on `4a234c6f` is superseded for throughput by #159.
 
 Consecutive match count after row 3: **3 / 10**.
 Luigi follow-up (2026-09-27 quiet probe): host load ~0.8–1.0, sealed checkout of
-`4f65905` still ~64.6 s wall (attempt start → first lane log). Residual &gt;60 s is
+`4f65905` still ~64.6 s wall (attempt start → first lane log). Residual >60 s is
 not load-only. rust-tests exit 101 on build `76343578…` was
 `mcloving-input-adapter` `contained_boundary_is_typed_bounded_replay_safe_and_read_only`
 panicking `ExpiredGrant`; a later build’s rust-tests passed and
