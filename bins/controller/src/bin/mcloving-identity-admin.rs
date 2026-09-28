@@ -104,7 +104,7 @@ async fn main() -> Result<()> {
                     authority: MembershipAuthority::Bootstrap,
                     actor_subject: &actor,
                     reason: &reason,
-                    expected_granted_at_unix_ms: None,
+                    expected_membership_revision: None,
                 })
                 .await
                 .context("grant project role")?;
@@ -137,7 +137,7 @@ async fn main() -> Result<()> {
                     authority: MembershipAuthority::Bootstrap,
                     actor_subject: &actor,
                     reason: &reason,
-                    expected_granted_at_unix_ms: None,
+                    expected_membership_revision: None,
                 })
                 .await
                 .context("revoke project role")?;

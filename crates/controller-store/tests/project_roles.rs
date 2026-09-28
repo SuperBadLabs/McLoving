@@ -166,8 +166,8 @@ async fn session(
                 token_digest: token,
                 refresh_token_digest: Some(digest(&format!("{label}-refresh"))),
                 issued_at_unix_ms: 10_000,
-                expires_at_unix_ms: 80_000,
-                refresh_expires_at_unix_ms: Some(90_000),
+                expires_at_unix_ms: i64::MAX / 2,
+                refresh_expires_at_unix_ms: Some(i64::MAX / 2 + 1),
             },
         )
         .await
@@ -190,7 +190,7 @@ fn grant<'a>(
         authority,
         actor_subject: "reviewer:par003",
         reason,
-        expected_granted_at_unix_ms: None,
+        expected_membership_revision: None,
     }
 }
 
@@ -207,7 +207,7 @@ fn revocation<'a>(
         authority,
         actor_subject: "reviewer:par003",
         reason,
-        expected_granted_at_unix_ms: None,
+        expected_membership_revision: None,
     }
 }
 
@@ -962,7 +962,7 @@ async fn membership_if_match_rejects_stale_granted_at() {
             authority: as_owner,
             actor_subject: "reviewer:par003",
             reason: "first grant",
-            expected_granted_at_unix_ms: Some(0),
+            expected_membership_revision: Some(0),
         })
         .await
         .expect("grant viewer");
@@ -979,15 +979,15 @@ async fn membership_if_match_rejects_stale_granted_at() {
             authority: as_owner,
             actor_subject: "reviewer:par003",
             reason: "stale create precondition",
-            expected_granted_at_unix_ms: Some(0),
+            expected_membership_revision: Some(0),
         })
         .await
         .expect_err("stale create must fail");
     assert!(matches!(
         err,
         StoreError::MembershipPreconditionFailed {
-            current_granted_at_unix_ms
-        } if current_granted_at_unix_ms == membership.granted_at_unix_ms
+            current_membership_revision
+        } if current_membership_revision == membership.membership_revision
     ));
 
     let changed = admin
@@ -999,7 +999,7 @@ async fn membership_if_match_rejects_stale_granted_at() {
             authority: as_owner,
             actor_subject: "reviewer:par003",
             reason: "matching change",
-            expected_granted_at_unix_ms: Some(membership.granted_at_unix_ms),
+            expected_membership_revision: Some(membership.membership_revision),
         })
         .await
         .expect("change with matching If-Match");
@@ -1020,15 +1020,15 @@ async fn membership_if_match_rejects_stale_granted_at() {
             authority: as_owner,
             actor_subject: "reviewer:par003",
             reason: "stale revoke",
-            expected_granted_at_unix_ms: Some(membership.granted_at_unix_ms),
+            expected_membership_revision: Some(membership.membership_revision),
         })
         .await
         .expect_err("stale revoke must fail");
     assert!(matches!(
         err,
         StoreError::MembershipPreconditionFailed {
-            current_granted_at_unix_ms
-        } if current_granted_at_unix_ms == updated.granted_at_unix_ms
+            current_membership_revision
+        } if current_membership_revision == updated.membership_revision
     ));
 }
 
@@ -1091,7 +1091,7 @@ async fn last_usable_owner_cannot_self_revoke_after_peer_disable() {
             authority: MembershipAuthority::Bootstrap,
             actor_subject: "operator:par003",
             reason: "disabled cannot hold role",
-            expected_granted_at_unix_ms: None,
+            expected_membership_revision: None,
         })
         .await
         .expect_err("disabled identity cannot be granted");

@@ -81,7 +81,7 @@ change or revoke an Owner, an Admin manages the roles below, the last
 usable (active) Owner cannot be revoked or demoted, and a revocation or
 demotion bumps the identity's lifecycle generation so its live sessions
 stop authenticating at once. Mutating membership routes require a quoted
-`If-Match` bound to the membership's `granted_at_unix_ms` (`"0"` when the
+`If-Match` bound to the membership's monotonic `membership_revision` (`"0"` when the
 membership must not yet exist) and return that value as `ETag`, so a
 lost-response retry cannot overwrite a newer grant or revoke a membership
 another owner restored. Each write is one `identity` audit record naming

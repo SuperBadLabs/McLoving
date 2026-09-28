@@ -2513,7 +2513,7 @@ fn put_project_membership_operation() -> Value {
         "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}
     });
     operation["responses"]["412"] = json!({
-        "description": "Membership granted_at_unix_ms precondition failed",
+        "description": "Membership revision precondition failed",
         "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}
     });
     operation
@@ -2533,7 +2533,7 @@ fn delete_project_membership_operation() -> Value {
         "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}
     });
     operation["responses"]["412"] = json!({
-        "description": "Membership granted_at_unix_ms precondition failed",
+        "description": "Membership revision precondition failed",
         "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}
     });
     operation
@@ -3730,6 +3730,7 @@ fn membership_json(membership: &ProjectMembership) -> Value {
         "role": membership.role,
         "granted_by": membership.granted_by,
         "granted_at_unix_ms": membership.granted_at_unix_ms,
+        "membership_revision": membership.membership_revision,
     })
 }
 
@@ -3747,11 +3748,11 @@ fn membership_error(error: StoreError) -> ApiError {
             message,
         ),
         StoreError::MembershipPreconditionFailed {
-            current_granted_at_unix_ms,
+            current_membership_revision,
         } => ApiError::new(
             StatusCode::PRECONDITION_FAILED,
             "membership_precondition_failed",
-            format!("current membership granted_at_unix_ms is {current_granted_at_unix_ms}"),
+            format!("current membership revision is {current_membership_revision}"),
         ),
         other => internal(other),
     }
@@ -3790,7 +3791,7 @@ async fn put_project_membership(
 ) -> Result<Response, ApiError> {
     let (principal, authority) =
         authorize_membership_writer(&state, &headers, organization_id, project_id).await?;
-    let expected_granted_at_unix_ms = expected_membership_revision(&headers)?;
+    let expected_membership_revision = expected_membership_revision(&headers)?;
     let outcome = state
         .store
         .grant_project_role(&ProjectRoleGrant {
@@ -3801,7 +3802,7 @@ async fn put_project_membership(
             authority,
             actor_subject: &principal.subject,
             reason: &request.reason,
-            expected_granted_at_unix_ms: Some(expected_granted_at_unix_ms),
+            expected_membership_revision: Some(expected_membership_revision),
         })
         .await
         .map_err(membership_error)?;
@@ -3824,7 +3825,7 @@ async fn put_project_membership(
     body["outcome"] = json!(label);
     body["previous_role"] = json!(previous);
     body["fenced_generation"] = json!(fenced_generation);
-    membership_mutation_response(status, body, membership.granted_at_unix_ms)
+    membership_mutation_response(status, body, membership.membership_revision)
 }
 
 async fn delete_project_membership(
@@ -3835,7 +3836,7 @@ async fn delete_project_membership(
 ) -> Result<Response, ApiError> {
     let (principal, authority) =
         authorize_membership_writer(&state, &headers, organization_id, project_id).await?;
-    let expected_granted_at_unix_ms = expected_membership_revision(&headers)?;
+    let expected_membership_revision = expected_membership_revision(&headers)?;
     let outcome = state
         .store
         .revoke_project_role(&ProjectRoleRevocation {
@@ -3845,7 +3846,7 @@ async fn delete_project_membership(
             authority,
             actor_subject: &principal.subject,
             reason: &request.reason,
-            expected_granted_at_unix_ms: Some(expected_granted_at_unix_ms),
+            expected_membership_revision: Some(expected_membership_revision),
         })
         .await
         .map_err(membership_error)?;
@@ -5935,7 +5936,7 @@ fn invalid_revision_precondition() -> ApiError {
     )
 }
 
-/// Membership PUT/DELETE bind `If-Match` to `granted_at_unix_ms` (`"0"` when
+/// Membership PUT/DELETE bind `If-Match` to `membership_revision` (`"0"` when
 /// the membership must not yet exist), so a lost-response retry cannot
 /// overwrite a newer grant or revoke a membership another owner restored.
 fn expected_membership_revision(headers: &HeaderMap) -> Result<i64, ApiError> {
@@ -5960,7 +5961,7 @@ fn invalid_membership_precondition() -> ApiError {
     ApiError::new(
         StatusCode::BAD_REQUEST,
         "invalid_membership_precondition",
-        "If-Match is required and must be a quoted non-negative membership granted_at_unix_ms (0 when absent)",
+        "If-Match is required and must be a quoted non-negative membership revision (0 when absent)",
     )
 }
 

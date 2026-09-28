@@ -248,7 +248,7 @@ async fn owner_grants_and_revokes_a_viewer_whose_bearer_is_then_refused() {
             authority: MembershipAuthority::Bootstrap,
             actor_subject: "operator:par003",
             reason: "bootstrap the project owner",
-            expected_granted_at_unix_ms: None,
+            expected_membership_revision: None,
         })
         .await
         .expect("bootstrap owner");
@@ -415,7 +415,7 @@ async fn membership_mutations_require_matching_if_match() {
             authority: MembershipAuthority::Bootstrap,
             actor_subject: "operator:par003",
             reason: "bootstrap the project owner",
-            expected_granted_at_unix_ms: None,
+            expected_membership_revision: None,
         })
         .await
         .expect("bootstrap owner");
@@ -446,9 +446,11 @@ async fn membership_mutations_require_matching_if_match() {
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
-    let granted_at = body["granted_at_unix_ms"].as_i64().expect("granted_at");
+    let revision = body["membership_revision"]
+        .as_i64()
+        .expect("membership_revision");
     let viewer_etag = etag.expect("etag");
-    assert_eq!(viewer_etag, format!("\"{granted_at}\""));
+    assert_eq!(viewer_etag, format!("\"{revision}\""));
 
     let (status, body, _) = call_with_headers(
         &app,
@@ -465,7 +467,7 @@ async fn membership_mutations_require_matching_if_match() {
         body["message"]
             .as_str()
             .unwrap_or_default()
-            .contains(&granted_at.to_string()),
+            .contains(&revision.to_string()),
         "{body}"
     );
 

@@ -773,9 +773,9 @@ pub enum StoreError {
     #[error("project role denied: {0}")]
     ProjectRoleDenied(String),
     #[error(
-        "membership revision precondition failed: current granted_at_unix_ms is {current_granted_at_unix_ms}"
+        "membership revision precondition failed: current membership_revision is {current_membership_revision}"
     )]
-    MembershipPreconditionFailed { current_granted_at_unix_ms: i64 },
+    MembershipPreconditionFailed { current_membership_revision: i64 },
     #[error("invalid authorization operation: {0}")]
     InvalidAuthorizationOperation(String),
     #[error("authorization operation conflict: {0}")]

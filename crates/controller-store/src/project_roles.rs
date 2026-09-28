@@ -108,9 +108,13 @@ impl MembershipAuthority {
             Self::Delegated {
                 caller: None,
                 policy_generation: Some(_),
-            } => {
-                denied("a mapped-policy membership write requires the caller's durable credential")
-            }
+            } => Ok(ResolvedAuthority {
+                // Static credentials have no durable identity to revalidate
+                // under a mapped policy; they remain Delegated Admin.
+                kind: "delegated",
+                role: Some(ProjectRole::Admin),
+                identity_id: None,
+            }),
             Self::Delegated {
                 caller: Some(caller),
                 policy_generation: None,
@@ -265,10 +269,10 @@ pub struct ProjectRoleGrant<'a> {
     pub authority: MembershipAuthority,
     pub actor_subject: &'a str,
     pub reason: &'a str,
-    /// When set, the membership's current `granted_at_unix_ms` must match
+    /// When set, the membership's current `membership_revision` must match
     /// (use `0` when the membership must not yet exist). `None` skips the
     /// check, for the identity-admin bootstrap path.
-    pub expected_granted_at_unix_ms: Option<i64>,
+    pub expected_membership_revision: Option<i64>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -279,9 +283,9 @@ pub struct ProjectRoleRevocation<'a> {
     pub authority: MembershipAuthority,
     pub actor_subject: &'a str,
     pub reason: &'a str,
-    /// When set, the membership's current `granted_at_unix_ms` must match.
+    /// When set, the membership's current `membership_revision` must match.
     /// `None` skips the check, for the identity-admin path.
-    pub expected_granted_at_unix_ms: Option<i64>,
+    pub expected_membership_revision: Option<i64>,
 }
 
 /// One membership row as recorded.
@@ -293,6 +297,7 @@ pub struct ProjectMembership {
     pub role: ProjectRole,
     pub granted_by: String,
     pub granted_at_unix_ms: i64,
+    pub membership_revision: i64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -389,6 +394,7 @@ impl Store {
         lock_identity_rows(
             &mut tx,
             grant.organization_id,
+            grant.project_id,
             grant.identity_id,
             grant.authority.caller_identity(),
         )
@@ -403,14 +409,14 @@ impl Store {
             grant.identity_id,
         )
         .await?;
-        let current_granted_at = current_granted_at_unix_ms(
+        let current_revision = current_membership_revision(
             &mut tx,
             grant.organization_id,
             grant.project_id,
             grant.identity_id,
         )
         .await?;
-        require_membership_precondition(grant.expected_granted_at_unix_ms, current_granted_at)?;
+        require_membership_precondition(grant.expected_membership_revision, current_revision)?;
         let authority = grant
             .authority
             .resolve(&mut tx, grant.organization_id, grant.project_id)
@@ -431,40 +437,55 @@ impl Store {
             }
         }
         let now_unix_ms = database_unix_ms(&mut tx).await?;
-        let membership =
-            |role: ProjectRole, granted_by: String, granted_at_unix_ms: i64| ProjectMembership {
-                identity_id: grant.identity_id,
-                project_id: grant.project_id,
-                subject: subject.clone(),
-                role,
-                granted_by,
-                granted_at_unix_ms,
-            };
+        let membership = |role: ProjectRole,
+                          granted_by: String,
+                          granted_at_unix_ms: i64,
+                          membership_revision: i64| ProjectMembership {
+            identity_id: grant.identity_id,
+            project_id: grant.project_id,
+            subject: subject.clone(),
+            role,
+            granted_by,
+            granted_at_unix_ms,
+            membership_revision,
+        };
         match previous {
             Some(existing) if existing == grant.role => {
-                let (granted_by, granted_at_unix_ms) = sqlx::query_as::<_, (String, i64)>(
-                    "SELECT granted_by, granted_at_unix_ms FROM project_memberships
-                     WHERE organization_id = $1 AND project_id = $2 AND identity_id = $3",
-                )
-                .bind(grant.organization_id)
-                .bind(grant.project_id)
-                .bind(grant.identity_id)
-                .fetch_one(&mut *tx)
-                .await?;
+                let (granted_by, granted_at_unix_ms, membership_revision) =
+                    sqlx::query_as::<_, (String, i64, i64)>(
+                        "SELECT granted_by, granted_at_unix_ms, membership_revision
+                         FROM project_memberships
+                         WHERE organization_id = $1 AND project_id = $2 AND identity_id = $3",
+                    )
+                    .bind(grant.organization_id)
+                    .bind(grant.project_id)
+                    .bind(grant.identity_id)
+                    .fetch_one(&mut *tx)
+                    .await?;
                 tx.commit().await?;
                 Ok(ProjectRoleGrantOutcome::Unchanged(membership(
                     existing,
                     granted_by,
                     granted_at_unix_ms,
+                    membership_revision,
                 )))
             }
             Some(existing) => {
                 if existing == ProjectRole::Owner && owners <= 1 {
                     return denied("the last Owner of a project cannot be demoted");
                 }
+                let next_revision = current_revision
+                    .expect("existing membership has a revision")
+                    .checked_add(1)
+                    .ok_or_else(|| {
+                        StoreError::InvalidIdentityOperation(
+                            "membership revision overflow".to_owned(),
+                        )
+                    })?;
                 sqlx::query(
                     "UPDATE project_memberships
-                     SET role = $4, granted_by = $5, granted_at_unix_ms = $6
+                     SET role = $4, granted_by = $5, granted_at_unix_ms = $6,
+                         membership_revision = $7
                      WHERE organization_id = $1 AND project_id = $2 AND identity_id = $3",
                 )
                 .bind(grant.organization_id)
@@ -473,6 +494,7 @@ impl Store {
                 .bind(grant.role.as_str())
                 .bind(grant.actor_subject)
                 .bind(now_unix_ms)
+                .bind(next_revision)
                 .execute(&mut *tx)
                 .await?;
                 let fenced_generation = if grant.role < existing {
@@ -504,16 +526,23 @@ impl Store {
                 .await?;
                 tx.commit().await?;
                 Ok(ProjectRoleGrantOutcome::Changed {
-                    membership: membership(grant.role, grant.actor_subject.to_owned(), now_unix_ms),
+                    membership: membership(
+                        grant.role,
+                        grant.actor_subject.to_owned(),
+                        now_unix_ms,
+                        next_revision,
+                    ),
                     previous: existing,
                     fenced_generation,
                 })
             }
             None => {
+                let next_revision = 1_i64;
                 sqlx::query(
                     "INSERT INTO project_memberships
-                         (identity_id, organization_id, project_id, role, granted_by, granted_at_unix_ms)
-                     VALUES ($3, $1, $2, $4, $5, $6)",
+                         (identity_id, organization_id, project_id, role, granted_by,
+                          granted_at_unix_ms, membership_revision)
+                     VALUES ($3, $1, $2, $4, $5, $6, $7)",
                 )
                 .bind(grant.organization_id)
                 .bind(grant.project_id)
@@ -521,6 +550,7 @@ impl Store {
                 .bind(grant.role.as_str())
                 .bind(grant.actor_subject)
                 .bind(now_unix_ms)
+                .bind(next_revision)
                 .execute(&mut *tx)
                 .await?;
                 append_audit_record(
@@ -548,6 +578,7 @@ impl Store {
                     grant.role,
                     grant.actor_subject.to_owned(),
                     now_unix_ms,
+                    next_revision,
                 )))
             }
         }
@@ -574,6 +605,7 @@ impl Store {
         lock_identity_rows(
             &mut tx,
             revocation.organization_id,
+            revocation.project_id,
             revocation.identity_id,
             revocation.authority.caller_identity(),
         )
@@ -585,17 +617,14 @@ impl Store {
             revocation.identity_id,
         )
         .await?;
-        let current_granted_at = current_granted_at_unix_ms(
+        let current_revision = current_membership_revision(
             &mut tx,
             revocation.organization_id,
             revocation.project_id,
             revocation.identity_id,
         )
         .await?;
-        require_membership_precondition(
-            revocation.expected_granted_at_unix_ms,
-            current_granted_at,
-        )?;
+        require_membership_precondition(revocation.expected_membership_revision, current_revision)?;
         let previous = previous.ok_or_else(|| {
             StoreError::IdentityConflict("identity holds no role in the project".to_owned())
         })?;
@@ -665,8 +694,8 @@ impl Store {
     ) -> Result<Vec<ProjectMembership>, StoreError> {
         let mut tx = self.tenant_transaction(organization_id).await?;
         require_project(&mut tx, organization_id, project_id).await?;
-        let rows = sqlx::query_as::<_, (Uuid, String, String, String, i64)>(
-            "SELECT m.identity_id, i.subject, m.role, m.granted_by, m.granted_at_unix_ms
+        let rows = sqlx::query_as::<_, (Uuid, String, String, String, i64, i64)>(
+            "SELECT m.identity_id, i.subject, m.role, m.granted_by, m.granted_at_unix_ms, m.membership_revision
              FROM project_memberships m
              JOIN identities i ON i.organization_id = m.organization_id AND i.id = m.identity_id
              WHERE m.organization_id = $1 AND m.project_id = $2
@@ -679,7 +708,14 @@ impl Store {
         tx.commit().await?;
         rows.into_iter()
             .map(
-                |(identity_id, subject, role, granted_by, granted_at_unix_ms)| {
+                |(
+                    identity_id,
+                    subject,
+                    role,
+                    granted_by,
+                    granted_at_unix_ms,
+                    membership_revision,
+                )| {
                     Ok(ProjectMembership {
                         identity_id,
                         project_id,
@@ -687,6 +723,7 @@ impl Store {
                         role: ProjectRole::parse(&role)?,
                         granted_by,
                         granted_at_unix_ms,
+                        membership_revision,
                     })
                 },
             )
@@ -953,18 +990,35 @@ async fn require_project(
 async fn lock_identity_rows(
     tx: &mut Transaction<'_, Postgres>,
     organization_id: Uuid,
+    project_id: Uuid,
     target: Uuid,
     caller: Option<Uuid>,
 ) -> Result<(), StoreError> {
+    // Lock the target, caller, and every current Owner identity in id order so
+    // a concurrent lifecycle disable of a peer Owner serializes with the
+    // usable-owner count this write is about to read.
     let mut ids = vec![target];
     ids.extend(caller);
     sqlx::query_scalar::<_, Uuid>(
-        "SELECT id FROM identities
-         WHERE organization_id = $1 AND id = ANY($2)
-         ORDER BY id FOR UPDATE",
+        "SELECT i.id
+         FROM identities AS i
+         WHERE i.organization_id = $1
+           AND (
+                i.id = ANY($2)
+                OR i.id IN (
+                    SELECT m.identity_id
+                    FROM project_memberships AS m
+                    WHERE m.organization_id = $1
+                      AND m.project_id = $3
+                      AND m.role = 'owner'
+                )
+           )
+         ORDER BY i.id
+         FOR UPDATE",
     )
     .bind(organization_id)
     .bind(&ids)
+    .bind(project_id)
     .fetch_all(&mut **tx)
     .await?;
     Ok(())
@@ -1027,34 +1081,34 @@ async fn owner_count(
 }
 
 fn require_membership_precondition(
-    expected_granted_at_unix_ms: Option<i64>,
-    current_granted_at_unix_ms: Option<i64>,
+    expected_membership_revision: Option<i64>,
+    current_membership_revision: Option<i64>,
 ) -> Result<(), StoreError> {
-    let Some(expected) = expected_granted_at_unix_ms else {
+    let Some(expected) = expected_membership_revision else {
         return Ok(());
     };
     if expected < 0 {
         return Err(StoreError::InvalidIdentityOperation(
-            "membership If-Match generation must be non-negative".to_owned(),
+            "membership If-Match revision must be non-negative".to_owned(),
         ));
     }
-    let current = current_granted_at_unix_ms.unwrap_or(0);
+    let current = current_membership_revision.unwrap_or(0);
     if current != expected {
         return Err(StoreError::MembershipPreconditionFailed {
-            current_granted_at_unix_ms: current,
+            current_membership_revision: current,
         });
     }
     Ok(())
 }
 
-async fn current_granted_at_unix_ms(
+async fn current_membership_revision(
     tx: &mut Transaction<'_, Postgres>,
     organization_id: Uuid,
     project_id: Uuid,
     identity_id: Uuid,
 ) -> Result<Option<i64>, StoreError> {
     Ok(sqlx::query_scalar::<_, i64>(
-        "SELECT granted_at_unix_ms FROM project_memberships
+        "SELECT membership_revision FROM project_memberships
          WHERE organization_id = $1 AND project_id = $2 AND identity_id = $3",
     )
     .bind(organization_id)
