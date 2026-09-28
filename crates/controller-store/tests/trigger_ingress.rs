@@ -3492,14 +3492,24 @@ async fn native_schedule_horizon_extends_without_rewriting_versions_and_dual_con
     }
     tx.commit().await.unwrap();
 
+    let deliveries_before = store
+        .count_schedule_deliveries(organization_id, catchup_trigger)
+        .await
+        .unwrap();
     let peer = Store::new(store.pool().clone());
     let (left, right) = tokio::join!(
         store.process_due_schedule_slots(organization_id, 8),
         peer.process_due_schedule_slots(organization_id, 8)
     );
-    let fired = left.unwrap() + right.unwrap();
+    left.unwrap();
+    right.unwrap();
+    let deliveries_after = store
+        .count_schedule_deliveries(organization_id, catchup_trigger)
+        .await
+        .unwrap();
     assert_eq!(
-        fired, 1,
+        deliveries_after - deliveries_before,
+        1,
         "only the latest missed slot may fire after downtime"
     );
     let skipped: i64 = sqlx::query_scalar(
@@ -3517,11 +3527,19 @@ async fn native_schedule_horizon_extends_without_rewriting_versions_and_dual_con
     .await
     .unwrap();
     assert_eq!(skipped, 2);
-    assert_eq!(
-        store
-            .count_schedule_deliveries(organization_id, catchup_trigger)
-            .await
-            .unwrap(),
-        1
-    );
+    let fired_slot: Option<i64> = sqlx::query_scalar(
+        "SELECT resolved_slot_unix_ms FROM trigger_schedule_slots
+         WHERE organization_id = $1 AND trigger_id = $2
+           AND trigger_generation = 1 AND outcome = 'fired'
+           AND resolved_slot_unix_ms IN ($3, $4, $5)",
+    )
+    .bind(organization_id)
+    .bind(catchup_trigger)
+    .bind(past)
+    .bind(past + 60_000)
+    .bind(past + 120_000)
+    .fetch_optional(store.pool())
+    .await
+    .unwrap();
+    assert_eq!(fired_slot, Some(past + 120_000));
 }
