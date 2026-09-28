@@ -337,6 +337,7 @@ async fn main() -> Result<()> {
     let trigger_retry_state = state.clone();
     let trigger_retry_organization = worker.organization_id;
     let notification_delivery_state = state.clone();
+    let schedule_delivery_state = state.clone();
     let server = async {
         axum::serve(
             listener,
@@ -373,7 +374,6 @@ async fn main() -> Result<()> {
     let notification_delivery_loop =
         run_notification_delivery_worker(notification_delivery_state, trigger_retry_organization);
     tokio::pin!(notification_delivery_loop);
-    let schedule_delivery_state = state.clone();
     let schedule_delivery_loop =
         run_schedule_delivery_worker(schedule_delivery_state, trigger_retry_organization);
     tokio::pin!(schedule_delivery_loop);
