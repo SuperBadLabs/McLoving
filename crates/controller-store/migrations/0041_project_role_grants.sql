@@ -35,6 +35,17 @@ CREATE POLICY project_membership_revision_counters_tenant_policy
         organization_id = NULLIF(current_setting('mcloving.organization_id', true), '')::uuid
     );
 
+
+-- Existing memberships already carry membership_revision = 1 from the
+-- column default; seed counters so the next allocate advances past that
+-- value instead of reissuing 1 after an upgrade.
+INSERT INTO project_membership_revision_counters (
+    organization_id, project_id, identity_id, last_revision
+)
+SELECT organization_id, project_id, identity_id, membership_revision
+FROM project_memberships
+ON CONFLICT (organization_id, project_id, identity_id) DO NOTHING;
+
 GRANT SELECT, INSERT, UPDATE ON project_membership_revision_counters TO mcloving_tenant;
 GRANT INSERT, UPDATE, DELETE ON project_memberships TO mcloving_tenant;
 GRANT UPDATE (lifecycle_generation) ON identities TO mcloving_tenant;
