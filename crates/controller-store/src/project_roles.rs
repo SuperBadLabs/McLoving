@@ -54,10 +54,13 @@ pub enum MembershipAuthority {
     ///
     /// When the caller was authorized through an imported project policy,
     /// `policy_generation` binds the generation that authorized
-    /// `ProjectConfigure`. The write takes the authorization-policy lock,
-    /// requires that generation still current, and reauthorizes the grant
-    /// inside the transaction so a policy install that removes the grant
-    /// cannot race a role mutation.
+    /// `ProjectConfigure` on the authentication snapshot (not a later
+    /// current-generation lookup). The write takes the authorization-policy
+    /// lock, requires that generation still current, and — for durable
+    /// callers — reauthorizes the grant inside the transaction so a policy
+    /// install that removes the grant cannot race a role mutation. Static
+    /// callers have no identity to reauthorize; binding the snapshot
+    /// generation is their fence against a replacement stamped after Allow.
     Delegated {
         caller: Option<DurableCaller>,
         policy_generation: Option<i64>,

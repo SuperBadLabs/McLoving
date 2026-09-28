@@ -933,6 +933,128 @@ async fn mapped_policy_generation_is_reauthorized_under_the_policy_lock() {
 }
 
 #[tokio::test]
+async fn static_delegated_bound_generation_is_refused_after_policy_advances() {
+    let Some(admin) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let tenant = tenant(&admin).await;
+    let runtime = runtime_store(&admin).await;
+    let owner = human(&admin, &tenant, "owner").await;
+    let viewer = human(&admin, &tenant, "viewer").await;
+    admin
+        .grant_project_role(&grant(
+            &tenant,
+            owner,
+            ProjectRole::Owner,
+            MembershipAuthority::Bootstrap,
+            "bootstrap owner",
+        ))
+        .await
+        .unwrap();
+
+    let configure = [
+        (Action::ProjectView, GrantDecision::Allow),
+        (Action::ProjectConfigure, GrantDecision::Allow),
+    ]
+    .into_iter()
+    .collect();
+    // A throwaway service mapping so generation 1 exists; static callers have
+    // no identity to reauthorize against, so currency of the bound generation
+    // is their only policy fence.
+    let service_id = Uuid::new_v4();
+    admin
+        .provision_service_identity(&NewServiceIdentity {
+            organization_id: tenant.organization_id,
+            identity_id: service_id,
+            subject: "service:par003-static-gen".to_owned(),
+            scopes: [ServiceScope::ProjectAdmin].into(),
+            actor_subject: "reviewer:par003".to_owned(),
+        })
+        .await
+        .expect("provision service");
+    admin
+        .install_authorization_policy(&mapped_policy(
+            &tenant,
+            1,
+            None,
+            vec![service_mapping(Uuid::new_v4(), service_id, configure)],
+        ))
+        .await
+        .expect("install generation 1");
+
+    let static_at_gen1 = MembershipAuthority::Delegated {
+        caller: None,
+        policy_generation: Some(1),
+    };
+    assert!(matches!(
+        runtime
+            .grant_project_role(&grant(
+                &tenant,
+                viewer,
+                ProjectRole::Viewer,
+                static_at_gen1,
+                "static under current generation",
+            ))
+            .await
+            .unwrap(),
+        ProjectRoleGrantOutcome::Granted(_)
+    ));
+
+    let view_only = [(Action::ProjectView, GrantDecision::Allow)]
+        .into_iter()
+        .collect();
+    admin
+        .install_authorization_policy(&mapped_policy(
+            &tenant,
+            2,
+            Some(1),
+            vec![service_mapping(Uuid::new_v4(), service_id, view_only)],
+        ))
+        .await
+        .expect("install generation 2");
+
+    // Binding the authorizing snapshot (generation 1) must not succeed after
+    // current advances — even though static resolve only checks currency.
+    assert!(
+        is_denied(
+            runtime
+                .grant_project_role(&grant(
+                    &tenant,
+                    human(&admin, &tenant, "target").await,
+                    ProjectRole::Viewer,
+                    static_at_gen1,
+                    "stale static generation must not grant",
+                ))
+                .await
+        ),
+        "static Delegated bound to a superseded policy generation must be refused"
+    );
+
+    // Stamping the newer current generation without a matching authorization
+    // snapshot is what the API must not do; the store still admits it when
+    // callers supply Some(current) because static has no identity to
+    // reauthorize. API binding of the snapshot generation closes that window.
+    let static_at_gen2 = MembershipAuthority::Delegated {
+        caller: None,
+        policy_generation: Some(2),
+    };
+    assert!(matches!(
+        runtime
+            .grant_project_role(&grant(
+                &tenant,
+                human(&admin, &tenant, "later").await,
+                ProjectRole::Viewer,
+                static_at_gen2,
+                "store admits current generation for static",
+            ))
+            .await
+            .unwrap(),
+        ProjectRoleGrantOutcome::Granted(_)
+    ));
+}
+
+#[tokio::test]
 async fn membership_if_match_rejects_stale_granted_at() {
     let Some(admin) = test_store().await else {
         eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");

@@ -134,6 +134,11 @@ pub struct Principal {
     pub service_scopes: BTreeSet<ServiceScope>,
     /// Projects whose imported Jenkins policy disables role-lattice fallback.
     pub mapped_projects: BTreeSet<Uuid>,
+    /// Policy generation that was current when each mapped project's grants
+    /// were snapshotted onto this principal. Membership writers bind this
+    /// generation (not a later lookup) so a replacement cannot be stamped
+    /// onto a stale Allow.
+    pub mapped_policy_generations: BTreeMap<Uuid, i64>,
     /// Current, provenance-valid action decisions for imported project policy.
     pub action_grants: BTreeMap<(Uuid, Action), GrantDecision>,
 }
@@ -252,6 +257,7 @@ mod tests {
             project_roles: [(project_id, role)].into(),
             service_scopes: BTreeSet::new(),
             mapped_projects: BTreeSet::new(),
+            mapped_policy_generations: BTreeMap::new(),
             action_grants: BTreeMap::new(),
         }
     }
@@ -266,6 +272,7 @@ mod tests {
             project_roles: BTreeMap::new(),
             service_scopes: BTreeSet::new(),
             mapped_projects: BTreeSet::new(),
+            mapped_policy_generations: BTreeMap::new(),
             action_grants: BTreeMap::new(),
         };
         assert_eq!(
@@ -330,6 +337,7 @@ mod tests {
             project_roles: BTreeMap::new(),
             service_scopes: BTreeSet::new(),
             mapped_projects: BTreeSet::new(),
+            mapped_policy_generations: BTreeMap::new(),
             action_grants: BTreeMap::new(),
         };
         assert_eq!(
@@ -359,6 +367,7 @@ mod tests {
             ]
             .into(),
             mapped_projects: BTreeSet::new(),
+            mapped_policy_generations: BTreeMap::new(),
             action_grants: BTreeMap::new(),
         };
         for action in [
@@ -387,6 +396,7 @@ mod tests {
         let project_id = Uuid::new_v4();
         let mut principal = human(ProjectRole::Owner, organization_id, project_id);
         principal.mapped_projects.insert(project_id);
+        principal.mapped_policy_generations.insert(project_id, 1);
         principal
             .action_grants
             .insert((project_id, Action::ProjectView), GrantDecision::Allow);

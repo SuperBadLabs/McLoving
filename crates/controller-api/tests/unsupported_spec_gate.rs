@@ -77,6 +77,7 @@ async fn validate_and_admission_reject_the_hundred_step_stage_with_one_named_dia
         .into_iter()
         .collect::<BTreeSet<_>>(),
         mapped_projects: BTreeSet::new(),
+        mapped_policy_generations: BTreeMap::new(),
         action_grants: BTreeMap::new(),
     };
     let app =

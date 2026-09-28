@@ -84,7 +84,12 @@ stop authenticating at once. Mutating membership routes require a quoted
 `If-Match` bound to the membership's monotonic `membership_revision` from a counter that survives revocation (`"0"` when the
 membership must not yet exist) and return that value as `ETag`, so a
 lost-response retry cannot overwrite a newer grant or revoke a membership
-another owner restored. Each write is one `identity` audit record naming
+another owner restored. When `ProjectConfigure` came from an imported
+project policy, the write binds that authentication snapshot's policy
+generation (not a later current-generation lookup) and re-checks it under
+the authorization-policy lock so a replacement cannot be stamped onto a
+stale Allow — including for static Delegated callers that have no durable
+identity to reauthorize. Each write is one `identity` audit record naming
 the authority, the actor's role, the previous role, the reason and the
 fenced generation.
 

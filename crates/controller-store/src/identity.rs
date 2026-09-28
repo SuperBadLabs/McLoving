@@ -1967,15 +1967,19 @@ pub(super) async fn load_principal(
     for scope in scope_rows {
         service_scopes.insert(parse_scope(&scope)?);
     }
-    let mapped_projects = sqlx::query_scalar::<_, Uuid>(
-        "SELECT project_id FROM authorization_project_policies
+    let mapped_rows = sqlx::query_as::<_, (Uuid, i64)>(
+        "SELECT project_id, current_generation FROM authorization_project_policies
          WHERE organization_id = $1 ORDER BY project_id",
     )
     .bind(organization_id)
     .fetch_all(&mut **tx)
-    .await?
-    .into_iter()
-    .collect::<BTreeSet<_>>();
+    .await?;
+    let mut mapped_projects = BTreeSet::new();
+    let mut mapped_policy_generations = BTreeMap::new();
+    for (project_id, generation) in mapped_rows {
+        mapped_projects.insert(project_id);
+        mapped_policy_generations.insert(project_id, generation);
+    }
     let grant_rows = sqlx::query_as::<_, (Uuid, String, String)>(
         "SELECT grants.project_id, grants.action, grants.decision
          FROM authorization_project_policies current_policy
@@ -2048,6 +2052,7 @@ pub(super) async fn load_principal(
         project_roles,
         service_scopes,
         mapped_projects,
+        mapped_policy_generations,
         action_grants,
     })
 }

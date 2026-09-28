@@ -3710,6 +3710,28 @@ async fn authorize_membership_writer(
         {
             MembershipAuthority::Principal(caller)
         }
+        // Mapped Allow was snapshotted with a generation on the principal.
+        // Bind that generation — not a post-authorize lookup that may have
+        // advanced to a policy that no longer grants ProjectConfigure —
+        // so static Delegated callers cannot inherit a newer current
+        // generation without reauthorization evidence.
+        (caller, _, _) if principal.mapped_projects.contains(&project_id) => {
+            let Some(policy_generation) = principal
+                .mapped_policy_generations
+                .get(&project_id)
+                .copied()
+            else {
+                return Err(ApiError::new(
+                    StatusCode::FORBIDDEN,
+                    "forbidden",
+                    "mapped policy authorization is missing a bound generation",
+                ));
+            };
+            MembershipAuthority::Delegated {
+                caller,
+                policy_generation: Some(policy_generation),
+            }
+        }
         (caller, Some(policy_generation), _) => MembershipAuthority::Delegated {
             caller,
             policy_generation: Some(policy_generation),
@@ -8115,7 +8137,7 @@ mod tests {
     }
 
     use super::*;
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
 
     #[test]
     fn token_comparison_is_exact() {
@@ -8163,6 +8185,7 @@ mod tests {
             project_roles: BTreeMap::new(),
             service_scopes: [mcloving_controller_store::authz::ServiceScope::ProjectAdmin].into(),
             mapped_projects: BTreeSet::new(),
+            mapped_policy_generations: BTreeMap::new(),
             action_grants: BTreeMap::new(),
         };
         let human = Principal {
@@ -8176,6 +8199,7 @@ mod tests {
             .into(),
             service_scopes: BTreeSet::new(),
             mapped_projects: BTreeSet::new(),
+            mapped_policy_generations: BTreeMap::new(),
             action_grants: BTreeMap::new(),
         };
         let state = ApiState::new(
@@ -8218,6 +8242,7 @@ mod tests {
             project_roles: BTreeMap::new(),
             service_scopes: BTreeSet::new(),
             mapped_projects: BTreeSet::new(),
+            mapped_policy_generations: BTreeMap::new(),
             action_grants: BTreeMap::new(),
         };
         let state = ApiState::new(
@@ -8264,6 +8289,7 @@ mod tests {
             project_roles: BTreeMap::new(),
             service_scopes: BTreeSet::new(),
             mapped_projects: BTreeSet::new(),
+            mapped_policy_generations: BTreeMap::new(),
             action_grants: BTreeMap::new(),
         };
         let shared = "shared-cross-namespace-secret-token-32-bytes";
