@@ -271,8 +271,8 @@ async fn owner_grants_and_revokes_a_viewer_whose_bearer_is_then_refused() {
     let viewer_etag = etag.expect("grant returns ETag");
     assert_eq!(
         viewer_etag,
-        format!("\"{}\"", body["granted_at_unix_ms"]),
-        "ETag mirrors granted_at_unix_ms"
+        format!("\"{}\"", body["membership_revision"]),
+        "ETag mirrors membership_revision"
     );
     let viewer_bearer = bearer(&runtime, &tenant, viewer, "viewer").await;
     let (status, _) = call(&app, Method::GET, &pipelines, &viewer_bearer, None).await;
@@ -310,15 +310,15 @@ async fn owner_grants_and_revokes_a_viewer_whose_bearer_is_then_refused() {
     let (status, list, _) =
         call_with_headers(&app, Method::GET, &memberships, &owner_bearer, None, None).await;
     assert_eq!(status, StatusCode::OK);
-    let owner_granted_at = list["memberships"]
+    let owner_revision = list["memberships"]
         .as_array()
         .expect("memberships")
         .iter()
         .find(|membership| membership["subject"] == "human:owner")
-        .expect("owner membership")["granted_at_unix_ms"]
+        .expect("owner membership")["membership_revision"]
         .as_i64()
-        .expect("granted_at");
-    let owner_etag = format!("\"{owner_granted_at}\"");
+        .expect("membership_revision");
+    let owner_etag = format!("\"{owner_revision}\"");
     let (status, body, _) = call_with_headers(
         &app,
         Method::DELETE,
@@ -485,7 +485,7 @@ async fn membership_mutations_require_matching_if_match() {
     assert_eq!(body["outcome"], "unchanged");
     assert_eq!(etag.as_deref(), Some(viewer_etag.as_str()));
 
-    // A role change advances granted_at; a stale If-Match then conflicts.
+    // A role change advances membership_revision; a stale If-Match then conflicts.
     let (status, body, new_etag) = call_with_headers(
         &app,
         Method::PUT,
@@ -513,7 +513,7 @@ async fn membership_mutations_require_matching_if_match() {
     assert_eq!(body["code"], "membership_precondition_failed");
 
     // DELETE with a matching ETag revokes; a stale ETag cannot revoke a
-    // membership another writer restored under a newer granted_at.
+    // membership another writer restored under a newer membership_revision.
     let (status, body, _) = call_with_headers(
         &app,
         Method::DELETE,

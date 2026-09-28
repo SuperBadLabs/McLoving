@@ -1098,6 +1098,95 @@ async fn last_usable_owner_cannot_self_revoke_after_peer_disable() {
     assert!(matches!(err, StoreError::IdentityConflict(_)), "{err:?}");
 }
 
+#[tokio::test]
+async fn regrant_after_revoke_does_not_reuse_membership_revision() {
+    let Some(admin) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let tenant = tenant(&admin).await;
+    let owner = human(&admin, &tenant, "owner").await;
+    let viewer = human(&admin, &tenant, "viewer").await;
+    let as_owner = as_principal(&admin, &tenant, owner).await;
+    admin
+        .grant_project_role(&grant(
+            &tenant,
+            owner,
+            ProjectRole::Owner,
+            MembershipAuthority::Bootstrap,
+            "bootstrap",
+        ))
+        .await
+        .expect("bootstrap owner");
+    let first = admin
+        .grant_project_role(&ProjectRoleGrant {
+            organization_id: tenant.organization_id,
+            project_id: tenant.project_id,
+            identity_id: viewer,
+            role: ProjectRole::Viewer,
+            authority: as_owner,
+            actor_subject: "reviewer:par003",
+            reason: "first",
+            expected_membership_revision: Some(0),
+        })
+        .await
+        .expect("grant");
+    let ProjectRoleGrantOutcome::Granted(first) = first else {
+        panic!("granted");
+    };
+    assert_eq!(first.membership_revision, 1);
+    admin
+        .revoke_project_role(&ProjectRoleRevocation {
+            organization_id: tenant.organization_id,
+            project_id: tenant.project_id,
+            identity_id: viewer,
+            authority: as_owner,
+            actor_subject: "reviewer:par003",
+            reason: "revoke",
+            expected_membership_revision: Some(1),
+        })
+        .await
+        .expect("revoke");
+    let second = admin
+        .grant_project_role(&ProjectRoleGrant {
+            organization_id: tenant.organization_id,
+            project_id: tenant.project_id,
+            identity_id: viewer,
+            role: ProjectRole::Viewer,
+            authority: as_owner,
+            actor_subject: "reviewer:par003",
+            reason: "regrant",
+            expected_membership_revision: Some(0),
+        })
+        .await
+        .expect("regrant");
+    let ProjectRoleGrantOutcome::Granted(second) = second else {
+        panic!("regranted");
+    };
+    assert!(
+        second.membership_revision > first.membership_revision,
+        "re-grant must advance past the revoked revision"
+    );
+    let err = admin
+        .revoke_project_role(&ProjectRoleRevocation {
+            organization_id: tenant.organization_id,
+            project_id: tenant.project_id,
+            identity_id: viewer,
+            authority: as_owner,
+            actor_subject: "reviewer:par003",
+            reason: "stale delete of revision 1",
+            expected_membership_revision: Some(first.membership_revision),
+        })
+        .await
+        .expect_err("stale delete must not revoke the restored membership");
+    assert!(matches!(
+        err,
+        StoreError::MembershipPreconditionFailed {
+            current_membership_revision
+        } if current_membership_revision == second.membership_revision
+    ));
+}
+
 fn mapped_policy(
     tenant: &Tenant,
     generation: i64,

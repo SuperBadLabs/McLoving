@@ -474,14 +474,13 @@ impl Store {
                 if existing == ProjectRole::Owner && owners <= 1 {
                     return denied("the last Owner of a project cannot be demoted");
                 }
-                let next_revision = current_revision
-                    .expect("existing membership has a revision")
-                    .checked_add(1)
-                    .ok_or_else(|| {
-                        StoreError::InvalidIdentityOperation(
-                            "membership revision overflow".to_owned(),
-                        )
-                    })?;
+                let next_revision = allocate_membership_revision(
+                    &mut tx,
+                    grant.organization_id,
+                    grant.project_id,
+                    grant.identity_id,
+                )
+                .await?;
                 sqlx::query(
                     "UPDATE project_memberships
                      SET role = $4, granted_by = $5, granted_at_unix_ms = $6,
@@ -537,7 +536,13 @@ impl Store {
                 })
             }
             None => {
-                let next_revision = 1_i64;
+                let next_revision = allocate_membership_revision(
+                    &mut tx,
+                    grant.organization_id,
+                    grant.project_id,
+                    grant.identity_id,
+                )
+                .await?;
                 sqlx::query(
                     "INSERT INTO project_memberships
                          (identity_id, organization_id, project_id, role, granted_by,
@@ -1078,6 +1083,32 @@ async fn owner_count(
     .bind(project_id)
     .fetch_one(&mut **tx)
     .await?)
+}
+
+async fn allocate_membership_revision(
+    tx: &mut Transaction<'_, Postgres>,
+    organization_id: Uuid,
+    project_id: Uuid,
+    identity_id: Uuid,
+) -> Result<i64, StoreError> {
+    // Counters survive membership deletion so a re-grant never reissues an
+    // earlier revision a lost-response DELETE might still carry.
+    let revision = sqlx::query_scalar::<_, i64>(
+        "INSERT INTO project_membership_revision_counters (
+             organization_id, project_id, identity_id, last_revision
+         )
+         VALUES ($1, $2, $3, 1)
+         ON CONFLICT (organization_id, project_id, identity_id)
+         DO UPDATE SET last_revision =
+             project_membership_revision_counters.last_revision + 1
+         RETURNING last_revision",
+    )
+    .bind(organization_id)
+    .bind(project_id)
+    .bind(identity_id)
+    .fetch_one(&mut **tx)
+    .await?;
+    Ok(revision)
 }
 
 fn require_membership_precondition(

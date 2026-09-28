@@ -934,6 +934,9 @@ impl Store {
                    ('project_memberships', 'INSERT'),
                    ('project_memberships', 'UPDATE'),
                    ('project_memberships', 'DELETE'),
+                   ('project_membership_revision_counters', 'SELECT'),
+                   ('project_membership_revision_counters', 'INSERT'),
+                   ('project_membership_revision_counters', 'UPDATE'),
                    ('service_scopes', 'SELECT'),
                    ('builds', 'SELECT'), ('builds', 'INSERT'),
                    ('builds', 'UPDATE'), ('builds', 'DELETE'),
@@ -1326,7 +1329,7 @@ impl Store {
             "WITH expected(table_name) AS (
                  VALUES
                    ('organizations'), ('projects'), ('identities'),
-                   ('project_memberships'), ('service_scopes'), ('builds'),
+                   ('project_memberships'), ('project_membership_revision_counters'), ('service_scopes'), ('builds'),
                    ('nodes'), ('attempts'), ('build_events'), ('outbox'),
                    ('pipeline_definitions'), ('pipeline_revisions'),
                    ('pipeline_operational_state_history'),
