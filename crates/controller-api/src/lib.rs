@@ -2499,15 +2499,21 @@ fn put_project_membership_operation() -> Value {
         "memberships",
         "Grant a human project role, or change the role an identity holds",
         "201",
-        Vec::new(),
+        vec![header_parameter("If-Match", true)],
         Some("ProjectRoleGrantRequest"),
     );
     operation["responses"]["200"] = json!({
         "description": "Role changed, or already held",
+        "headers": {"ETag": {"schema": {"type": "string"}}},
         "content": {"application/json": {"schema": {"type": "object"}}}
     });
+    operation["responses"]["201"]["headers"] = json!({"ETag": {"schema": {"type": "string"}}});
     operation["responses"]["403"] = json!({
         "description": "The caller's role does not manage this role: Owner is needed to grant Owner or to change or revoke an Owner, and a project's first Owner is bootstrapped offline",
+        "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}
+    });
+    operation["responses"]["412"] = json!({
+        "description": "Membership granted_at_unix_ms precondition failed",
         "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}
     });
     operation
@@ -2519,11 +2525,15 @@ fn delete_project_membership_operation() -> Value {
         "memberships",
         "Revoke a human project role and fence the identity's live sessions",
         "200",
-        Vec::new(),
+        vec![header_parameter("If-Match", true)],
         Some("ProjectRoleRevokeRequest"),
     );
     operation["responses"]["403"] = json!({
         "description": "The caller's role does not manage this role, or the identity is the project's last Owner",
+        "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}
+    });
+    operation["responses"]["412"] = json!({
+        "description": "Membership granted_at_unix_ms precondition failed",
         "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}
     });
     operation
@@ -3736,6 +3746,13 @@ fn membership_error(error: StoreError) -> ApiError {
             "invalid_identity_operation",
             message,
         ),
+        StoreError::MembershipPreconditionFailed {
+            current_granted_at_unix_ms,
+        } => ApiError::new(
+            StatusCode::PRECONDITION_FAILED,
+            "membership_precondition_failed",
+            format!("current membership granted_at_unix_ms is {current_granted_at_unix_ms}"),
+        ),
         other => internal(other),
     }
 }
@@ -3773,6 +3790,7 @@ async fn put_project_membership(
 ) -> Result<Response, ApiError> {
     let (principal, authority) =
         authorize_membership_writer(&state, &headers, organization_id, project_id).await?;
+    let expected_granted_at_unix_ms = expected_membership_revision(&headers)?;
     let outcome = state
         .store
         .grant_project_role(&ProjectRoleGrant {
@@ -3783,6 +3801,7 @@ async fn put_project_membership(
             authority,
             actor_subject: &principal.subject,
             reason: &request.reason,
+            expected_granted_at_unix_ms: Some(expected_granted_at_unix_ms),
         })
         .await
         .map_err(membership_error)?;
@@ -3800,11 +3819,12 @@ async fn put_project_membership(
         ),
         ProjectRoleGrantOutcome::Unchanged(_) => (StatusCode::OK, "unchanged", None, None),
     };
-    let mut body = membership_json(outcome.membership());
+    let membership = outcome.membership();
+    let mut body = membership_json(membership);
     body["outcome"] = json!(label);
     body["previous_role"] = json!(previous);
     body["fenced_generation"] = json!(fenced_generation);
-    Ok((status, Json(body)).into_response())
+    membership_mutation_response(status, body, membership.granted_at_unix_ms)
 }
 
 async fn delete_project_membership(
@@ -3815,6 +3835,7 @@ async fn delete_project_membership(
 ) -> Result<Response, ApiError> {
     let (principal, authority) =
         authorize_membership_writer(&state, &headers, organization_id, project_id).await?;
+    let expected_granted_at_unix_ms = expected_membership_revision(&headers)?;
     let outcome = state
         .store
         .revoke_project_role(&ProjectRoleRevocation {
@@ -3824,6 +3845,7 @@ async fn delete_project_membership(
             authority,
             actor_subject: &principal.subject,
             reason: &request.reason,
+            expected_granted_at_unix_ms: Some(expected_granted_at_unix_ms),
         })
         .await
         .map_err(membership_error)?;
@@ -5911,6 +5933,48 @@ fn invalid_revision_precondition() -> ApiError {
         "invalid_revision_precondition",
         "If-Match is required and must be a quoted non-negative pipeline revision",
     )
+}
+
+/// Membership PUT/DELETE bind `If-Match` to `granted_at_unix_ms` (`"0"` when
+/// the membership must not yet exist), so a lost-response retry cannot
+/// overwrite a newer grant or revoke a membership another owner restored.
+fn expected_membership_revision(headers: &HeaderMap) -> Result<i64, ApiError> {
+    let Some(value) = headers.get(header::IF_MATCH) else {
+        return Err(invalid_membership_precondition());
+    };
+    let value = value
+        .to_str()
+        .map_err(|_| invalid_membership_precondition())?;
+    let value = value
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+        .ok_or_else(invalid_membership_precondition)?;
+    value
+        .parse::<i64>()
+        .ok()
+        .filter(|revision| *revision >= 0)
+        .ok_or_else(invalid_membership_precondition)
+}
+
+fn invalid_membership_precondition() -> ApiError {
+    ApiError::new(
+        StatusCode::BAD_REQUEST,
+        "invalid_membership_precondition",
+        "If-Match is required and must be a quoted non-negative membership granted_at_unix_ms (0 when absent)",
+    )
+}
+
+fn membership_mutation_response(
+    status: StatusCode,
+    body: Value,
+    granted_at_unix_ms: i64,
+) -> Result<Response, ApiError> {
+    let mut response = (status, Json(body)).into_response();
+    response.headers_mut().insert(
+        header::ETAG,
+        HeaderValue::from_str(&format!("\"{granted_at_unix_ms}\"")).map_err(internal)?,
+    );
+    Ok(response)
 }
 
 fn page_limit(limit: Option<u32>) -> Result<u32, ApiError> {

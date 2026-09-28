@@ -4,7 +4,7 @@
 
 use mcloving_controller_store::authz::{Action, GrantDecision, ProjectRole, ServiceScope};
 use mcloving_controller_store::{
-    AuthorizationPolicyWrite, AuthorizationPrincipalMappingWrite, DurableCaller,
+    AuthorizationPolicyWrite, AuthorizationPrincipalMappingWrite, DurableCaller, IdentityLifecycle,
     IdentityProviderWrite, MembershipAuthority, NewHumanIdentity, NewServiceCredential,
     NewServiceIdentity, OidcIdentityClaims, ProjectRoleGrant, ProjectRoleGrantOutcome,
     ProjectRoleRevocation, SessionIssue, Store, StoreError, compute_authorization_policy_digest,
@@ -190,6 +190,7 @@ fn grant<'a>(
         authority,
         actor_subject: "reviewer:par003",
         reason,
+        expected_granted_at_unix_ms: None,
     }
 }
 
@@ -206,6 +207,7 @@ fn revocation<'a>(
         authority,
         actor_subject: "reviewer:par003",
         reason,
+        expected_granted_at_unix_ms: None,
     }
 }
 
@@ -928,6 +930,172 @@ async fn mapped_policy_generation_is_reauthorized_under_the_policy_lock() {
             .unwrap(),
         ProjectRoleGrantOutcome::Granted(_)
     ));
+}
+
+#[tokio::test]
+async fn membership_if_match_rejects_stale_granted_at() {
+    let Some(admin) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let tenant = tenant(&admin).await;
+    let owner = human(&admin, &tenant, "owner").await;
+    let viewer = human(&admin, &tenant, "viewer").await;
+    let as_owner = as_principal(&admin, &tenant, owner).await;
+
+    admin
+        .grant_project_role(&grant(
+            &tenant,
+            owner,
+            ProjectRole::Owner,
+            MembershipAuthority::Bootstrap,
+            "bootstrap",
+        ))
+        .await
+        .expect("bootstrap owner");
+    let granted = admin
+        .grant_project_role(&ProjectRoleGrant {
+            organization_id: tenant.organization_id,
+            project_id: tenant.project_id,
+            identity_id: viewer,
+            role: ProjectRole::Viewer,
+            authority: as_owner,
+            actor_subject: "reviewer:par003",
+            reason: "first grant",
+            expected_granted_at_unix_ms: Some(0),
+        })
+        .await
+        .expect("grant viewer");
+    let ProjectRoleGrantOutcome::Granted(membership) = granted else {
+        panic!("expected Granted");
+    };
+
+    let err = admin
+        .grant_project_role(&ProjectRoleGrant {
+            organization_id: tenant.organization_id,
+            project_id: tenant.project_id,
+            identity_id: viewer,
+            role: ProjectRole::Developer,
+            authority: as_owner,
+            actor_subject: "reviewer:par003",
+            reason: "stale create precondition",
+            expected_granted_at_unix_ms: Some(0),
+        })
+        .await
+        .expect_err("stale create must fail");
+    assert!(matches!(
+        err,
+        StoreError::MembershipPreconditionFailed {
+            current_granted_at_unix_ms
+        } if current_granted_at_unix_ms == membership.granted_at_unix_ms
+    ));
+
+    let changed = admin
+        .grant_project_role(&ProjectRoleGrant {
+            organization_id: tenant.organization_id,
+            project_id: tenant.project_id,
+            identity_id: viewer,
+            role: ProjectRole::Developer,
+            authority: as_owner,
+            actor_subject: "reviewer:par003",
+            reason: "matching change",
+            expected_granted_at_unix_ms: Some(membership.granted_at_unix_ms),
+        })
+        .await
+        .expect("change with matching If-Match");
+    let ProjectRoleGrantOutcome::Changed {
+        membership: updated,
+        ..
+    } = changed
+    else {
+        panic!("expected Changed");
+    };
+    assert_ne!(updated.granted_at_unix_ms, membership.granted_at_unix_ms);
+
+    let err = admin
+        .revoke_project_role(&ProjectRoleRevocation {
+            organization_id: tenant.organization_id,
+            project_id: tenant.project_id,
+            identity_id: viewer,
+            authority: as_owner,
+            actor_subject: "reviewer:par003",
+            reason: "stale revoke",
+            expected_granted_at_unix_ms: Some(membership.granted_at_unix_ms),
+        })
+        .await
+        .expect_err("stale revoke must fail");
+    assert!(matches!(
+        err,
+        StoreError::MembershipPreconditionFailed {
+            current_granted_at_unix_ms
+        } if current_granted_at_unix_ms == updated.granted_at_unix_ms
+    ));
+}
+
+#[tokio::test]
+async fn last_usable_owner_cannot_self_revoke_after_peer_disable() {
+    let Some(admin) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let tenant = tenant(&admin).await;
+    let alice = human(&admin, &tenant, "alice").await;
+    let bob = human(&admin, &tenant, "bob").await;
+    let as_alice = as_principal(&admin, &tenant, alice).await;
+
+    admin
+        .grant_project_role(&grant(
+            &tenant,
+            alice,
+            ProjectRole::Owner,
+            MembershipAuthority::Bootstrap,
+            "bootstrap alice",
+        ))
+        .await
+        .expect("bootstrap alice");
+    admin
+        .grant_project_role(&grant(
+            &tenant,
+            bob,
+            ProjectRole::Owner,
+            as_alice,
+            "second owner",
+        ))
+        .await
+        .expect("grant bob owner");
+
+    admin
+        .transition_identity_lifecycle(
+            tenant.organization_id,
+            bob,
+            1,
+            IdentityLifecycle::Disabled,
+            "peer disabled",
+            "reviewer:par003",
+        )
+        .await
+        .expect("disable bob");
+
+    let err = admin
+        .revoke_project_role(&revocation(&tenant, alice, as_alice, "last usable owner"))
+        .await
+        .expect_err("alice is the last usable Owner");
+    assert!(matches!(err, StoreError::ProjectRoleDenied(_)), "{err:?}");
+
+    let err = admin
+        .grant_project_role(&ProjectRoleGrant {
+            organization_id: tenant.organization_id,
+            project_id: tenant.project_id,
+            identity_id: bob,
+            role: ProjectRole::Viewer,
+            authority: MembershipAuthority::Bootstrap,
+            actor_subject: "operator:par003",
+            reason: "disabled cannot hold role",
+            expected_granted_at_unix_ms: None,
+        })
+        .await
+        .expect_err("disabled identity cannot be granted");
+    assert!(matches!(err, StoreError::IdentityConflict(_)), "{err:?}");
 }
 
 fn mapped_policy(

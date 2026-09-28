@@ -265,6 +265,10 @@ pub struct ProjectRoleGrant<'a> {
     pub authority: MembershipAuthority,
     pub actor_subject: &'a str,
     pub reason: &'a str,
+    /// When set, the membership's current `granted_at_unix_ms` must match
+    /// (use `0` when the membership must not yet exist). `None` skips the
+    /// check, for the identity-admin bootstrap path.
+    pub expected_granted_at_unix_ms: Option<i64>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -275,6 +279,9 @@ pub struct ProjectRoleRevocation<'a> {
     pub authority: MembershipAuthority,
     pub actor_subject: &'a str,
     pub reason: &'a str,
+    /// When set, the membership's current `granted_at_unix_ms` must match.
+    /// `None` skips the check, for the identity-admin path.
+    pub expected_granted_at_unix_ms: Option<i64>,
 }
 
 /// One membership row as recorded.
@@ -396,6 +403,14 @@ impl Store {
             grant.identity_id,
         )
         .await?;
+        let current_granted_at = current_granted_at_unix_ms(
+            &mut tx,
+            grant.organization_id,
+            grant.project_id,
+            grant.identity_id,
+        )
+        .await?;
+        require_membership_precondition(grant.expected_granted_at_unix_ms, current_granted_at)?;
         let authority = grant
             .authority
             .resolve(&mut tx, grant.organization_id, grant.project_id)
@@ -569,8 +584,19 @@ impl Store {
             revocation.project_id,
             revocation.identity_id,
         )
-        .await?
-        .ok_or_else(|| {
+        .await?;
+        let current_granted_at = current_granted_at_unix_ms(
+            &mut tx,
+            revocation.organization_id,
+            revocation.project_id,
+            revocation.identity_id,
+        )
+        .await?;
+        require_membership_precondition(
+            revocation.expected_granted_at_unix_ms,
+            current_granted_at,
+        )?;
+        let previous = previous.ok_or_else(|| {
             StoreError::IdentityConflict("identity holds no role in the project".to_owned())
         })?;
         let authority = revocation
@@ -965,9 +991,9 @@ async fn require_human_identity(
             "project roles are held by human identities; services carry scopes".to_owned(),
         ));
     }
-    if row.2 == "deleted" {
+    if row.2 != "active" {
         return Err(StoreError::IdentityConflict(
-            "a deleted identity cannot hold a project role".to_owned(),
+            "only an active human identity can hold a project role".to_owned(),
         ));
     }
     Ok(row.0)
@@ -978,13 +1004,63 @@ async fn owner_count(
     organization_id: Uuid,
     project_id: Uuid,
 ) -> Result<i64, StoreError> {
+    // Only active identities count as usable Owners. Membership writes already
+    // hold the project advisory lock and the target/caller identity rows; this
+    // join reads lifecycle under those locks for the identities touched by the
+    // write, and a concurrent disable of another Owner still leaves at least
+    // one usable Owner when this count is > 1.
     Ok(sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM project_memberships
-         WHERE organization_id = $1 AND project_id = $2 AND role = 'owner'",
+        "SELECT COUNT(*)
+         FROM project_memberships AS m
+         INNER JOIN identities AS i
+           ON i.organization_id = m.organization_id
+          AND i.id = m.identity_id
+         WHERE m.organization_id = $1
+           AND m.project_id = $2
+           AND m.role = 'owner'
+           AND i.lifecycle_state = 'active'",
     )
     .bind(organization_id)
     .bind(project_id)
     .fetch_one(&mut **tx)
+    .await?)
+}
+
+fn require_membership_precondition(
+    expected_granted_at_unix_ms: Option<i64>,
+    current_granted_at_unix_ms: Option<i64>,
+) -> Result<(), StoreError> {
+    let Some(expected) = expected_granted_at_unix_ms else {
+        return Ok(());
+    };
+    if expected < 0 {
+        return Err(StoreError::InvalidIdentityOperation(
+            "membership If-Match generation must be non-negative".to_owned(),
+        ));
+    }
+    let current = current_granted_at_unix_ms.unwrap_or(0);
+    if current != expected {
+        return Err(StoreError::MembershipPreconditionFailed {
+            current_granted_at_unix_ms: current,
+        });
+    }
+    Ok(())
+}
+
+async fn current_granted_at_unix_ms(
+    tx: &mut Transaction<'_, Postgres>,
+    organization_id: Uuid,
+    project_id: Uuid,
+    identity_id: Uuid,
+) -> Result<Option<i64>, StoreError> {
+    Ok(sqlx::query_scalar::<_, i64>(
+        "SELECT granted_at_unix_ms FROM project_memberships
+         WHERE organization_id = $1 AND project_id = $2 AND identity_id = $3",
+    )
+    .bind(organization_id)
+    .bind(project_id)
+    .bind(identity_id)
+    .fetch_optional(&mut **tx)
     .await?)
 }
 

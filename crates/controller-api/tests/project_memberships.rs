@@ -171,10 +171,25 @@ async fn call(
     bearer: &str,
     body: Option<Value>,
 ) -> (StatusCode, Value) {
+    let (status, value, _) = call_with_headers(app, method, path, bearer, body, None).await;
+    (status, value)
+}
+
+async fn call_with_headers(
+    app: &Router,
+    method: Method,
+    path: &str,
+    bearer: &str,
+    body: Option<Value>,
+    if_match: Option<&str>,
+) -> (StatusCode, Value, Option<String>) {
     let mut request = Request::builder()
         .method(method)
         .uri(path)
         .header(header::AUTHORIZATION, format!("Bearer {bearer}"));
+    if let Some(if_match) = if_match {
+        request = request.header(header::IF_MATCH, if_match);
+    }
     let body = match body {
         Some(body) => {
             request = request.header(header::CONTENT_TYPE, "application/json");
@@ -188,6 +203,11 @@ async fn call(
         .await
         .expect("response");
     let status = response.status();
+    let etag = response
+        .headers()
+        .get(header::ETAG)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
     let bytes = to_bytes(response.into_body(), 64 * 1024)
         .await
         .expect("body");
@@ -196,7 +216,7 @@ async fn call(
     } else {
         serde_json::from_slice(&bytes).unwrap_or(Value::Null)
     };
-    (status, value)
+    (status, value, etag)
 }
 
 #[tokio::test]
@@ -228,24 +248,32 @@ async fn owner_grants_and_revokes_a_viewer_whose_bearer_is_then_refused() {
             authority: MembershipAuthority::Bootstrap,
             actor_subject: "operator:par003",
             reason: "bootstrap the project owner",
+            expected_granted_at_unix_ms: None,
         })
         .await
         .expect("bootstrap owner");
     let owner_bearer = bearer(&runtime, &tenant, owner, "owner").await;
 
     // The Owner grants a Viewer through the memberships route.
-    let (status, body) = call(
+    let (status, body, etag) = call_with_headers(
         &app,
         Method::PUT,
         &format!("{memberships}/{viewer}"),
         &owner_bearer,
         Some(json!({"role": "viewer", "reason": "PAR-003 proof"})),
+        Some("\"0\""),
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
     assert_eq!(body["role"], "viewer");
     assert_eq!(body["outcome"], "granted");
     assert_eq!(body["granted_by"], "human:owner");
+    let viewer_etag = etag.expect("grant returns ETag");
+    assert_eq!(
+        viewer_etag,
+        format!("\"{}\"", body["granted_at_unix_ms"]),
+        "ETag mirrors granted_at_unix_ms"
+    );
     let viewer_bearer = bearer(&runtime, &tenant, viewer, "viewer").await;
     let (status, _) = call(&app, Method::GET, &pipelines, &viewer_bearer, None).await;
     assert_eq!(status, StatusCode::OK, "the Viewer reads the project");
@@ -257,41 +285,57 @@ async fn owner_grants_and_revokes_a_viewer_whose_bearer_is_then_refused() {
     );
 
     // An Admin manages roles below Owner and nothing at Owner.
-    let (status, _) = call(
+    let (status, _, _) = call_with_headers(
         &app,
         Method::PUT,
         &format!("{memberships}/{admin_user}"),
         &owner_bearer,
         Some(json!({"role": "admin", "reason": "PAR-003 proof"})),
+        Some("\"0\""),
     )
     .await;
     assert_eq!(status, StatusCode::CREATED);
     let admin_bearer = bearer(&runtime, &tenant, admin_user, "admin").await;
-    let (status, body) = call(
+    let (status, body, _) = call_with_headers(
         &app,
         Method::PUT,
         &format!("{memberships}/{viewer}"),
         &admin_bearer,
         Some(json!({"role": "owner", "reason": "PAR-003 proof"})),
+        Some(&viewer_etag),
     )
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
     assert_eq!(body["code"], "project_role_denied");
-    let (status, body) = call(
+    let (status, list, _) =
+        call_with_headers(&app, Method::GET, &memberships, &owner_bearer, None, None).await;
+    assert_eq!(status, StatusCode::OK);
+    let owner_granted_at = list["memberships"]
+        .as_array()
+        .expect("memberships")
+        .iter()
+        .find(|membership| membership["subject"] == "human:owner")
+        .expect("owner membership")["granted_at_unix_ms"]
+        .as_i64()
+        .expect("granted_at");
+    let owner_etag = format!("\"{owner_granted_at}\"");
+    let (status, body, _) = call_with_headers(
         &app,
         Method::DELETE,
         &format!("{memberships}/{owner}"),
         &admin_bearer,
         Some(json!({"reason": "PAR-003 proof"})),
+        Some(&owner_etag),
     )
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
-    let (status, body) = call(
+    let (status, body, _) = call_with_headers(
         &app,
         Method::DELETE,
         &format!("{memberships}/{owner}"),
         &owner_bearer,
         Some(json!({"reason": "PAR-003 proof"})),
+        Some(&owner_etag),
     )
     .await;
     assert_eq!(
@@ -321,12 +365,13 @@ async fn owner_grants_and_revokes_a_viewer_whose_bearer_is_then_refused() {
     );
 
     // The Owner revokes the Viewer; the Viewer's bearer is refused at once.
-    let (status, body) = call(
+    let (status, body, _) = call_with_headers(
         &app,
         Method::DELETE,
         &format!("{memberships}/{viewer}"),
         &owner_bearer,
         Some(json!({"reason": "PAR-003 proof"})),
+        Some(&viewer_etag),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
@@ -343,4 +388,151 @@ async fn owner_grants_and_revokes_a_viewer_whose_bearer_is_then_refused() {
     let viewer_bearer = bearer(&runtime, &tenant, viewer, "viewer-after").await;
     let (status, _) = call(&app, Method::GET, &pipelines, &viewer_bearer, None).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn membership_mutations_require_matching_if_match() {
+    let Some(admin) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let tenant = tenant(&admin).await;
+    let runtime = runtime_store(&admin).await;
+    let app = router(ApiState::new_durable(runtime_store(&admin).await));
+    let owner = human(&admin, &tenant, "owner").await;
+    let viewer = human(&admin, &tenant, "viewer").await;
+    let organization_id = tenant.organization_id;
+    let project_id = tenant.project_id;
+    let memberships =
+        format!("/api/v1/organizations/{organization_id}/projects/{project_id}/memberships");
+
+    admin
+        .grant_project_role(&ProjectRoleGrant {
+            organization_id,
+            project_id,
+            identity_id: owner,
+            role: ProjectRole::Owner,
+            authority: MembershipAuthority::Bootstrap,
+            actor_subject: "operator:par003",
+            reason: "bootstrap the project owner",
+            expected_granted_at_unix_ms: None,
+        })
+        .await
+        .expect("bootstrap owner");
+    let owner_bearer = bearer(&runtime, &tenant, owner, "owner").await;
+
+    // Missing If-Match is rejected before any write.
+    let (status, body, _) = call_with_headers(
+        &app,
+        Method::PUT,
+        &format!("{memberships}/{viewer}"),
+        &owner_bearer,
+        Some(json!({"role": "viewer", "reason": "replay"})),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["code"], "invalid_membership_precondition");
+
+    // Create under If-Match: "0", then an identical retry is a conflict on the
+    // create precondition (membership now exists) rather than a second write.
+    let (status, body, etag) = call_with_headers(
+        &app,
+        Method::PUT,
+        &format!("{memberships}/{viewer}"),
+        &owner_bearer,
+        Some(json!({"role": "viewer", "reason": "replay"})),
+        Some("\"0\""),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let granted_at = body["granted_at_unix_ms"].as_i64().expect("granted_at");
+    let viewer_etag = etag.expect("etag");
+    assert_eq!(viewer_etag, format!("\"{granted_at}\""));
+
+    let (status, body, _) = call_with_headers(
+        &app,
+        Method::PUT,
+        &format!("{memberships}/{viewer}"),
+        &owner_bearer,
+        Some(json!({"role": "viewer", "reason": "replay"})),
+        Some("\"0\""),
+    )
+    .await;
+    assert_eq!(status, StatusCode::PRECONDITION_FAILED, "{body}");
+    assert_eq!(body["code"], "membership_precondition_failed");
+    assert!(
+        body["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains(&granted_at.to_string()),
+        "{body}"
+    );
+
+    // Matching If-Match with the same role is an idempotent success.
+    let (status, body, etag) = call_with_headers(
+        &app,
+        Method::PUT,
+        &format!("{memberships}/{viewer}"),
+        &owner_bearer,
+        Some(json!({"role": "viewer", "reason": "replay"})),
+        Some(&viewer_etag),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["outcome"], "unchanged");
+    assert_eq!(etag.as_deref(), Some(viewer_etag.as_str()));
+
+    // A role change advances granted_at; a stale If-Match then conflicts.
+    let (status, body, new_etag) = call_with_headers(
+        &app,
+        Method::PUT,
+        &format!("{memberships}/{viewer}"),
+        &owner_bearer,
+        Some(json!({"role": "developer", "reason": "promote"})),
+        Some(&viewer_etag),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["outcome"], "changed");
+    let new_etag = new_etag.expect("changed etag");
+    assert_ne!(new_etag, viewer_etag);
+
+    let (status, body, _) = call_with_headers(
+        &app,
+        Method::PUT,
+        &format!("{memberships}/{viewer}"),
+        &owner_bearer,
+        Some(json!({"role": "admin", "reason": "stale"})),
+        Some(&viewer_etag),
+    )
+    .await;
+    assert_eq!(status, StatusCode::PRECONDITION_FAILED, "{body}");
+    assert_eq!(body["code"], "membership_precondition_failed");
+
+    // DELETE with a matching ETag revokes; a stale ETag cannot revoke a
+    // membership another writer restored under a newer granted_at.
+    let (status, body, _) = call_with_headers(
+        &app,
+        Method::DELETE,
+        &format!("{memberships}/{viewer}"),
+        &owner_bearer,
+        Some(json!({"reason": "revoke"})),
+        Some(&new_etag),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["outcome"], "revoked");
+
+    let (status, body, _) = call_with_headers(
+        &app,
+        Method::DELETE,
+        &format!("{memberships}/{viewer}"),
+        &owner_bearer,
+        Some(json!({"reason": "stale revoke"})),
+        Some(&new_etag),
+    )
+    .await;
+    assert_eq!(status, StatusCode::PRECONDITION_FAILED, "{body}");
+    assert_eq!(body["code"], "membership_precondition_failed");
 }
