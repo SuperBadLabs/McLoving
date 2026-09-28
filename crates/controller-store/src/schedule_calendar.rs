@@ -336,6 +336,8 @@ impl JenkinsHash {
         for (index, byte) in digest[8..].iter().enumerate() {
             folded[index % 8] ^= byte;
         }
+        // Jenkins Hash.from folds MD5 then packs bytes big-endian:
+        // `l = (l << 8) + (digest[i] & 0xFF)` (hudson.scheduler.Hash).
         let mut value: u64 = 0;
         for byte in folded {
             value = (value << 8) + u64::from(byte);
@@ -387,6 +389,14 @@ mod tests {
         .unwrap();
         assert!(calendar.matches_local(0, 0, 1, 1, 0));
         assert!(calendar.matches_local(59, 23, 31, 12, 6));
+    }
+
+    #[test]
+    fn jenkins_hash_matches_core_big_endian_seed() {
+        // Golden from hudson.scheduler.Hash.from("job/example").next(60)
+        // with the MD5 fold + big-endian pack in Jenkins core.
+        let mut hash = JenkinsHash::from_seed("job/example");
+        assert_eq!(hash.next(60), 41);
     }
 
     #[test]

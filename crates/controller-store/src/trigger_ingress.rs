@@ -1161,6 +1161,18 @@ impl Store {
             .await?;
         }
         if input.kind == TriggerKind::Schedule {
+            sqlx::query(
+                "UPDATE trigger_schedule_slots
+                 SET outcome = 'skipped', updated_at = clock_timestamp()
+                 WHERE organization_id = $1 AND trigger_id = $2
+                   AND trigger_generation < $3
+                   AND outcome IN ('open', 'claimed')",
+            )
+            .bind(input.organization_id)
+            .bind(input.trigger_id)
+            .bind(generation)
+            .execute(&mut *tx)
+            .await?;
             let now_ms = trigger_database_unix_ms(&mut tx).await?;
             materialize_schedule_slots_for_trigger(
                 &mut tx,
@@ -3650,12 +3662,12 @@ async fn enumerate_schedule_slots(
     from_unix_ms: i64,
     limit: i64,
 ) -> Result<Vec<i64>, StoreError> {
-    // Walk absolute minutes via PostgreSQL so IANA timezone/DST come from the
-    // same tzdata the calendar string names; filter with the resolved bitmasks.
-    // Sparse expressions (for example daily `0 2 * * *`) need a multi-day
-    // search window; keep a generous floor so materialization cannot miss
-    // the next matching civil time.
-    let oversample = (limit.saturating_mul(8)).clamp(60 * 24 * 2, 60 * 24 * 14);
+    // Walk absolute minutes via PostgreSQL using the configured IANA timezone.
+    // Civil-time fields come from timezone($tz, ts); the calendar identity string
+    // records the intended tzdata pin but is not applied as a PG catalog selector
+    // here. Sparse expressions (monthly/annual) need a long search window so
+    // materialization cannot miss the next matching civil time.
+    let oversample = (limit.saturating_mul(8)).clamp(60 * 24 * 2, 60 * 24 * 400);
     let rows = sqlx::query(
         "WITH bounds AS (
              SELECT date_trunc('minute', to_timestamp(($1::double precision) / 1000.0))
@@ -3784,14 +3796,32 @@ impl Store {
     ) -> Result<Option<TriggerDelivery>, StoreError> {
         let mut tx = self.tenant_transaction(organization_id).await?;
         let now_ms = trigger_database_unix_ms(&mut tx).await?;
-        // Identify a due trigger without locking yet, then take the trigger
-        // advisory lock before claiming its due slots so two controllers cannot
-        // split one trigger's missed set.
+        // Identify a due trigger whose *current* version is an enabled schedule.
+        // Prior-generation and paused open rows must not be selected: returning
+        // None for them would stop process_due's scan and starve the org.
+        // Stale `claimed` rows (crash between claim commit and accept) are
+        // eligible for recovery after a short lease.
         let due_trigger = sqlx::query(
             "SELECT s.trigger_id, s.trigger_generation, s.project_id, s.pipeline_id
              FROM trigger_schedule_slots AS s
+             JOIN pipeline_trigger_definitions AS d
+               ON d.organization_id = s.organization_id
+              AND d.trigger_id = s.trigger_id
+             JOIN pipeline_trigger_versions AS v
+               ON v.organization_id = d.organization_id
+              AND v.trigger_id = d.trigger_id
+              AND v.generation = d.current_generation
              WHERE s.organization_id = $1
-               AND s.outcome = 'open'
+               AND s.trigger_generation = d.current_generation
+               AND v.trigger_kind = 'schedule'
+               AND v.state = 'enabled'
+               AND (
+                    s.outcome = 'open'
+                    OR (
+                        s.outcome = 'claimed'
+                        AND s.updated_at < clock_timestamp() - interval '5 minutes'
+                    )
+               )
                AND s.resolved_slot_unix_ms <= $2
              ORDER BY s.resolved_slot_unix_ms ASC
              LIMIT 1",
@@ -3809,6 +3839,22 @@ impl Store {
         let project_id: Uuid = due_trigger.try_get("project_id")?;
         let pipeline_id: Uuid = due_trigger.try_get("pipeline_id")?;
         lock_trigger_transaction(&mut tx, organization_id, trigger_id).await?;
+        // Reopen stale claims under the trigger lock so they can be re-claimed.
+        sqlx::query(
+            "UPDATE trigger_schedule_slots
+             SET outcome = 'open', delivery_id = NULL, updated_at = clock_timestamp()
+             WHERE organization_id = $1 AND trigger_id = $2
+               AND trigger_generation = $3
+               AND outcome = 'claimed'
+               AND updated_at < clock_timestamp() - interval '5 minutes'
+               AND resolved_slot_unix_ms <= $4",
+        )
+        .bind(organization_id)
+        .bind(trigger_id)
+        .bind(trigger_generation)
+        .bind(now_ms)
+        .execute(&mut *tx)
+        .await?;
         let due_slots = sqlx::query(
             "SELECT resolved_slot_unix_ms FROM trigger_schedule_slots
              WHERE organization_id = $1 AND trigger_id = $2
@@ -3881,23 +3927,39 @@ impl Store {
         .fetch_optional(&mut *tx)
         .await?;
         let Some(trigger_row) = trigger_row else {
-            tx.rollback().await?;
+            // Generation raced away; terminalize leftover due rows so they cannot
+            // starve sibling schedules on the next poll.
+            sqlx::query(
+                "UPDATE trigger_schedule_slots
+                 SET outcome = 'skipped', updated_at = clock_timestamp()
+                 WHERE organization_id = $1 AND trigger_id = $2
+                   AND trigger_generation = $3
+                   AND outcome IN ('open', 'claimed')
+                   AND resolved_slot_unix_ms <= $4",
+            )
+            .bind(organization_id)
+            .bind(trigger_id)
+            .bind(trigger_generation)
+            .bind(now_ms)
+            .execute(&mut *tx)
+            .await?;
+            tx.commit().await?;
             return Ok(None);
         };
         let state: &str = trigger_row.try_get("state")?;
         if state != "enabled" {
             sqlx::query(
                 "UPDATE trigger_schedule_slots
-                 SET outcome = 'open', updated_at = clock_timestamp()
+                 SET outcome = 'skipped', updated_at = clock_timestamp()
                  WHERE organization_id = $1 AND trigger_id = $2
                    AND trigger_generation = $3
-                   AND resolved_slot_unix_ms = $4
-                   AND outcome = 'claimed'",
+                   AND outcome IN ('open', 'claimed')
+                   AND resolved_slot_unix_ms <= $4",
             )
             .bind(organization_id)
             .bind(trigger_id)
             .bind(trigger_generation)
-            .bind(latest)
+            .bind(now_ms)
             .execute(&mut *tx)
             .await?;
             tx.commit().await?;
