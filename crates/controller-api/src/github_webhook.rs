@@ -802,6 +802,7 @@ mod tests {
             project_roles: Default::default(),
             service_scopes: Default::default(),
             mapped_projects: Default::default(),
+            mapped_policy_generations: Default::default(),
             action_grants: Default::default(),
         };
         let state = Arc::new(
@@ -876,6 +877,7 @@ mod tests {
             project_roles: Default::default(),
             service_scopes: Default::default(),
             mapped_projects: Default::default(),
+            mapped_policy_generations: Default::default(),
             action_grants: Default::default(),
         };
         let state = Arc::new(

@@ -71,6 +71,30 @@ sessions and login attempts. Disabling a service identity atomically revokes its
 credentials so reactivation cannot resurrect them. It
 does not accept raw access, refresh, or service-token values.
 
+Project roles are the one identity
+operation the API carries (PAR-003): `PUT` and `DELETE` on
+`/projects/{project_id}/memberships/{identity_id}` under `ProjectConfigure`
+grant, change and revoke a human's role, with the store applying the role
+rules whichever authority writes: a project's first Owner is bootstrapped
+only by the admin tool's `grant-role`, Owner is needed to grant Owner or to
+change or revoke an Owner, an Admin manages the roles below, the last
+usable (active) Owner cannot be revoked or demoted, and a revocation or
+demotion bumps the identity's lifecycle generation so its live sessions
+stop authenticating at once. Mutating membership routes require a quoted
+`If-Match` bound to the membership's monotonic `membership_revision` from a counter that survives revocation (`"0"` when the
+membership must not yet exist) and return that value as `ETag`, so a
+lost-response retry cannot overwrite a newer grant or revoke a membership
+another owner restored. When `ProjectConfigure` came from an imported
+project policy, the write binds that authentication snapshot's policy
+generation (not a later current-generation lookup) and re-checks it under
+the authorization-policy lock so a replacement cannot be stamped onto a
+stale Allow. Static credentials may mutate memberships on a policy-backed
+project only when their process-local principal carries a mapped
+`ProjectConfigure` Allow bound to that generation; a lattice/scope Allow
+alone cannot inherit Admin from the policy's current generation. Each write is one `identity` audit record naming
+the authority, the actor's role, the previous role, the reason and the
+fenced generation.
+
 Identity/provider/service-credential provisioning is serialized per tenant with a
 transaction-scoped advisory lock, making exact active-active bootstrap idempotent even
 when the durable row does not yet exist. A provider ID's issuer is immutable; issuer

@@ -18,6 +18,7 @@ mod dag;
 mod discovery;
 mod identity;
 mod product;
+mod project_roles;
 mod scheduler;
 mod security;
 mod sequential;
@@ -72,6 +73,10 @@ pub use product::{
     PipelineOperationalStateRecord, PipelineOperationalStateTransition,
     PipelineOperationalStateTransitionOutcome, PipelinePage, PipelinePutOutcome, PipelineRecord,
     PipelineWrite, TestReportView,
+};
+pub use project_roles::{
+    DurableCaller, MembershipAuthority, ProjectMembership, ProjectRoleGrant,
+    ProjectRoleGrantOutcome, ProjectRoleRevocation, ProjectRoleRevocationOutcome,
 };
 pub use scheduler::{
     AcceptedOffer, ClaimRequest, ClaimedAttempt, LeaseRenewalDisposition, WaitReason,
@@ -200,6 +205,8 @@ pub const STEP_ORDINAL_V37: &str = include_str!("../migrations/0037_step_ordinal
 pub const WEBHOOK_RECEIPTS_V38: &str = include_str!("../migrations/0038_webhook_receipts.sql");
 pub const LOG_BUILD_POSITION_V39: &str = include_str!("../migrations/0039_log_build_position.sql");
 pub const NOTIFICATIONS_V40: &str = include_str!("../migrations/0040_notifications.sql");
+pub const PROJECT_ROLE_GRANTS_V41: &str =
+    include_str!("../migrations/0041_project_role_grants.sql");
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AgentReconciliationDisposition {
@@ -763,6 +770,12 @@ pub enum StoreError {
     InvalidRuntimeConfiguration(String),
     #[error("identity operation conflict: {0}")]
     IdentityConflict(String),
+    #[error("project role denied: {0}")]
+    ProjectRoleDenied(String),
+    #[error(
+        "membership revision precondition failed: current membership_revision is {current_membership_revision}"
+    )]
+    MembershipPreconditionFailed { current_membership_revision: i64 },
     #[error("invalid authorization operation: {0}")]
     InvalidAuthorizationOperation(String),
     #[error("authorization operation conflict: {0}")]
@@ -918,6 +931,12 @@ impl Store {
                    ('projects', 'SELECT'),
                    ('identities', 'SELECT'),
                    ('project_memberships', 'SELECT'),
+                   ('project_memberships', 'INSERT'),
+                   ('project_memberships', 'UPDATE'),
+                   ('project_memberships', 'DELETE'),
+                   ('project_membership_revision_counters', 'SELECT'),
+                   ('project_membership_revision_counters', 'INSERT'),
+                   ('project_membership_revision_counters', 'UPDATE'),
                    ('service_scopes', 'SELECT'),
                    ('builds', 'SELECT'), ('builds', 'INSERT'),
                    ('builds', 'UPDATE'), ('builds', 'DELETE'),
@@ -1032,6 +1051,7 @@ impl Store {
              expected_columns(table_name, column_name, privilege, is_grantable) AS (
                  VALUES
                    ('identities', 'group_generation', 'UPDATE', false),
+                   ('identities', 'lifecycle_generation', 'UPDATE', false),
                    ('identities', 'group_digest', 'UPDATE', false),
                    ('identities', 'updated_at', 'UPDATE', false)
              ),
@@ -1309,7 +1329,7 @@ impl Store {
             "WITH expected(table_name) AS (
                  VALUES
                    ('organizations'), ('projects'), ('identities'),
-                   ('project_memberships'), ('service_scopes'), ('builds'),
+                   ('project_memberships'), ('project_membership_revision_counters'), ('service_scopes'), ('builds'),
                    ('nodes'), ('attempts'), ('build_events'), ('outbox'),
                    ('pipeline_definitions'), ('pipeline_revisions'),
                    ('pipeline_operational_state_history'),
@@ -1363,7 +1383,7 @@ impl Store {
                    FROM relations AS relation
                    JOIN pg_policy AS policy ON policy.polrelid = relation.oid
              )
-             SELECT COUNT(*) = 62
+             SELECT COUNT(*) = 63
                     AND BOOL_AND(
                         relrowsecurity
                         AND relforcerowsecurity
@@ -1392,7 +1412,7 @@ impl Store {
                                 relation.tenant_column
                             )
                     )
-                    AND (SELECT COUNT(*) FROM policies) = 62
+                    AND (SELECT COUNT(*) FROM policies) = 63
                FROM relations",
         )
         .fetch_one(&mut *tx)
@@ -1513,6 +1533,7 @@ impl Store {
         apply_migration(&mut tx, 38, WEBHOOK_RECEIPTS_V38).await?;
         apply_migration(&mut tx, 39, LOG_BUILD_POSITION_V39).await?;
         apply_migration(&mut tx, 40, NOTIFICATIONS_V40).await?;
+        apply_migration(&mut tx, 41, PROJECT_ROLE_GRANTS_V41).await?;
         tx.commit().await?;
         Ok(())
     }

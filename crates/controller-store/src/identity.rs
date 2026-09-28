@@ -290,6 +290,7 @@ impl Store {
             return invalid("expected provider configuration generation must be positive");
         }
         let mut tx = self.tenant_transaction(organization_id).await?;
+        lock_identity_provider(&mut tx, organization_id, provider_id).await?;
         let current = sqlx::query_as::<_, (i64, bool)>(
             "SELECT configuration_generation, enabled
              FROM identity_providers
@@ -1078,6 +1079,29 @@ impl Store {
         {
             lock_session_family(&mut tx, organization_id, family_id).await?;
         }
+        // Lock the identity row before the session row so this path and
+        // membership writes (identity FOR UPDATE, then session FOR UPDATE)
+        // share one lock order and cannot deadlock on the session insert's
+        // identity foreign key.
+        let identity_id = sqlx::query_scalar::<_, Uuid>(
+            "SELECT s.identity_id FROM identity_sessions s
+             WHERE s.organization_id = $1 AND s.refresh_token_digest = $2",
+        )
+        .bind(organization_id)
+        .bind(current_refresh_token_digest.as_slice())
+        .fetch_optional(&mut *tx)
+        .await?;
+        if let Some(identity_id) = identity_id {
+            sqlx::query(
+                "SELECT 1 FROM identities
+                 WHERE organization_id = $1 AND id = $2
+                 FOR UPDATE",
+            )
+            .bind(organization_id)
+            .bind(identity_id)
+            .execute(&mut *tx)
+            .await?;
+        }
         let current = sqlx::query_as::<_, SessionRefreshRow>(
             "SELECT s.session_id, s.identity_id, i.subject,
                     s.provider_configuration_generation,
@@ -1276,6 +1300,17 @@ impl Store {
             return Ok(false);
         };
         lock_session_family(&mut tx, organization_id, family_id).await?;
+        // The session's identity row is locked too: a project-role write
+        // that revalidated this session holds that row until it commits, so
+        // the revocation and the write have a defined order (PAR-003).
+        lock_credential_identity(
+            &mut tx,
+            organization_id,
+            "identity_sessions",
+            "session_id",
+            session_id,
+        )
+        .await?;
         let revocation_reason = sqlx::query_scalar::<_, Option<String>>(
             "SELECT revocation_reason
              FROM identity_sessions
@@ -1388,6 +1423,51 @@ impl Store {
             return invalid("expected identity generation must be positive");
         }
         let mut tx = self.tenant_transaction(organization_id).await?;
+        // When leaving active, take each Owner project's membership advisory
+        // lock before locking this identity row, matching membership writes
+        // (project lock then identity locks) so the two cannot deadlock.
+        let owner_projects = sqlx::query_scalar::<_, Uuid>(
+            "SELECT project_id
+             FROM project_memberships
+             WHERE organization_id = $1 AND identity_id = $2 AND role = 'owner'
+             ORDER BY project_id",
+        )
+        .bind(organization_id)
+        .bind(identity_id)
+        .fetch_all(&mut *tx)
+        .await?;
+        if next != IdentityLifecycle::Active {
+            for project_id in &owner_projects {
+                crate::project_roles::lock_project_memberships_for_lifecycle(
+                    &mut tx,
+                    organization_id,
+                    *project_id,
+                )
+                .await?;
+                crate::project_roles::lock_authorization_policy_for_lifecycle(
+                    &mut tx,
+                    organization_id,
+                    *project_id,
+                )
+                .await?;
+            }
+            let refreshed = sqlx::query_scalar::<_, Uuid>(
+                "SELECT project_id
+                 FROM project_memberships
+                 WHERE organization_id = $1 AND identity_id = $2 AND role = 'owner'
+                 ORDER BY project_id",
+            )
+            .bind(organization_id)
+            .bind(identity_id)
+            .fetch_all(&mut *tx)
+            .await?;
+            if refreshed != owner_projects {
+                return Err(StoreError::IdentityConflict(
+                    "owner memberships changed concurrently; retry the lifecycle transition"
+                        .to_owned(),
+                ));
+            }
+        }
         let current = sqlx::query_as::<_, (String, i64, String)>(
             "SELECT lifecycle_state, lifecycle_generation, subject
              FROM identities WHERE organization_id = $1 AND id = $2 FOR UPDATE",
@@ -1411,6 +1491,34 @@ impl Store {
         if current_state == next {
             tx.commit().await?;
             return Ok(current.1);
+        }
+        if current_state == IdentityLifecycle::Active && next != IdentityLifecycle::Active {
+            // Holding the identity row prevents further Owner grants to it.
+            // If a grant landed in the gap before this FOR UPDATE, abort so
+            // the caller retries under the newly discovered project locks.
+            let actual_owner_projects = sqlx::query_scalar::<_, Uuid>(
+                "SELECT project_id
+                 FROM project_memberships
+                 WHERE organization_id = $1 AND identity_id = $2 AND role = 'owner'
+                 ORDER BY project_id",
+            )
+            .bind(organization_id)
+            .bind(identity_id)
+            .fetch_all(&mut *tx)
+            .await?;
+            if actual_owner_projects != owner_projects {
+                return Err(StoreError::IdentityConflict(
+                    "owner memberships changed concurrently; retry the lifecycle transition"
+                        .to_owned(),
+                ));
+            }
+            crate::project_roles::ensure_usable_owners_remain_after_deactivation(
+                &mut tx,
+                organization_id,
+                identity_id,
+                &owner_projects,
+            )
+            .await?;
         }
         let generation = current.1.checked_add(1).ok_or_else(|| {
             StoreError::InvalidIdentityOperation("identity generation overflow".to_owned())
@@ -1589,6 +1697,7 @@ async fn provision_identity_provider_in_transaction(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     input: &IdentityProviderWrite,
 ) -> Result<IdentityProviderConfig, StoreError> {
+    lock_identity_provider(tx, input.organization_id, input.provider_id).await?;
     let current = sqlx::query_as::<_, ProviderRow>(
         "SELECT provider_id, issuer, audience, authorization_endpoint,
                 token_endpoint, jwks_uri, client_id, group_claim,
@@ -1858,15 +1967,19 @@ pub(super) async fn load_principal(
     for scope in scope_rows {
         service_scopes.insert(parse_scope(&scope)?);
     }
-    let mapped_projects = sqlx::query_scalar::<_, Uuid>(
-        "SELECT project_id FROM authorization_project_policies
+    let mapped_rows = sqlx::query_as::<_, (Uuid, i64)>(
+        "SELECT project_id, current_generation FROM authorization_project_policies
          WHERE organization_id = $1 ORDER BY project_id",
     )
     .bind(organization_id)
     .fetch_all(&mut **tx)
-    .await?
-    .into_iter()
-    .collect::<BTreeSet<_>>();
+    .await?;
+    let mut mapped_projects = BTreeSet::new();
+    let mut mapped_policy_generations = BTreeMap::new();
+    for (project_id, generation) in mapped_rows {
+        mapped_projects.insert(project_id);
+        mapped_policy_generations.insert(project_id, generation);
+    }
     let grant_rows = sqlx::query_as::<_, (Uuid, String, String)>(
         "SELECT grants.project_id, grants.action, grants.decision
          FROM authorization_project_policies current_policy
@@ -1939,6 +2052,7 @@ pub(super) async fn load_principal(
         project_roles,
         service_scopes,
         mapped_projects,
+        mapped_policy_generations,
         action_grants,
     })
 }
@@ -2090,6 +2204,23 @@ async fn session_family_for_refresh_digest(
     .await?)
 }
 
+/// Serializes the writes that change what a session is validated against
+/// (the provider's enabled flag, configuration and JWKS generations) with
+/// a project-role write that revalidates the caller's session (PAR-003).
+pub(crate) async fn lock_identity_provider(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    organization_id: Uuid,
+    provider_id: Uuid,
+) -> Result<(), StoreError> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(format!(
+            "mcloving.identity-provider.{organization_id}.{provider_id}"
+        ))
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
 async fn lock_session_family(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     organization_id: Uuid,
@@ -2217,6 +2348,9 @@ async fn revoke_credential_record(
         return invalid("revocation timestamp is invalid");
     }
     let mut tx = store.tenant_transaction(organization_id).await?;
+    // The credential's identity row is locked first, the row a project-role
+    // write holds while it revalidates the credential (PAR-003).
+    lock_credential_identity(&mut tx, organization_id, table, key_column, record_id).await?;
     let query = format!(
         "UPDATE {table}
          SET revoked_at_unix_ms = GREATEST(issued_at_unix_ms, $3), revocation_reason = $4
@@ -2284,6 +2418,31 @@ fn digest_array(value: &[u8]) -> Result<[u8; 32], StoreError> {
 
 fn timestamp_bounds(values: &[i64]) -> (Option<i64>, Option<i64>) {
     (values.iter().min().copied(), values.iter().max().copied())
+}
+
+/// Locks the identity row a credential (a session or a service credential)
+/// belongs to, for the rest of the transaction. Revocations take it before
+/// they write, and a project-role write holds it while it revalidates the
+/// caller's credential, so the two never interleave.
+async fn lock_credential_identity(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    organization_id: Uuid,
+    table: &str,
+    key_column: &str,
+    record_id: Uuid,
+) -> Result<(), StoreError> {
+    let query = format!(
+        "SELECT i.id FROM identities i
+         JOIN {table} c ON c.organization_id = i.organization_id AND c.identity_id = i.id
+         WHERE c.organization_id = $1 AND c.{key_column} = $2
+         FOR UPDATE OF i"
+    );
+    sqlx::query_scalar::<_, Uuid>(&query)
+        .bind(organization_id)
+        .bind(record_id)
+        .fetch_optional(&mut **tx)
+        .await?;
+    Ok(())
 }
 
 fn validate_canonical(value: &str, label: &str, max: usize) -> Result<(), StoreError> {

@@ -50,6 +50,7 @@ fn api_state(store: Store, organization_id: Uuid) -> ApiState {
             ]
             .into(),
             mapped_projects: Default::default(),
+            mapped_policy_generations: Default::default(),
             action_grants: Default::default(),
         },
     )

@@ -180,6 +180,7 @@ stages:
         .into_iter()
         .collect(),
         mapped_projects: BTreeSet::new(),
+        mapped_policy_generations: BTreeMap::new(),
         action_grants: BTreeMap::new(),
     };
     let unkeyed = router(

@@ -65,6 +65,7 @@ async fn every_tenant_route_denies_missing_and_cross_tenant_authority() {
         .into_iter()
         .collect::<BTreeSet<_>>(),
         mapped_projects: BTreeSet::new(),
+        mapped_policy_generations: BTreeMap::new(),
         action_grants: BTreeMap::new(),
     };
     let pool = PgPoolOptions::new()
@@ -84,7 +85,7 @@ async fn every_tenant_route_denies_missing_and_cross_tenant_authority() {
         node_id,
         &digest,
     );
-    assert_eq!(cases.len(), 37, "route matrix must track the public API");
+    assert_eq!(cases.len(), 40, "route matrix must track the public API");
     for case in cases {
         let unauthenticated = app
             .clone()
@@ -123,6 +124,7 @@ async fn health_routes_are_unauthenticated_and_readiness_checks_postgres() {
         project_roles: BTreeMap::new(),
         service_scopes: BTreeSet::new(),
         mapped_projects: BTreeSet::new(),
+        mapped_policy_generations: BTreeMap::new(),
         action_grants: BTreeMap::new(),
     };
     let pool = PgPoolOptions::new()
@@ -171,6 +173,7 @@ async fn discovery_scan_transport_accepts_the_full_observation_denominator() {
         project_roles: BTreeMap::new(),
         service_scopes: BTreeSet::new(),
         mapped_projects: BTreeSet::new(),
+        mapped_policy_generations: BTreeMap::new(),
         action_grants: BTreeMap::new(),
     };
     let pool = PgPoolOptions::new()
@@ -241,6 +244,7 @@ async fn static_ui_is_csp_locked_external_only_and_accessibility_structured() {
         project_roles: BTreeMap::new(),
         service_scopes: BTreeSet::new(),
         mapped_projects: BTreeSet::new(),
+        mapped_policy_generations: BTreeMap::new(),
         action_grants: BTreeMap::new(),
     };
     let app = router(ApiState::new(Store::new(pool), TOKEN, principal).expect("UI API state"));
@@ -377,6 +381,7 @@ async fn pipeline_state_transition_requires_project_configure_authority() {
         project_roles: BTreeMap::new(),
         service_scopes: [ServiceScope::ProjectRead].into_iter().collect(),
         mapped_projects: BTreeSet::new(),
+        mapped_policy_generations: BTreeMap::new(),
         action_grants: BTreeMap::new(),
     };
     let app =
@@ -489,6 +494,7 @@ stages:
         .into_iter()
         .collect(),
         mapped_projects: BTreeSet::new(),
+        mapped_policy_generations: BTreeMap::new(),
         action_grants: BTreeMap::new(),
     };
     let state = ApiState::new(store.clone(), TOKEN, principal).expect("construct trigger API");
@@ -1034,6 +1040,7 @@ async fn saved_pipeline_submission_keeps_revision_and_instantiated_digests_disti
         .into_iter()
         .collect(),
         mapped_projects: BTreeSet::new(),
+        mapped_policy_generations: BTreeMap::new(),
         action_grants: BTreeMap::new(),
     };
     let app = router(
@@ -1329,6 +1336,19 @@ fn route_cases(
             source,
             json,
         ),
+        case(Method::GET, format!("{project}/memberships")),
+        body_case(
+            Method::PUT,
+            format!("{project}/memberships/{node_id}"),
+            r#"{"role":"viewer","reason":"route contract"}"#,
+            json,
+        ),
+        body_case(
+            Method::DELETE,
+            format!("{project}/memberships/{node_id}"),
+            r#"{"reason":"route contract"}"#,
+            json,
+        ),
         case(Method::GET, format!("{project}/pipelines")),
         case(Method::GET, format!("{project}/pipelines/{pipeline_id}")),
         body_case(
@@ -1506,6 +1526,7 @@ async fn input_validate_plan_and_save_enforce_pipeline_scope_before_database_io(
         project_roles: BTreeMap::new(),
         service_scopes: [ServiceScope::ProjectAdmin].into_iter().collect(),
         mapped_projects: BTreeSet::new(),
+        mapped_policy_generations: BTreeMap::new(),
         action_grants: BTreeMap::new(),
     };
     let pool = PgPoolOptions::new()

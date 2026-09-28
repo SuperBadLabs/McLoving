@@ -157,6 +157,7 @@ fn principal(organization_id: Uuid) -> Principal {
         .into_iter()
         .collect(),
         mapped_projects: BTreeSet::new(),
+        mapped_policy_generations: BTreeMap::new(),
         action_grants: BTreeMap::new(),
     }
 }
