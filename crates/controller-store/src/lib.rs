@@ -1393,7 +1393,7 @@ impl Store {
                    FROM relations AS relation
                    JOIN pg_policy AS policy ON policy.polrelid = relation.oid
              )
-             SELECT COUNT(*) = 63
+             SELECT COUNT(*) = 64
                     AND BOOL_AND(
                         relrowsecurity
                         AND relforcerowsecurity

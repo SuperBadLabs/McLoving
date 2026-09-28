@@ -2875,12 +2875,6 @@ const DEFAULT_OUTBOX_RETENTION_HOURS: u64 = 168;
 /// 32-bit range the store accepts.
 const MAX_OUTBOX_RETENTION_HOURS: u64 = 10 * 365 * 24;
 
-/// Bounds outbox accumulation. No outbox consumer is currently shipped, so
-/// rows are retention-bounded delivery staging rather than a delivery queue;
-/// the durable records are `build_events` and `audit_events`. Each pass
-/// deletes one bounded batch past the retention horizon. The expected retained
-/// staging count is reported once at startup and after reclamation, rather
-/// than warning every interval about a consumer that does not exist.
 /// Fires due native schedule slots (PAR-002): materializes the horizon, skips
 /// older missed open slots after downtime, and admits the latest due slot
 /// through the existing trigger delivery path. `SKIP LOCKED` keeps two
@@ -2903,6 +2897,12 @@ async fn run_schedule_delivery_worker(state: ApiState, organization_id: Uuid) ->
     }
 }
 
+/// Bounds outbox accumulation. No outbox consumer is currently shipped, so
+/// rows are retention-bounded delivery staging rather than a delivery queue;
+/// the durable records are `build_events` and `audit_events`. Each pass
+/// deletes one bounded batch past the retention horizon. The expected retained
+/// staging count is reported once at startup and after reclamation, rather
+/// than warning every interval about a consumer that does not exist.
 async fn run_outbox_reaper(
     store: Store,
     organization_id: Uuid,
