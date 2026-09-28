@@ -1097,26 +1097,24 @@ async fn active_owner_count_excluding(
     .await?)
 }
 
+pub(crate) async fn lock_project_memberships_for_lifecycle(
+    tx: &mut Transaction<'_, Postgres>,
+    organization_id: Uuid,
+    project_id: Uuid,
+) -> Result<(), StoreError> {
+    lock_project_memberships(tx, organization_id, project_id).await
+}
+
 /// Before an identity leaves the active lifecycle, refuse if any project would
-/// lose its last usable Owner. Takes each project's membership advisory lock
-/// and Owner identity rows so this serializes with membership writes.
+/// lose its last usable Owner. Caller must already hold each project's
+/// membership advisory lock (project lock before identity lock).
 pub(crate) async fn ensure_usable_owners_remain_after_deactivation(
     tx: &mut Transaction<'_, Postgres>,
     organization_id: Uuid,
     identity_id: Uuid,
+    owner_projects: &[Uuid],
 ) -> Result<(), StoreError> {
-    let project_ids = sqlx::query_scalar::<_, Uuid>(
-        "SELECT project_id
-         FROM project_memberships
-         WHERE organization_id = $1 AND identity_id = $2 AND role = 'owner'
-         ORDER BY project_id",
-    )
-    .bind(organization_id)
-    .bind(identity_id)
-    .fetch_all(&mut **tx)
-    .await?;
-    for project_id in project_ids {
-        lock_project_memberships(tx, organization_id, project_id).await?;
+    for &project_id in owner_projects {
         lock_identity_rows(tx, organization_id, project_id, identity_id, None).await?;
         let remaining =
             active_owner_count_excluding(tx, organization_id, project_id, identity_id).await?;

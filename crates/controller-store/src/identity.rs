@@ -1423,6 +1423,29 @@ impl Store {
             return invalid("expected identity generation must be positive");
         }
         let mut tx = self.tenant_transaction(organization_id).await?;
+        // When leaving active, take each Owner project's membership advisory
+        // lock before locking this identity row, matching membership writes
+        // (project lock then identity locks) so the two cannot deadlock.
+        let owner_projects = sqlx::query_scalar::<_, Uuid>(
+            "SELECT project_id
+             FROM project_memberships
+             WHERE organization_id = $1 AND identity_id = $2 AND role = 'owner'
+             ORDER BY project_id",
+        )
+        .bind(organization_id)
+        .bind(identity_id)
+        .fetch_all(&mut *tx)
+        .await?;
+        if next != IdentityLifecycle::Active {
+            for project_id in &owner_projects {
+                crate::project_roles::lock_project_memberships_for_lifecycle(
+                    &mut tx,
+                    organization_id,
+                    *project_id,
+                )
+                .await?;
+            }
+        }
         let current = sqlx::query_as::<_, (String, i64, String)>(
             "SELECT lifecycle_state, lifecycle_generation, subject
              FROM identities WHERE organization_id = $1 AND id = $2 FOR UPDATE",
@@ -1452,6 +1475,7 @@ impl Store {
                 &mut tx,
                 organization_id,
                 identity_id,
+                &owner_projects,
             )
             .await?;
         }
