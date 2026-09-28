@@ -2,17 +2,18 @@
 mod diff003;
 
 use mcloving_controller_store::{
-    compute_audit_event_hash, compute_trigger_transfer_snapshot_digest,
-    compute_trigger_transfer_snapshot_ledger_digest, verify_trigger_transfer_snapshot, DagNodeKind,
-    NewDagBuild, NewDagNode, NewTriggerDelivery, NewWebhookReceipt, PipelineOperationalState,
-    PipelineOperationalStateTransition, PipelineOperationalStateTransitionOutcome,
-    PipelinePutOutcome, PipelineTriggerState, PipelineTriggerWrite, PipelineWrite, Store,
-    StoreError, TriggerDeliveryAdmission, TriggerDeliveryClaimOutcome, TriggerDeliveryClaimRequest,
+    DagNodeKind, NewDagBuild, NewDagNode, NewTriggerDelivery, NewWebhookReceipt,
+    PipelineOperationalState, PipelineOperationalStateTransition,
+    PipelineOperationalStateTransitionOutcome, PipelinePutOutcome, PipelineTriggerState,
+    PipelineTriggerWrite, PipelineWrite, Store, StoreError, TRIGGER_DAG_IDEMPOTENCY_PREFIX,
+    TriggerDeliveryAdmission, TriggerDeliveryClaimOutcome, TriggerDeliveryClaimRequest,
     TriggerDeliveryDagAdmission, TriggerDeliveryDagAdmissionRequest, TriggerDeliveryFailure,
     TriggerDeliveryFailureRequest, TriggerDeliveryRedrive, TriggerDeliveryStatus, TriggerKind,
-    TriggerPutOutcome, TriggerScheduleSlot, WebhookReceiptOutcome, TRIGGER_DAG_IDEMPOTENCY_PREFIX,
+    TriggerPutOutcome, TriggerScheduleSlot, WebhookReceiptOutcome, compute_audit_event_hash,
+    compute_trigger_transfer_snapshot_digest, compute_trigger_transfer_snapshot_ledger_digest,
+    verify_trigger_transfer_snapshot,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{Postgres, Transaction};
@@ -2683,18 +2684,23 @@ async fn dead_letters_require_explicit_fenced_redrive_and_caller_rotation_denies
             && !version.reason.is_empty()
             && !version.idempotency_key.is_empty()
     }));
-    assert!(handoff
-        .deliveries
-        .iter()
-        .all(|delivery| { delivery.audit_sequence > 0 && delivery.audit_event_hash != [0; 32] }));
-    assert!(handoff
-        .deliveries
-        .iter()
-        .any(|delivery| delivery.status == TriggerDeliveryStatus::DeadLettered));
-    assert!(handoff
-        .deliveries
-        .iter()
-        .any(|delivery| { delivery.redrive_of_delivery_id.as_deref() == Some("dead-1") }));
+    assert!(
+        handoff.deliveries.iter().all(|delivery| {
+            delivery.audit_sequence > 0 && delivery.audit_event_hash != [0; 32]
+        })
+    );
+    assert!(
+        handoff
+            .deliveries
+            .iter()
+            .any(|delivery| delivery.status == TriggerDeliveryStatus::DeadLettered)
+    );
+    assert!(
+        handoff
+            .deliveries
+            .iter()
+            .any(|delivery| { delivery.redrive_of_delivery_id.as_deref() == Some("dead-1") })
+    );
     let reaped_handoff_claim = handoff
         .deliveries
         .iter()
