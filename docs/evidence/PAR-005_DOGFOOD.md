@@ -82,9 +82,13 @@ Consecutive match count after row 6: **6 / 10**.
 
 HeMan admitted PushEvent `22345134247` for main tip `6824c8cb1ed0` (#163
 squash). Build `6992c76b-7e18-4ad5-a0b4-82b0a2bb6ec0` succeeded; Foundation
-run `36369627296` success. Dogfood binaries remain on `0220759a` (#159).
+run `36369627296` success. Dogfood binaries remain on `0220759a` (#159);
+tip is docs-only relative to that redeploy.
 
 Consecutive match count after row 7: **7 / 10**.
+
+### Luigi follow-up (2026-09-27 quiet probe; not a HeMan match row)
+
 Luigi follow-up (2026-09-27 quiet probe): host load ~0.8–1.0, sealed checkout of
 `4f65905` still ~64.6 s wall (attempt start → first lane log). Residual >60 s is
 not load-only. rust-tests exit 101 on build `76343578…` was
