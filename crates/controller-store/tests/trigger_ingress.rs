@@ -2,18 +2,17 @@
 mod diff003;
 
 use mcloving_controller_store::{
-    DagNodeKind, NewDagBuild, NewDagNode, NewTriggerDelivery, NewWebhookReceipt,
-    PipelineOperationalState, PipelineOperationalStateTransition,
-    PipelineOperationalStateTransitionOutcome, PipelinePutOutcome, PipelineTriggerState,
-    PipelineTriggerWrite, PipelineWrite, Store, StoreError, TRIGGER_DAG_IDEMPOTENCY_PREFIX,
-    TriggerDeliveryAdmission, TriggerDeliveryClaimOutcome, TriggerDeliveryClaimRequest,
+    compute_audit_event_hash, compute_trigger_transfer_snapshot_digest,
+    compute_trigger_transfer_snapshot_ledger_digest, verify_trigger_transfer_snapshot, DagNodeKind,
+    NewDagBuild, NewDagNode, NewTriggerDelivery, NewWebhookReceipt, PipelineOperationalState,
+    PipelineOperationalStateTransition, PipelineOperationalStateTransitionOutcome,
+    PipelinePutOutcome, PipelineTriggerState, PipelineTriggerWrite, PipelineWrite, Store,
+    StoreError, TriggerDeliveryAdmission, TriggerDeliveryClaimOutcome, TriggerDeliveryClaimRequest,
     TriggerDeliveryDagAdmission, TriggerDeliveryDagAdmissionRequest, TriggerDeliveryFailure,
     TriggerDeliveryFailureRequest, TriggerDeliveryRedrive, TriggerDeliveryStatus, TriggerKind,
-    TriggerPutOutcome, TriggerScheduleSlot, WebhookReceiptOutcome, compute_audit_event_hash,
-    compute_trigger_transfer_snapshot_digest, compute_trigger_transfer_snapshot_ledger_digest,
-    verify_trigger_transfer_snapshot,
+    TriggerPutOutcome, TriggerScheduleSlot, WebhookReceiptOutcome, TRIGGER_DAG_IDEMPOTENCY_PREFIX,
 };
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{Postgres, Transaction};
@@ -2684,23 +2683,18 @@ async fn dead_letters_require_explicit_fenced_redrive_and_caller_rotation_denies
             && !version.reason.is_empty()
             && !version.idempotency_key.is_empty()
     }));
-    assert!(
-        handoff.deliveries.iter().all(|delivery| {
-            delivery.audit_sequence > 0 && delivery.audit_event_hash != [0; 32]
-        })
-    );
-    assert!(
-        handoff
-            .deliveries
-            .iter()
-            .any(|delivery| delivery.status == TriggerDeliveryStatus::DeadLettered)
-    );
-    assert!(
-        handoff
-            .deliveries
-            .iter()
-            .any(|delivery| { delivery.redrive_of_delivery_id.as_deref() == Some("dead-1") })
-    );
+    assert!(handoff
+        .deliveries
+        .iter()
+        .all(|delivery| { delivery.audit_sequence > 0 && delivery.audit_event_hash != [0; 32] }));
+    assert!(handoff
+        .deliveries
+        .iter()
+        .any(|delivery| delivery.status == TriggerDeliveryStatus::DeadLettered));
+    assert!(handoff
+        .deliveries
+        .iter()
+        .any(|delivery| { delivery.redrive_of_delivery_id.as_deref() == Some("dead-1") }));
     let reaped_handoff_claim = handoff
         .deliveries
         .iter()
@@ -3592,5 +3586,9 @@ async fn native_schedule_horizon_extends_without_rewriting_versions_and_dual_con
         .count_schedule_deliveries(organization_id, duel_trigger)
         .await
         .unwrap();
-    assert_eq!(after - before, 1, "two controllers must fire one shared due slot once");
+    assert_eq!(
+        after - before,
+        1,
+        "two controllers must fire one shared due slot once"
+    );
 }
