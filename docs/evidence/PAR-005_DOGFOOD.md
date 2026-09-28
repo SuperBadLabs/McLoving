@@ -77,6 +77,18 @@ squash). Build `35e0ed35-61a9-45ea-b705-f25e28bc2033` succeeded; Foundation
 run `36364876716` success. Dogfood binaries remain on `0220759a` (#159).
 
 Consecutive match count after row 6: **6 / 10**.
+
+## Notes (2026-09-28 match #7 on `6824c8cb` / #163 tip)
+
+HeMan admitted PushEvent `22345134247` for main tip `6824c8cb1ed0` (#163
+squash). Build `6992c76b-7e18-4ad5-a0b4-82b0a2bb6ec0` succeeded; Foundation
+run `36369627296` success. Dogfood binaries remain on `0220759a` (#159);
+tip is docs-only relative to that redeploy.
+
+Consecutive match count after row 7: **7 / 10**.
+
+### Luigi follow-up (2026-09-27 quiet probe; not a HeMan match row)
+
 Luigi follow-up (2026-09-27 quiet probe): host load ~0.8–1.0, sealed checkout of
 `4f65905` still ~64.6 s wall (attempt start → first lane log). Residual >60 s is
 not load-only. rust-tests exit 101 on build `76343578…` was
@@ -108,3 +120,4 @@ as `revision_mismatch` and counted as a mismatch.
 | 4 | `e9b29a690a19` | 2026-09-27T23:21:48.587Z | 36341612189 | success | `efceadff-e962-4ebe-be05-8faaf9d19e67` | succeeded | yes |
 | 5 | `99c42814756b` | 2026-09-27T23:51:55.588Z | 36360102505 | success | `eb314375-49de-4b72-aaf3-4b7de3079b53` | succeeded | yes |
 | 6 | `83d2cb0b1df0` | 2026-09-28T01:09:14.701Z | 36364876716 | success | `35e0ed35-61a9-45ea-b705-f25e28bc2033` | succeeded | yes |
+| 7 | `6824c8cb1ed0` | 2026-09-28T02:23:25.870Z | 36369627296 | success | `6992c76b-7e18-4ad5-a0b4-82b0a2bb6ec0` | succeeded | yes |
