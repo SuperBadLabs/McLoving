@@ -471,8 +471,17 @@ impl Store {
                 )))
             }
             Some(existing) => {
-                if existing == ProjectRole::Owner && owners <= 1 {
-                    return denied("the last Owner of a project cannot be demoted");
+                if existing == ProjectRole::Owner {
+                    let remaining = active_owner_count_excluding(
+                        &mut tx,
+                        grant.organization_id,
+                        grant.project_id,
+                        grant.identity_id,
+                    )
+                    .await?;
+                    if remaining == 0 {
+                        return denied("the last Owner of a project cannot be demoted");
+                    }
                 }
                 let next_revision = allocate_membership_revision(
                     &mut tx,
@@ -646,9 +655,14 @@ impl Store {
             }
         }
         if previous == ProjectRole::Owner {
-            let owners =
-                owner_count(&mut tx, revocation.organization_id, revocation.project_id).await?;
-            if owners <= 1 {
+            let remaining = active_owner_count_excluding(
+                &mut tx,
+                revocation.organization_id,
+                revocation.project_id,
+                revocation.identity_id,
+            )
+            .await?;
+            if remaining == 0 {
                 return denied("the last Owner of a project cannot be revoked");
             }
         }
@@ -1056,6 +1070,64 @@ async fn require_human_identity(
         ));
     }
     Ok(row.0)
+}
+
+async fn active_owner_count_excluding(
+    tx: &mut Transaction<'_, Postgres>,
+    organization_id: Uuid,
+    project_id: Uuid,
+    exclude_identity_id: Uuid,
+) -> Result<i64, StoreError> {
+    Ok(sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*)
+         FROM project_memberships AS m
+         INNER JOIN identities AS i
+           ON i.organization_id = m.organization_id
+          AND i.id = m.identity_id
+         WHERE m.organization_id = $1
+           AND m.project_id = $2
+           AND m.role = 'owner'
+           AND m.identity_id <> $3
+           AND i.lifecycle_state = 'active'",
+    )
+    .bind(organization_id)
+    .bind(project_id)
+    .bind(exclude_identity_id)
+    .fetch_one(&mut **tx)
+    .await?)
+}
+
+/// Before an identity leaves the active lifecycle, refuse if any project would
+/// lose its last usable Owner. Takes each project's membership advisory lock
+/// and Owner identity rows so this serializes with membership writes.
+pub(crate) async fn ensure_usable_owners_remain_after_deactivation(
+    tx: &mut Transaction<'_, Postgres>,
+    organization_id: Uuid,
+    identity_id: Uuid,
+) -> Result<(), StoreError> {
+    let project_ids = sqlx::query_scalar::<_, Uuid>(
+        "SELECT project_id
+         FROM project_memberships
+         WHERE organization_id = $1 AND identity_id = $2 AND role = 'owner'
+         ORDER BY project_id",
+    )
+    .bind(organization_id)
+    .bind(identity_id)
+    .fetch_all(&mut **tx)
+    .await?;
+    for project_id in project_ids {
+        lock_project_memberships(tx, organization_id, project_id).await?;
+        lock_identity_rows(tx, organization_id, project_id, identity_id, None).await?;
+        let remaining =
+            active_owner_count_excluding(tx, organization_id, project_id, identity_id).await?;
+        if remaining == 0 {
+            return Err(StoreError::IdentityConflict(
+                "disabling or deleting this identity would leave a project with no usable Owner"
+                    .to_owned(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 async fn owner_count(

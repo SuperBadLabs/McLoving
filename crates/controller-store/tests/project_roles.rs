@@ -1082,6 +1082,25 @@ async fn last_usable_owner_cannot_self_revoke_after_peer_disable() {
         .expect_err("alice is the last usable Owner");
     assert!(matches!(err, StoreError::ProjectRoleDenied(_)), "{err:?}");
 
+    // Inactive Owner memberships can be cleaned up while an active Owner remains.
+    admin
+        .revoke_project_role(&revocation(&tenant, bob, as_alice, "cleanup inactive bob"))
+        .await
+        .expect("revoke inactive owner membership");
+
+    let err = admin
+        .transition_identity_lifecycle(
+            tenant.organization_id,
+            alice,
+            1,
+            IdentityLifecycle::Disabled,
+            "would leave no usable owner",
+            "reviewer:par003",
+        )
+        .await
+        .expect_err("cannot disable the last usable Owner");
+    assert!(matches!(err, StoreError::IdentityConflict(_)), "{err:?}");
+
     let err = admin
         .grant_project_role(&ProjectRoleGrant {
             organization_id: tenant.organization_id,

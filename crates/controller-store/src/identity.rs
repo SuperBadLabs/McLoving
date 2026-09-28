@@ -1447,6 +1447,14 @@ impl Store {
             tx.commit().await?;
             return Ok(current.1);
         }
+        if current_state == IdentityLifecycle::Active && next != IdentityLifecycle::Active {
+            crate::project_roles::ensure_usable_owners_remain_after_deactivation(
+                &mut tx,
+                organization_id,
+                identity_id,
+            )
+            .await?;
+        }
         let generation = current.1.checked_add(1).ok_or_else(|| {
             StoreError::InvalidIdentityOperation("identity generation overflow".to_owned())
         })?;
