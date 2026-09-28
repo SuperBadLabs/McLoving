@@ -107,14 +107,30 @@ impl MembershipAuthority {
             }),
             Self::Delegated {
                 caller: None,
-                policy_generation: Some(_),
-            } => Ok(ResolvedAuthority {
-                // Static credentials have no durable identity to revalidate
-                // under a mapped policy; they remain Delegated Admin.
-                kind: "delegated",
-                role: Some(ProjectRole::Admin),
-                identity_id: None,
-            }),
+                policy_generation: Some(policy_generation),
+            } => {
+                // Static credentials have no durable identity for mapped-policy
+                // reauthorization; bind them to the locked generation so a
+                // replacement that advances current_generation cannot keep
+                // stale Admin authority.
+                let current = sqlx::query_scalar::<_, i64>(
+                    "SELECT current_generation
+                     FROM authorization_project_policies
+                     WHERE organization_id = $1 AND project_id = $2",
+                )
+                .bind(organization_id)
+                .bind(project_id)
+                .fetch_optional(&mut **tx)
+                .await?;
+                if current != Some(policy_generation) {
+                    return denied("the caller's imported policy generation is no longer current");
+                }
+                Ok(ResolvedAuthority {
+                    kind: "delegated",
+                    role: Some(ProjectRole::Admin),
+                    identity_id: None,
+                })
+            }
             Self::Delegated {
                 caller: Some(caller),
                 policy_generation: None,
