@@ -3609,13 +3609,17 @@ async fn materialize_schedule_slots_for_trigger(
     .fetch_one(&mut **tx)
     .await?
     .unwrap_or(-1);
-    // Keep extending strictly after the last materialized slot. On first
-    // fill, start at the current minute so a due slot can fire without waiting
-    // for the next wall-clock tick.
+    // First fill includes the current minute so a brand-new schedule can fire
+    // without waiting a wall-clock tick. Refills never remint already-due
+    // minutes: after catch-up the table still holds past fired/skipped rows, and
+    // continuing from last+1 alone would mint a fresh due race for every
+    // controller. Always take max(last+1, next wall-clock minute).
+    let now_floor = (now_unix_ms / 60_000) * 60_000;
+    let next_minute = now_floor.saturating_add(60_000);
     let from_ms = if last_existing >= 0 {
-        last_existing.saturating_add(1)
+        last_existing.saturating_add(1).max(next_minute)
     } else {
-        (now_unix_ms / 60_000) * 60_000
+        now_floor
     };
     let candidates = enumerate_schedule_slots(tx, &calendar, from_ms, need).await?;
     let mut inserted = 0usize;

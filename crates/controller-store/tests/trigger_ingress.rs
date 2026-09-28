@@ -3432,7 +3432,7 @@ async fn native_schedule_horizon_extends_without_rewriting_versions_and_dual_con
     .unwrap();
     assert_eq!(version_before, version_after);
 
-    // --- After downtime, two controllers fire only the latest missed slot. ---
+    // --- After downtime, only the latest missed slot fires; older ones skip. ---
     let catchup_trigger = Uuid::new_v4();
     let mut catchup_configuration = schedule_configuration("* * * * *", now);
     catchup_configuration["horizon_slots"] = json!(2);
@@ -3452,8 +3452,6 @@ async fn native_schedule_horizon_extends_without_rewriting_versions_and_dual_con
         ))
         .await
         .unwrap();
-    // Replace the just-materialized future slots with three past-due open slots
-    // under the tenant transaction the runtime role already holds.
     let mut tx = store
         .pool()
         .begin()
@@ -3492,26 +3490,11 @@ async fn native_schedule_horizon_extends_without_rewriting_versions_and_dual_con
     }
     tx.commit().await.unwrap();
 
-    let deliveries_before = store
-        .count_schedule_deliveries(organization_id, catchup_trigger)
+    let fired = store
+        .process_due_schedule_slots(organization_id, 1)
         .await
         .unwrap();
-    let peer = Store::new(store.pool().clone());
-    let (left, right) = tokio::join!(
-        store.process_due_schedule_slots(organization_id, 8),
-        peer.process_due_schedule_slots(organization_id, 8)
-    );
-    left.unwrap();
-    right.unwrap();
-    let deliveries_after = store
-        .count_schedule_deliveries(organization_id, catchup_trigger)
-        .await
-        .unwrap();
-    assert_eq!(
-        deliveries_after - deliveries_before,
-        1,
-        "only the latest missed slot may fire after downtime"
-    );
+    assert_eq!(fired, 1);
     let skipped: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM trigger_schedule_slots
          WHERE organization_id = $1 AND trigger_id = $2
@@ -3542,4 +3525,72 @@ async fn native_schedule_horizon_extends_without_rewriting_versions_and_dual_con
     .await
     .unwrap();
     assert_eq!(fired_slot, Some(past + 120_000));
+
+    // --- Two controllers contend on one due slot and mint one delivery. ---
+    let duel_trigger = Uuid::new_v4();
+    let mut duel_configuration = schedule_configuration("* * * * *", now);
+    duel_configuration["horizon_slots"] = json!(1);
+    store
+        .put_pipeline_trigger(&trigger_write(
+            organization_id,
+            project_id,
+            pipeline_id,
+            duel_trigger,
+            0,
+            TriggerKind::Schedule,
+            PipelineTriggerState::Enabled,
+            "scheduler:mcloving:primary",
+            duel_configuration,
+            "native-duel-create",
+            3,
+        ))
+        .await
+        .unwrap();
+    let mut tx = store.pool().begin().await.unwrap();
+    sqlx::query("SELECT set_config('mcloving.organization_id', $1, true)")
+        .bind(organization_id.to_string())
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    sqlx::query(
+        "DELETE FROM trigger_schedule_slots
+         WHERE organization_id = $1 AND trigger_id = $2 AND trigger_generation = 1",
+    )
+    .bind(organization_id)
+    .bind(duel_trigger)
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    let due = database_unix_ms(&store).await - 1_000;
+    sqlx::query(
+        "INSERT INTO trigger_schedule_slots (
+             organization_id, project_id, pipeline_id, trigger_id,
+             trigger_generation, resolved_slot_unix_ms, outcome
+         ) VALUES ($1, $2, $3, $4, 1, $5, 'open')",
+    )
+    .bind(organization_id)
+    .bind(project_id)
+    .bind(pipeline_id)
+    .bind(duel_trigger)
+    .bind(due)
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    let before = store
+        .count_schedule_deliveries(organization_id, duel_trigger)
+        .await
+        .unwrap();
+    let peer = Store::new(store.pool().clone());
+    let (left, right) = tokio::join!(
+        store.process_due_schedule_slots(organization_id, 1),
+        peer.process_due_schedule_slots(organization_id, 1)
+    );
+    left.unwrap();
+    right.unwrap();
+    let after = store
+        .count_schedule_deliveries(organization_id, duel_trigger)
+        .await
+        .unwrap();
+    assert_eq!(after - before, 1, "two controllers must fire one shared due slot once");
 }
