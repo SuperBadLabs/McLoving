@@ -1436,14 +1436,31 @@ impl Store {
         .bind(identity_id)
         .fetch_all(&mut *tx)
         .await?;
+        let mut owner_projects = owner_projects;
         if next != IdentityLifecycle::Active {
-            for project_id in &owner_projects {
-                crate::project_roles::lock_project_memberships_for_lifecycle(
-                    &mut tx,
-                    organization_id,
-                    *project_id,
+            loop {
+                for project_id in &owner_projects {
+                    crate::project_roles::lock_project_memberships_for_lifecycle(
+                        &mut tx,
+                        organization_id,
+                        *project_id,
+                    )
+                    .await?;
+                }
+                let refreshed = sqlx::query_scalar::<_, Uuid>(
+                    "SELECT project_id
+                     FROM project_memberships
+                     WHERE organization_id = $1 AND identity_id = $2 AND role = 'owner'
+                     ORDER BY project_id",
                 )
+                .bind(organization_id)
+                .bind(identity_id)
+                .fetch_all(&mut *tx)
                 .await?;
+                if refreshed == owner_projects {
+                    break;
+                }
+                owner_projects = refreshed;
             }
         }
         let current = sqlx::query_as::<_, (String, i64, String)>(
