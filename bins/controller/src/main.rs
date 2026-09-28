@@ -373,6 +373,10 @@ async fn main() -> Result<()> {
     let notification_delivery_loop =
         run_notification_delivery_worker(notification_delivery_state, trigger_retry_organization);
     tokio::pin!(notification_delivery_loop);
+    let schedule_delivery_state = state.clone();
+    let schedule_delivery_loop =
+        run_schedule_delivery_worker(schedule_delivery_state, trigger_retry_organization);
+    tokio::pin!(schedule_delivery_loop);
     tokio::select! {
         result = &mut server => result,
         result = &mut agent_server => result,
@@ -380,6 +384,7 @@ async fn main() -> Result<()> {
         result = &mut worker_loop => result,
         result = &mut trigger_retry_loop => result,
         result = &mut notification_delivery_loop => result,
+        result = &mut schedule_delivery_loop => result,
         result = &mut outbox_reaper_loop => result,
     }
 }
@@ -2876,6 +2881,28 @@ const MAX_OUTBOX_RETENTION_HOURS: u64 = 10 * 365 * 24;
 /// deletes one bounded batch past the retention horizon. The expected retained
 /// staging count is reported once at startup and after reclamation, rather
 /// than warning every interval about a consumer that does not exist.
+/// Fires due native schedule slots (PAR-002): materializes the horizon, skips
+/// older missed open slots after downtime, and admits the latest due slot
+/// through the existing trigger delivery path. `SKIP LOCKED` keeps two
+/// controllers on one database at exactly one delivery per slot.
+async fn run_schedule_delivery_worker(state: ApiState, organization_id: Uuid) -> Result<()> {
+    const POLL_INTERVAL: Duration = Duration::from_secs(1);
+    const SCAN_LIMIT: i64 = 32;
+    loop {
+        match state
+            .process_due_schedule_slots(organization_id, SCAN_LIMIT)
+            .await
+        {
+            Ok(0) => tokio::time::sleep(POLL_INTERVAL).await,
+            Ok(_) => {}
+            Err(error) => {
+                eprintln!("schedule delivery scan failed: {error}");
+                tokio::time::sleep(POLL_INTERVAL).await;
+            }
+        }
+    }
+}
+
 async fn run_outbox_reaper(
     store: Store,
     organization_id: Uuid,

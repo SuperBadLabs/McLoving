@@ -18,8 +18,9 @@ The closed trigger-kind schema is:
 - `scm_webhook`, with an exact configured provider and repository identity plus
   revision, branch, path, and event filtering;
 - `schedule`, with timezone, calendar/tzdata identity, expression, exact
-  resolver and schedule identities, a bounded pre-resolved slot set, and a
-  durable watermark;
+  resolver and schedule identities, an optional horizon bound, and a durable
+  watermark; upcoming fire times live in the mutable generation-bound
+  `trigger_schedule_slots` table (PAR-002), not in immutable version rows;
 - `upstream`, with exact upstream pipeline/build identity and result filtering;
 - `remote_api`, with exact authenticated caller, audience, request identity,
   method, and event filtering; and
@@ -34,10 +35,12 @@ accept any ordering while requiring unique, bounded string values. The
 sealed Mario inventory names `hudson.triggers.SCMTrigger` and
 `hudson.triggers.TimerTrigger`, but does not preserve the schedule expressions,
 Jenkins hash inputs, algorithm/version, timezone, or resolved slots required to
-prove `H` equivalence. Those production TimerTrigger declarations remain
-ineligible. Trigger ingress v1 unconditionally rejects expressions containing
-`H`; even supplied metadata cannot substitute for an installed, differentially
-certified Jenkins hash resolver. It does not invent a stable-but-different hash.
+prove production `H` equivalence against Mario. Those production TimerTrigger
+declarations remain ineligible. Native schedules (PAR-002) resolve Jenkins-style
+`H` / `H/n` / `H(m-n)` fields with the named
+`jenkins-core-2.516.1:cron-hash-v1` construction (MD5-folded seed into
+`java.util.Random`) and materialize upcoming slots server-side; that does not
+admit Mario TimerTrigger authority.
 
 ## Configuration generations
 
@@ -170,24 +173,31 @@ pipeline rejects recovery before work is minted.
 
 ## Schedule capture and restart
 
-The authenticated scheduler submits one exact resolved slot. The request binds
-timezone, calendar/tzdata identity, original expression, schedule identity,
-expected prior watermark, and resolved Unix-millisecond slot. The slot must be a
-member of the digest-verified configured slot set. Configuration-time timezone
-and calendar values use the same 128-byte canonical bound as the durable
-watermark, so an accepted generation cannot become unusable only at capture.
-The generated contract marks `resolved_slots_unix_ms` with the machine-visible
-`x-mcloving-ordering: strictly_increasing` extension and a matching description;
-the slot digest binds that exact ordered array.
+Native schedules materialize upcoming fire times into `trigger_schedule_slots`,
+keyed by organization, trigger and generation. Configuration carries timezone,
+calendar/tzdata identity, expression, schedule and resolver identities, and an
+optional `horizon_slots` bound; it does not embed the mutable slot set, so
+extending the horizon never rewrites version rows. A controller loop claims due
+open slots with `FOR UPDATE SKIP LOCKED`, skips older missed open slots after
+downtime, and fires only the latest missed slot through the existing delivery
+path under the trigger's configured event-source identity.
 
-Watermark advancement and delivery insertion commit in the same transaction.
-A deferred foreign key requires the watermark's delivery ID to exist at commit,
-so a crash cannot skip a slot by persisting only the cursor. The watermark is
-strictly monotonic per trigger generation; duplicate, reordered, substituted,
-or stale-expected slots fail closed. A restarted or active-active controller
-reads the same PostgreSQL watermark. A new schedule configuration gets a new
-generation-specific watermark while older generations remain immutable for
-replay and transfer evidence.
+An authenticated scheduler may still submit one exact resolved slot. The request
+binds timezone, calendar/tzdata identity, original expression, schedule identity,
+expected prior watermark, and resolved Unix-millisecond slot. The slot must be a
+member of the materialized slot table for that generation. Configuration-time
+timezone and calendar values use the same 128-byte canonical bound as the durable
+watermark, so an accepted generation cannot become unusable only at capture.
+
+Watermark advancement, slot outcome `fired`, and delivery insertion commit in
+the same transaction. A deferred foreign key requires the watermark's delivery
+ID to exist at commit, so a crash cannot skip a slot by persisting only the
+cursor. The watermark is strictly monotonic per trigger generation; duplicate,
+reordered, substituted, or stale-expected slots fail closed. A restarted or
+active-active controller reads the same PostgreSQL watermark and contends on
+slot row locks. A new schedule configuration gets a new generation-specific
+watermark and slot set while older generations remain immutable for replay and
+transfer evidence.
 
 ## Operational-state and authority fence
 

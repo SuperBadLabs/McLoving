@@ -19,6 +19,7 @@ mod discovery;
 mod identity;
 mod product;
 mod project_roles;
+mod schedule_calendar;
 mod scheduler;
 mod security;
 mod sequential;
@@ -77,6 +78,9 @@ pub use product::{
 pub use project_roles::{
     DurableCaller, MembershipAuthority, ProjectMembership, ProjectRoleGrant,
     ProjectRoleGrantOutcome, ProjectRoleRevocation, ProjectRoleRevocationOutcome,
+};
+pub use schedule_calendar::{
+    DEFAULT_SCHEDULE_HORIZON, JENKINS_CRON_HASH_V1, NATIVE_SCHEDULE_RESOLVER_V1, ScheduleCalendar,
 };
 pub use scheduler::{
     AcceptedOffer, ClaimRequest, ClaimedAttempt, LeaseRenewalDisposition, WaitReason,
@@ -207,6 +211,8 @@ pub const LOG_BUILD_POSITION_V39: &str = include_str!("../migrations/0039_log_bu
 pub const NOTIFICATIONS_V40: &str = include_str!("../migrations/0040_notifications.sql");
 pub const PROJECT_ROLE_GRANTS_V41: &str =
     include_str!("../migrations/0041_project_role_grants.sql");
+/// Mutable generation-bound native schedule slots (PAR-002).
+pub const SCHEDULE_SLOTS_V42: &str = include_str!("../migrations/0042_trigger_schedule_slots.sql");
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AgentReconciliationDisposition {
@@ -1001,6 +1007,9 @@ impl Store {
                    ('trigger_schedule_watermarks', 'SELECT'),
                    ('trigger_schedule_watermarks', 'INSERT'),
                    ('trigger_schedule_watermarks', 'UPDATE'),
+                   ('trigger_schedule_slots', 'SELECT'),
+                   ('trigger_schedule_slots', 'INSERT'),
+                   ('trigger_schedule_slots', 'UPDATE'),
                    ('webhook_receipts', 'SELECT'), ('webhook_receipts', 'INSERT'),
                    ('notification_deliveries', 'SELECT'),
                    ('notification_deliveries', 'INSERT'),
@@ -1335,7 +1344,8 @@ impl Store {
                    ('pipeline_operational_state_history'),
                    ('pipeline_trigger_definitions'),
                    ('pipeline_trigger_versions'), ('trigger_deliveries'),
-                   ('trigger_schedule_watermarks'), ('webhook_receipts'),
+                   ('trigger_schedule_watermarks'), ('trigger_schedule_slots'),
+                   ('webhook_receipts'),
                    ('notification_deliveries'),
                    ('discovery_parent_definitions'),
                    ('discovery_parent_versions'), ('discovery_scans'),
@@ -1534,6 +1544,7 @@ impl Store {
         apply_migration(&mut tx, 39, LOG_BUILD_POSITION_V39).await?;
         apply_migration(&mut tx, 40, NOTIFICATIONS_V40).await?;
         apply_migration(&mut tx, 41, PROJECT_ROLE_GRANTS_V41).await?;
+        apply_migration(&mut tx, 42, SCHEDULE_SLOTS_V42).await?;
         tx.commit().await?;
         Ok(())
     }

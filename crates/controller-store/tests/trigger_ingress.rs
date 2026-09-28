@@ -2022,16 +2022,26 @@ async fn disabled_pipeline_rejects_every_typed_ingress_before_queue() {
     );
 
     let schedule_identity_sha256: [u8; 32] = Sha256::digest(b"schedule-identity").into();
+    let schedule_slot_ms: i64 = sqlx::query_scalar(
+        "SELECT resolved_slot_unix_ms FROM trigger_schedule_slots
+         WHERE organization_id = $1 AND trigger_id = $2 AND trigger_generation = 1
+         ORDER BY resolved_slot_unix_ms ASC LIMIT 1",
+    )
+    .bind(organization_id)
+    .bind(schedule_trigger_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("disabled-pipeline schedule fixture must materialize a slot");
     let schedule_payload = json!({
         "event_kind": "schedule",
-        "event_time_unix_ms": now,
+        "event_time_unix_ms": schedule_slot_ms,
         "payload": {
             "timezone": "America/Chicago",
             "calendar": "gregorian:tzdata-2026a",
             "expression": "0 2 * * *",
             "schedule_identity_sha256": hex::encode(schedule_identity_sha256),
             "expected_last_resolved_slot_unix_ms": null,
-            "resolved_slot_unix_ms": now,
+            "resolved_slot_unix_ms": schedule_slot_ms,
         },
     });
     let schedule_delivery = NewTriggerDelivery {
@@ -2054,15 +2064,15 @@ async fn disabled_pipeline_rejects_every_typed_ingress_before_queue() {
         parameters: json!({}),
         requested_platform: "linux".to_owned(),
         requested_trust_pool: "trusted-linux".to_owned(),
-        event_time_unix_ms: now,
-        accepted_at_unix_ms: now,
+        event_time_unix_ms: schedule_slot_ms,
+        accepted_at_unix_ms: schedule_slot_ms,
         schedule_slot: Some(TriggerScheduleSlot {
             timezone: "America/Chicago".to_owned(),
             calendar: "gregorian:tzdata-2026a".to_owned(),
             expression: "0 2 * * *".to_owned(),
             schedule_identity_sha256,
             expected_last_resolved_slot_unix_ms: None,
-            resolved_slot_unix_ms: now,
+            resolved_slot_unix_ms: schedule_slot_ms,
         }),
     };
     let schedule_denied = matches!(
@@ -2829,20 +2839,14 @@ fn digest_hex(value: &[u8]) -> String {
 }
 
 fn schedule_configuration(expression: &str, first_slot_unix_ms: i64) -> Value {
-    let resolved_slots = json!([
-        first_slot_unix_ms,
-        first_slot_unix_ms + 1_000,
-        first_slot_unix_ms + 2_000
-    ]);
-    let resolved_slots_sha256 = digest_hex(&serde_json::to_vec(&resolved_slots).unwrap());
+    let _ = first_slot_unix_ms;
     json!({
         "timezone": "America/Chicago",
         "calendar": "gregorian:tzdata-2026a",
         "expression": expression,
         "schedule_identity_sha256": digest_hex(b"schedule-identity"),
         "resolver_implementation_sha256": digest_hex(b"resolver-implementation"),
-        "resolved_slots_sha256": resolved_slots_sha256,
-        "resolved_slots_unix_ms": resolved_slots,
+        "horizon_slots": 8,
         "jenkins_hash_algorithm_version": "jenkins-core-2.516.1:cron-hash-v1",
         "jenkins_full_item_name": "folder/nightly",
         "jenkins_hash_inputs_sha256": digest_hex(b"jenkins-hash-inputs"),
@@ -2859,7 +2863,21 @@ async fn schedule_identity_watermark_restart_and_generation_changes_fail_closed(
     let (organization_id, project_id, pipeline_id) = fixture(&store).await;
     let trigger_id = Uuid::new_v4();
     let slot1 = database_unix_ms(&store).await;
-    let incomplete = schedule_configuration("H H * * *", slot1);
+    let mut incomplete = schedule_configuration("H H * * *", slot1);
+    incomplete
+        .as_object_mut()
+        .unwrap()
+        .remove("jenkins_hash_algorithm_version");
+    incomplete
+        .as_object_mut()
+        .unwrap()
+        .remove("jenkins_full_item_name");
+    incomplete
+        .as_object_mut()
+        .unwrap()
+        .remove("jenkins_hash_inputs_sha256");
+    // Partial Jenkins hash evidence must still fail closed.
+    incomplete["jenkins_full_item_name"] = json!("folder/nightly");
     let incomplete = trigger_write(
         organization_id,
         project_id,
@@ -2898,7 +2916,7 @@ async fn schedule_identity_watermark_restart_and_generation_changes_fail_closed(
         Err(StoreError::InvalidTriggerIngress(_))
     ));
 
-    let configuration = schedule_configuration("0 2 * * *", slot1);
+    let configuration = schedule_configuration("* * * * *", slot1);
     let write = trigger_write(
         organization_id,
         project_id,
@@ -2913,6 +2931,23 @@ async fn schedule_identity_watermark_restart_and_generation_changes_fail_closed(
         3,
     );
     store.put_pipeline_trigger(&write).await.unwrap();
+    let materialized: Vec<i64> = sqlx::query_scalar(
+        "SELECT resolved_slot_unix_ms FROM trigger_schedule_slots
+         WHERE organization_id = $1 AND trigger_id = $2 AND trigger_generation = 1
+         ORDER BY resolved_slot_unix_ms ASC",
+    )
+    .bind(organization_id)
+    .bind(trigger_id)
+    .fetch_all(store.pool())
+    .await
+    .expect("read materialized schedule slots");
+    assert!(
+        materialized.len() >= 3,
+        "native calendar must materialize the configured horizon"
+    );
+    let slot1 = materialized[0];
+    let slot2 = materialized[1];
+    let slot3 = materialized[2];
     let identity: [u8; 32] = Sha256::digest(b"schedule-identity").into();
     let schedule_delivery = |delivery_id: &str,
                              event_id: &str,
@@ -2925,7 +2960,7 @@ async fn schedule_identity_watermark_restart_and_generation_changes_fail_closed(
             "payload": {
                 "timezone": "America/Chicago",
                 "calendar": "gregorian:tzdata-2026a",
-                "expression": "0 2 * * *",
+                "expression": "* * * * *",
                 "schedule_identity_sha256": hex::encode(schedule_identity_sha256),
                 "resolved_slot_unix_ms": slot,
                 "expected_last_resolved_slot_unix_ms": expected,
@@ -2956,7 +2991,7 @@ async fn schedule_identity_watermark_restart_and_generation_changes_fail_closed(
             schedule_slot: Some(TriggerScheduleSlot {
                 timezone: "America/Chicago".to_owned(),
                 calendar: "gregorian:tzdata-2026a".to_owned(),
-                expression: "0 2 * * *".to_owned(),
+                expression: "* * * * *".to_owned(),
                 schedule_identity_sha256,
                 expected_last_resolved_slot_unix_ms: expected,
                 resolved_slot_unix_ms: slot,
@@ -2994,7 +3029,7 @@ async fn schedule_identity_watermark_restart_and_generation_changes_fail_closed(
         "schedule-slot-2",
         "schedule-event-2",
         Some(slot1),
-        slot1 + 1_000,
+        slot2,
         identity,
     );
     assert!(matches!(
@@ -3004,8 +3039,8 @@ async fn schedule_identity_watermark_restart_and_generation_changes_fail_closed(
     let substituted = schedule_delivery(
         "schedule-slot-substituted",
         "schedule-event-substituted",
-        Some(slot1 + 1_000),
-        slot1 + 2_000,
+        Some(slot2),
+        slot3,
         Sha256::digest(b"substituted").into(),
     );
     assert!(matches!(
@@ -3017,10 +3052,7 @@ async fn schedule_identity_watermark_restart_and_generation_changes_fail_closed(
         .await
         .unwrap()
         .expect("schedule watermark remains readable");
-    assert_eq!(
-        final_watermark.last_resolved_slot_unix_ms,
-        Some(slot1 + 1_000)
-    );
+    assert_eq!(final_watermark.last_resolved_slot_unix_ms, Some(slot2));
     assert!(
         sqlx::query(
             "UPDATE trigger_schedule_watermarks
@@ -3047,7 +3079,7 @@ async fn schedule_identity_watermark_restart_and_generation_changes_fail_closed(
         TriggerKind::Schedule,
         PipelineTriggerState::Paused,
         "scheduler:mcloving:primary",
-        schedule_configuration("0 2 * * *", slot1),
+        schedule_configuration("* * * * *", slot1),
         "schedule-handoff-pause",
         3,
     );
@@ -3250,5 +3282,246 @@ async fn unadmitted_webhook_receipts_are_recorded_by_the_runtime_role() {
             .expect("receipt is readable by the runtime role")
             .status,
         "filtered"
+    );
+}
+
+#[tokio::test]
+async fn native_schedule_horizon_extends_without_rewriting_versions_and_dual_controllers_fire_once()
+{
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let (organization_id, project_id, pipeline_id) = fixture(&store).await;
+    let identity: [u8; 32] = Sha256::digest(b"schedule-identity").into();
+
+    // --- Horizon extension keeps version rows byte-identical. ---
+    let horizon_trigger = Uuid::new_v4();
+    let now = database_unix_ms(&store).await;
+    let mut configuration = schedule_configuration("* * * * *", now);
+    configuration["horizon_slots"] = json!(3);
+    store
+        .put_pipeline_trigger(&trigger_write(
+            organization_id,
+            project_id,
+            pipeline_id,
+            horizon_trigger,
+            0,
+            TriggerKind::Schedule,
+            PipelineTriggerState::Enabled,
+            "scheduler:mcloving:primary",
+            configuration,
+            "native-horizon-create",
+            3,
+        ))
+        .await
+        .unwrap();
+    let version_before: String = sqlx::query_scalar(
+        "SELECT configuration::text FROM pipeline_trigger_versions
+         WHERE organization_id = $1 AND trigger_id = $2 AND generation = 1",
+    )
+    .bind(organization_id)
+    .bind(horizon_trigger)
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
+    let slots: Vec<i64> = sqlx::query_scalar(
+        "SELECT resolved_slot_unix_ms FROM trigger_schedule_slots
+         WHERE organization_id = $1 AND trigger_id = $2 AND trigger_generation = 1
+         ORDER BY resolved_slot_unix_ms ASC",
+    )
+    .bind(organization_id)
+    .bind(horizon_trigger)
+    .fetch_all(store.pool())
+    .await
+    .unwrap();
+    assert_eq!(slots.len(), 3);
+    let fire = |trigger_id: Uuid, slot: i64, expected: Option<i64>| {
+        let canonical_payload = json!({
+            "event_kind": "schedule",
+            "event_time_unix_ms": slot,
+            "payload": {
+                "timezone": "America/Chicago",
+                "calendar": "gregorian:tzdata-2026a",
+                "expression": "* * * * *",
+                "schedule_identity_sha256": hex::encode(identity),
+                "resolved_slot_unix_ms": slot,
+                "expected_last_resolved_slot_unix_ms": expected,
+            },
+        });
+        NewTriggerDelivery {
+            organization_id,
+            project_id,
+            pipeline_id,
+            trigger_id,
+            expected_trigger_generation: 1,
+            delivery_id: format!("slot-{trigger_id}-{slot}"),
+            event_id: format!("event-{trigger_id}-{slot}"),
+            event_kind: "schedule".to_owned(),
+            caller_identity: "scheduler:mcloving:primary".to_owned(),
+            payload_sha256: Sha256::digest(
+                serde_json::to_vec(&canonical_payload).unwrap().as_slice(),
+            )
+            .into(),
+            canonical_payload,
+            parameters: json!({}),
+            requested_platform: "linux".to_owned(),
+            requested_trust_pool: "trusted-linux".to_owned(),
+            event_time_unix_ms: slot,
+            accepted_at_unix_ms: slot,
+            schedule_slot: Some(TriggerScheduleSlot {
+                timezone: "America/Chicago".to_owned(),
+                calendar: "gregorian:tzdata-2026a".to_owned(),
+                expression: "* * * * *".to_owned(),
+                schedule_identity_sha256: identity,
+                expected_last_resolved_slot_unix_ms: expected,
+                resolved_slot_unix_ms: slot,
+            }),
+        }
+    };
+    assert!(matches!(
+        store
+            .accept_trigger_delivery(&fire(horizon_trigger, slots[0], None))
+            .await
+            .unwrap(),
+        TriggerDeliveryAdmission::Created(_)
+    ));
+    assert!(matches!(
+        store
+            .accept_trigger_delivery(&fire(horizon_trigger, slots[1], Some(slots[0])))
+            .await
+            .unwrap(),
+        TriggerDeliveryAdmission::Created(_)
+    ));
+    assert!(matches!(
+        store
+            .accept_trigger_delivery(&fire(horizon_trigger, slots[2], Some(slots[1])))
+            .await
+            .unwrap(),
+        TriggerDeliveryAdmission::Created(_)
+    ));
+    let peer = Store::new(store.pool().clone());
+    let (left, right) = tokio::join!(
+        store.process_due_schedule_slots(organization_id, 8),
+        peer.process_due_schedule_slots(organization_id, 8)
+    );
+    left.unwrap();
+    right.unwrap();
+    let open_after: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM trigger_schedule_slots
+         WHERE organization_id = $1 AND trigger_id = $2
+           AND trigger_generation = 1 AND outcome = 'open'",
+    )
+    .bind(organization_id)
+    .bind(horizon_trigger)
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
+    assert!(
+        open_after >= 3,
+        "horizon must refill open slots without a generation bump; open={open_after}"
+    );
+    let version_after: String = sqlx::query_scalar(
+        "SELECT configuration::text FROM pipeline_trigger_versions
+         WHERE organization_id = $1 AND trigger_id = $2 AND generation = 1",
+    )
+    .bind(organization_id)
+    .bind(horizon_trigger)
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
+    assert_eq!(version_before, version_after);
+
+    // --- After downtime, two controllers fire only the latest missed slot. ---
+    let catchup_trigger = Uuid::new_v4();
+    let mut catchup_configuration = schedule_configuration("* * * * *", now);
+    catchup_configuration["horizon_slots"] = json!(2);
+    store
+        .put_pipeline_trigger(&trigger_write(
+            organization_id,
+            project_id,
+            pipeline_id,
+            catchup_trigger,
+            0,
+            TriggerKind::Schedule,
+            PipelineTriggerState::Enabled,
+            "scheduler:mcloving:primary",
+            catchup_configuration,
+            "native-catchup-create",
+            3,
+        ))
+        .await
+        .unwrap();
+    // Replace the just-materialized future slots with three past-due open slots
+    // under the tenant transaction the runtime role already holds.
+    let mut tx = store
+        .pool()
+        .begin()
+        .await
+        .expect("begin catch-up fixture transaction");
+    sqlx::query("SELECT set_config('mcloving.organization_id', $1, true)")
+        .bind(organization_id.to_string())
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    sqlx::query(
+        "DELETE FROM trigger_schedule_slots
+         WHERE organization_id = $1 AND trigger_id = $2 AND trigger_generation = 1",
+    )
+    .bind(organization_id)
+    .bind(catchup_trigger)
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    let past = database_unix_ms(&store).await - 180_000;
+    for slot_ms in [past, past + 60_000, past + 120_000] {
+        sqlx::query(
+            "INSERT INTO trigger_schedule_slots (
+                 organization_id, project_id, pipeline_id, trigger_id,
+                 trigger_generation, resolved_slot_unix_ms, outcome
+             ) VALUES ($1, $2, $3, $4, 1, $5, 'open')",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(pipeline_id)
+        .bind(catchup_trigger)
+        .bind(slot_ms)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    }
+    tx.commit().await.unwrap();
+
+    let peer = Store::new(store.pool().clone());
+    let (left, right) = tokio::join!(
+        store.process_due_schedule_slots(organization_id, 8),
+        peer.process_due_schedule_slots(organization_id, 8)
+    );
+    let fired = left.unwrap() + right.unwrap();
+    assert_eq!(
+        fired, 1,
+        "only the latest missed slot may fire after downtime"
+    );
+    let skipped: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM trigger_schedule_slots
+         WHERE organization_id = $1 AND trigger_id = $2
+           AND trigger_generation = 1 AND outcome = 'skipped'
+           AND resolved_slot_unix_ms IN ($3, $4, $5)",
+    )
+    .bind(organization_id)
+    .bind(catchup_trigger)
+    .bind(past)
+    .bind(past + 60_000)
+    .bind(past + 120_000)
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
+    assert_eq!(skipped, 2);
+    assert_eq!(
+        store
+            .count_schedule_deliveries(organization_id, catchup_trigger)
+            .await
+            .unwrap(),
+        1
     );
 }

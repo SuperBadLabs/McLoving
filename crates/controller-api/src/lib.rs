@@ -275,6 +275,18 @@ impl ApiState {
         }
     }
 
+    /// Materialize native schedule horizons and fire due slots (PAR-002).
+    pub async fn process_due_schedule_slots(
+        &self,
+        organization_id: Uuid,
+        limit: i64,
+    ) -> Result<usize, ApiError> {
+        self.store
+            .process_due_schedule_slots(organization_id, limit)
+            .await
+            .map_err(trigger_error)
+    }
+
     pub async fn process_due_trigger_deliveries(
         &self,
         organization_id: Uuid,
@@ -2153,15 +2165,10 @@ fn schedule_trigger_configuration_schema() -> Value {
             "expression": {"type": "string", "minLength": 1, "maxLength": 512},
             "schedule_identity_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
             "resolver_implementation_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-            "resolved_slots_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-            "resolved_slots_unix_ms": {
-                "type": "array", "minItems": 1, "maxItems": 4096, "uniqueItems": true,
-                "description": "Resolved Unix-millisecond slots in strictly increasing order; the digest binds this exact ordered array.",
-                "x-mcloving-ordering": "strictly_increasing",
-                "items": {
-                    "type": "integer", "format": "int64",
-                    "minimum": 0, "maximum": i64::MAX
-                }
+            "horizon_slots": {
+                "type": "integer", "format": "int64",
+                "minimum": 1, "maximum": 4096,
+                "description": "How many upcoming native slots to keep materialized; the controller extends this horizon without a generation bump."
             },
             "jenkins_hash_algorithm_version": {"type": "string", "minLength": 1, "maxLength": 512},
             "jenkins_full_item_name": {"type": "string", "minLength": 1, "maxLength": 512},
@@ -2170,8 +2177,7 @@ fn schedule_trigger_configuration_schema() -> Value {
         },
         "required": [
             "timezone", "calendar", "expression", "schedule_identity_sha256",
-            "resolver_implementation_sha256", "resolved_slots_sha256",
-            "resolved_slots_unix_ms", "filter"
+            "resolver_implementation_sha256", "filter"
         ],
         "dependentRequired": {
             "jenkins_hash_algorithm_version": ["jenkins_full_item_name", "jenkins_hash_inputs_sha256"],
@@ -8882,26 +8888,23 @@ mod tests {
             schedule_configuration["required"]
                 .as_array()
                 .expect("schedule configuration requirements")
-                .contains(&Value::from("resolved_slots_unix_ms"))
+                .contains(&Value::from("expression"))
+        );
+        assert!(
+            !schedule_configuration["required"]
+                .as_array()
+                .expect("schedule configuration requirements")
+                .contains(&Value::from("resolved_slots_unix_ms")),
+            "native schedules materialize slots outside immutable version rows"
         );
         assert!(
             schedule_configuration["properties"]["repository_identity"].is_null(),
             "kind-specific configuration fields must fail closed"
         );
-        let resolved_slots =
-            &schedule_configuration["properties"]["resolved_slots_unix_ms"]["items"];
-        assert_eq!(resolved_slots["format"], "int64");
-        assert_eq!(resolved_slots["maximum"], i64::MAX);
-        assert_eq!(
-            schedule_configuration["properties"]["resolved_slots_unix_ms"]["x-mcloving-ordering"],
-            "strictly_increasing"
-        );
-        assert!(
-            schedule_configuration["properties"]["resolved_slots_unix_ms"]["description"]
-                .as_str()
-                .expect("resolved-slot ordering description")
-                .contains("strictly increasing")
-        );
+        let horizon = &schedule_configuration["properties"]["horizon_slots"];
+        assert_eq!(horizon["format"], "int64");
+        assert_eq!(horizon["minimum"], 1);
+        assert_eq!(horizon["maximum"], 4096);
         let trigger_event = &schemas["TriggerEventRequest"];
         assert_eq!(
             trigger_event["properties"]["trigger_generation"]["format"],
