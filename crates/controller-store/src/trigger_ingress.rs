@@ -1160,6 +1160,32 @@ impl Store {
             .execute(&mut *tx)
             .await?;
         }
+        if input.kind == TriggerKind::Schedule {
+            sqlx::query(
+                "UPDATE trigger_schedule_slots
+                 SET outcome = 'skipped', updated_at = clock_timestamp()
+                 WHERE organization_id = $1 AND trigger_id = $2
+                   AND trigger_generation < $3
+                   AND outcome IN ('open', 'claimed')",
+            )
+            .bind(input.organization_id)
+            .bind(input.trigger_id)
+            .bind(generation)
+            .execute(&mut *tx)
+            .await?;
+            let now_ms = trigger_database_unix_ms(&mut tx).await?;
+            materialize_schedule_slots_for_trigger(
+                &mut tx,
+                input.organization_id,
+                input.project_id,
+                input.pipeline_id,
+                input.trigger_id,
+                generation,
+                &input.configuration,
+                now_ms,
+            )
+            .await?;
+        }
         tx.commit().await?;
         let trigger = self
             .pipeline_trigger(
@@ -2726,8 +2752,7 @@ fn validate_kind_configuration(kind: TriggerKind, configuration: &Value) -> Resu
             "expression",
             "schedule_identity_sha256",
             "resolver_implementation_sha256",
-            "resolved_slots_sha256",
-            "resolved_slots_unix_ms",
+            "horizon_slots",
             "jenkins_hash_algorithm_version",
             "jenkins_full_item_name",
             "jenkins_hash_inputs_sha256",
@@ -2784,65 +2809,8 @@ fn validate_kind_configuration(kind: TriggerKind, configuration: &Value) -> Resu
             require_text("expression")?;
             require_text("schedule_identity_sha256")?;
             require_text("resolver_implementation_sha256")?;
-            require_text("resolved_slots_sha256")?;
-            let expression = configuration
-                .get("expression")
-                .and_then(Value::as_str)
-                .expect("required schedule expression was validated");
-            if expression.split_ascii_whitespace().count() != 5 {
-                return Err(StoreError::InvalidTriggerIngress(
-                    "schedule expression must contain exactly five fields".to_owned(),
-                ));
-            }
-            if expression.contains('H') {
-                return Err(StoreError::InvalidTriggerIngress(
-                    "Jenkins H schedules are ineligible until an exact hash resolver is installed and differentially certified"
-                        .to_owned(),
-                ));
-            }
-            for field in [
-                "schedule_identity_sha256",
-                "resolver_implementation_sha256",
-                "resolved_slots_sha256",
-            ] {
+            for field in ["schedule_identity_sha256", "resolver_implementation_sha256"] {
                 parse_configuration_digest(configuration, field)?;
-            }
-            let resolved_slots = configuration
-                .get("resolved_slots_unix_ms")
-                .and_then(Value::as_array)
-                .ok_or_else(|| {
-                    StoreError::InvalidTriggerIngress(
-                        "schedule configuration requires resolved_slots_unix_ms".to_owned(),
-                    )
-                })?;
-            if resolved_slots.is_empty() || resolved_slots.len() > 4096 {
-                return Err(StoreError::InvalidTriggerIngress(
-                    "schedule requires between one and 4096 resolved slots".to_owned(),
-                ));
-            }
-            let mut previous = None;
-            for value in resolved_slots {
-                let slot = value.as_i64().filter(|slot| *slot >= 0).ok_or_else(|| {
-                    StoreError::InvalidTriggerIngress(
-                        "resolved schedule slots must be non-negative integers".to_owned(),
-                    )
-                })?;
-                if previous.is_some_and(|prior| slot <= prior) {
-                    return Err(StoreError::InvalidTriggerIngress(
-                        "resolved schedule slots must be strictly increasing".to_owned(),
-                    ));
-                }
-                previous = Some(slot);
-            }
-            let resolved_canonical = serde_json::to_vec(resolved_slots)
-                .map_err(|error| StoreError::InvalidTriggerIngress(error.to_string()))?;
-            let expected_slots =
-                parse_configuration_digest(configuration, "resolved_slots_sha256")?;
-            let actual_slots: [u8; 32] = Sha256::digest(&resolved_canonical).into();
-            if actual_slots != expected_slots {
-                return Err(StoreError::InvalidTriggerIngress(
-                    "resolved_slots_sha256 does not match resolved_slots_unix_ms".to_owned(),
-                ));
             }
             let jenkins_hash_fields = [
                 "jenkins_hash_algorithm_version",
@@ -2863,7 +2831,19 @@ fn validate_kind_configuration(kind: TriggerKind, configuration: &Value) -> Resu
                 require_text("jenkins_hash_algorithm_version")?;
                 require_text("jenkins_full_item_name")?;
                 parse_configuration_digest(configuration, "jenkins_hash_inputs_sha256")?;
+                let algorithm = configuration
+                    .get("jenkins_hash_algorithm_version")
+                    .and_then(Value::as_str)
+                    .expect("required jenkins hash algorithm was validated");
+                if algorithm != crate::schedule_calendar::JENKINS_CRON_HASH_V1 {
+                    return Err(StoreError::InvalidTriggerIngress(format!(
+                        "unsupported jenkins_hash_algorithm_version '{algorithm}'"
+                    )));
+                }
             }
+            // Parse and resolve the native calendar, including Jenkins-style H.
+            let _calendar =
+                crate::schedule_calendar::ScheduleCalendar::from_configuration(configuration)?;
             Ok(())
         }
         TriggerKind::Upstream => {
@@ -2967,22 +2947,31 @@ fn verify_schedule_configuration(
             "schedule watermark identity differs from the configured schedule".to_owned(),
         ));
     }
-    let resolved_slots = configuration
-        .get("resolved_slots_unix_ms")
-        .and_then(Value::as_array)
-        .ok_or_else(|| {
-            StoreError::InvalidTriggerIngress(
-                "stored schedule is missing resolved slots".to_owned(),
-            )
-        })?;
-    if resolved_slots
-        .binary_search_by_key(&slot.resolved_slot_unix_ms, |value| {
-            value.as_i64().unwrap_or(-1)
-        })
-        .is_err()
-    {
+    Ok(())
+}
+
+async fn verify_schedule_slot_membership(
+    tx: &mut Transaction<'_, Postgres>,
+    organization_id: Uuid,
+    trigger_id: Uuid,
+    trigger_generation: i64,
+    resolved_slot_unix_ms: i64,
+) -> Result<(), StoreError> {
+    let present = sqlx::query_scalar::<_, i32>(
+        "SELECT 1 FROM trigger_schedule_slots
+         WHERE organization_id = $1 AND trigger_id = $2
+           AND trigger_generation = $3
+           AND resolved_slot_unix_ms = $4",
+    )
+    .bind(organization_id)
+    .bind(trigger_id)
+    .bind(trigger_generation)
+    .bind(resolved_slot_unix_ms)
+    .fetch_optional(&mut **tx)
+    .await?;
+    if present.is_none() {
         return Err(StoreError::TriggerIngressConflict(
-            "resolved schedule slot is outside the configured Jenkins slot set".to_owned(),
+            "resolved schedule slot is outside the materialized native slot set".to_owned(),
         ));
     }
     Ok(())
@@ -3272,6 +3261,14 @@ async fn advance_schedule_for_delivery(
         ));
     }
     verify_schedule_configuration(slot, configuration)?;
+    verify_schedule_slot_membership(
+        tx,
+        input.organization_id,
+        input.trigger_id,
+        trigger_generation,
+        slot.resolved_slot_unix_ms,
+    )
+    .await?;
     let existing = sqlx::query(
         "SELECT * FROM trigger_schedule_watermarks
          WHERE organization_id = $1 AND trigger_id = $2
@@ -3336,6 +3333,26 @@ async fn advance_schedule_for_delivery(
         .bind(&input.delivery_id)
         .execute(&mut **tx)
         .await?;
+    }
+    let fired = sqlx::query(
+        "UPDATE trigger_schedule_slots
+         SET outcome = 'fired', delivery_id = $5, updated_at = clock_timestamp()
+         WHERE organization_id = $1 AND trigger_id = $2
+           AND trigger_generation = $3
+           AND resolved_slot_unix_ms = $4
+           AND outcome IN ('open', 'claimed')",
+    )
+    .bind(input.organization_id)
+    .bind(input.trigger_id)
+    .bind(trigger_generation)
+    .bind(slot.resolved_slot_unix_ms)
+    .bind(&input.delivery_id)
+    .execute(&mut **tx)
+    .await?;
+    if fired.rows_affected() != 1 {
+        return Err(StoreError::TriggerIngressConflict(
+            "schedule slot was skipped or already fired".to_owned(),
+        ));
     }
     Ok(())
 }
@@ -3562,4 +3579,518 @@ fn validate_digest(field: &str, digest: [u8; 32]) -> Result<(), StoreError> {
         )));
     }
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn materialize_schedule_slots_for_trigger(
+    tx: &mut Transaction<'_, Postgres>,
+    organization_id: Uuid,
+    project_id: Uuid,
+    pipeline_id: Uuid,
+    trigger_id: Uuid,
+    trigger_generation: i64,
+    configuration: &Value,
+    now_unix_ms: i64,
+) -> Result<usize, StoreError> {
+    let calendar = crate::schedule_calendar::ScheduleCalendar::from_configuration(configuration)?;
+    let open_future = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM trigger_schedule_slots
+         WHERE organization_id = $1 AND trigger_id = $2
+           AND trigger_generation = $3
+           AND outcome = 'open'
+           AND resolved_slot_unix_ms > $4",
+    )
+    .bind(organization_id)
+    .bind(trigger_id)
+    .bind(trigger_generation)
+    .bind(now_unix_ms)
+    .fetch_one(&mut **tx)
+    .await?;
+    if open_future >= calendar.horizon_slots {
+        return Ok(0);
+    }
+    let need = calendar.horizon_slots - open_future;
+    let last_existing = sqlx::query_scalar::<_, Option<i64>>(
+        "SELECT max(resolved_slot_unix_ms) FROM trigger_schedule_slots
+         WHERE organization_id = $1 AND trigger_id = $2
+           AND trigger_generation = $3",
+    )
+    .bind(organization_id)
+    .bind(trigger_id)
+    .bind(trigger_generation)
+    .fetch_one(&mut **tx)
+    .await?
+    .unwrap_or(-1);
+    // First fill includes the current minute so a brand-new schedule can fire
+    // without waiting a wall-clock tick. Refills never remint already-due
+    // minutes: after catch-up the table still holds past fired/skipped rows, and
+    // continuing from last+1 alone would mint a fresh due race for every
+    // controller. Always take max(last+1, next wall-clock minute).
+    let now_floor = (now_unix_ms / 60_000) * 60_000;
+    let next_minute = now_floor.saturating_add(60_000);
+    let from_ms = if last_existing >= 0 {
+        last_existing.saturating_add(1).max(next_minute)
+    } else {
+        now_floor
+    };
+    let candidates = enumerate_schedule_slots(tx, &calendar, from_ms, need).await?;
+    let mut inserted = 0usize;
+    for slot_ms in candidates {
+        let result = sqlx::query(
+            "INSERT INTO trigger_schedule_slots (
+                 organization_id, project_id, pipeline_id, trigger_id,
+                 trigger_generation, resolved_slot_unix_ms, outcome
+             ) VALUES ($1, $2, $3, $4, $5, $6, 'open')
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(pipeline_id)
+        .bind(trigger_id)
+        .bind(trigger_generation)
+        .bind(slot_ms)
+        .execute(&mut **tx)
+        .await?;
+        inserted += usize::try_from(result.rows_affected()).unwrap_or(0);
+    }
+    Ok(inserted)
+}
+
+async fn enumerate_schedule_slots(
+    tx: &mut Transaction<'_, Postgres>,
+    calendar: &crate::schedule_calendar::ScheduleCalendar,
+    from_unix_ms: i64,
+    limit: i64,
+) -> Result<Vec<i64>, StoreError> {
+    // Walk absolute minutes via PostgreSQL using the configured IANA timezone.
+    // Civil-time fields come from timezone($tz, ts); the calendar identity string
+    // records the intended tzdata pin but is not applied as a PG catalog selector
+    // here. Sparse expressions (monthly/annual) need a long search window so
+    // materialization cannot miss the next matching civil time.
+    let oversample = (limit.saturating_mul(8)).clamp(60 * 24 * 2, 60 * 24 * 400);
+    let rows = sqlx::query(
+        "WITH bounds AS (
+             SELECT date_trunc('minute', to_timestamp(($1::double precision) / 1000.0))
+                    + interval '1 minute' AS start_ts
+         ),
+         series AS (
+             SELECT gs AS ts
+             FROM bounds,
+                  generate_series(
+                      start_ts,
+                      start_ts + make_interval(mins => $2::int),
+                      interval '1 minute'
+                  ) AS gs
+         )
+         SELECT (extract(epoch FROM ts) * 1000)::bigint AS slot_ms,
+                extract(minute FROM timezone($3, ts))::int AS minute,
+                extract(hour FROM timezone($3, ts))::int AS hour,
+                extract(day FROM timezone($3, ts))::int AS day_of_month,
+                extract(month FROM timezone($3, ts))::int AS month,
+                extract(dow FROM timezone($3, ts))::int AS day_of_week
+         FROM series",
+    )
+    .bind(from_unix_ms.saturating_sub(1).max(0))
+    .bind(i32::try_from(oversample).unwrap_or(i32::MAX))
+    .bind(&calendar.timezone)
+    .fetch_all(&mut **tx)
+    .await?;
+    let mut slots = Vec::new();
+    for row in rows {
+        let slot_ms: i64 = row.try_get("slot_ms")?;
+        if slot_ms < from_unix_ms {
+            continue;
+        }
+        let minute: i32 = row.try_get("minute")?;
+        let hour: i32 = row.try_get("hour")?;
+        let day_of_month: i32 = row.try_get("day_of_month")?;
+        let month: i32 = row.try_get("month")?;
+        let day_of_week: i32 = row.try_get("day_of_week")?;
+        if calendar.matches_local(minute, hour, day_of_month, month, day_of_week) {
+            slots.push(slot_ms);
+            if i64::try_from(slots.len()).unwrap_or(i64::MAX) >= limit {
+                break;
+            }
+        }
+    }
+    if slots.is_empty() && limit > 0 {
+        return Err(StoreError::InvalidTriggerIngress(
+            "native schedule calendar produced no upcoming slots in the search window".to_owned(),
+        ));
+    }
+    Ok(slots)
+}
+
+impl Store {
+    /// Extend open horizons for enabled schedule triggers, then fire due slots.
+    /// Two controllers share exactly-once firing via `FOR UPDATE SKIP LOCKED`.
+    /// After downtime only the latest missed open slot per trigger fires;
+    /// older due open slots are marked `skipped`.
+    pub async fn process_due_schedule_slots(
+        &self,
+        organization_id: Uuid,
+        limit: i64,
+    ) -> Result<usize, StoreError> {
+        if limit <= 0 {
+            return Err(StoreError::InvalidTriggerIngress(
+                "schedule scan limit must be positive".to_owned(),
+            ));
+        }
+        // Fire due slots before extending the horizon so a refill of the
+        // current minute cannot outrank older missed slots after downtime.
+        let mut fired = 0usize;
+        for _ in 0..limit {
+            match self.fire_one_due_schedule_slot(organization_id).await? {
+                None => break,
+                Some(_) => fired += 1,
+            }
+        }
+        self.extend_schedule_horizons(organization_id).await?;
+        Ok(fired)
+    }
+
+    async fn extend_schedule_horizons(&self, organization_id: Uuid) -> Result<(), StoreError> {
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        let rows = sqlx::query(
+            "SELECT d.project_id, d.pipeline_id, d.trigger_id, d.current_generation,
+                    v.configuration, v.state
+             FROM pipeline_trigger_definitions AS d
+             JOIN pipeline_trigger_versions AS v
+               ON v.organization_id = d.organization_id
+              AND v.trigger_id = d.trigger_id
+              AND v.generation = d.current_generation
+             WHERE d.organization_id = $1
+               AND v.trigger_kind = 'schedule'
+               AND v.state = 'enabled'
+             FOR UPDATE OF d",
+        )
+        .bind(organization_id)
+        .fetch_all(&mut *tx)
+        .await?;
+        let now_ms = trigger_database_unix_ms(&mut tx).await?;
+        for row in rows {
+            let project_id: Uuid = row.try_get("project_id")?;
+            let pipeline_id: Uuid = row.try_get("pipeline_id")?;
+            let trigger_id: Uuid = row.try_get("trigger_id")?;
+            let generation: i64 = row.try_get("current_generation")?;
+            let configuration: Value = row.try_get("configuration")?;
+            materialize_schedule_slots_for_trigger(
+                &mut tx,
+                organization_id,
+                project_id,
+                pipeline_id,
+                trigger_id,
+                generation,
+                &configuration,
+                now_ms,
+            )
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn fire_one_due_schedule_slot(
+        &self,
+        organization_id: Uuid,
+    ) -> Result<Option<TriggerDelivery>, StoreError> {
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        let now_ms = trigger_database_unix_ms(&mut tx).await?;
+        // Identify a due trigger whose *current* version is an enabled schedule.
+        // Prior-generation and paused open rows must not be selected: returning
+        // None for them would stop process_due's scan and starve the org.
+        // Stale `claimed` rows (crash between claim commit and accept) are
+        // eligible for recovery after a short lease.
+        let due_trigger = sqlx::query(
+            "SELECT s.trigger_id, s.trigger_generation, s.project_id, s.pipeline_id
+             FROM trigger_schedule_slots AS s
+             JOIN pipeline_trigger_definitions AS d
+               ON d.organization_id = s.organization_id
+              AND d.trigger_id = s.trigger_id
+             JOIN pipeline_trigger_versions AS v
+               ON v.organization_id = d.organization_id
+              AND v.trigger_id = d.trigger_id
+              AND v.generation = d.current_generation
+             WHERE s.organization_id = $1
+               AND s.trigger_generation = d.current_generation
+               AND v.trigger_kind = 'schedule'
+               AND v.state = 'enabled'
+               AND (
+                    s.outcome = 'open'
+                    OR (
+                        s.outcome = 'claimed'
+                        AND s.updated_at < clock_timestamp() - interval '5 minutes'
+                    )
+               )
+               AND s.resolved_slot_unix_ms <= $2
+             ORDER BY s.resolved_slot_unix_ms ASC
+             LIMIT 1",
+        )
+        .bind(organization_id)
+        .bind(now_ms)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(due_trigger) = due_trigger else {
+            tx.commit().await?;
+            return Ok(None);
+        };
+        let trigger_id: Uuid = due_trigger.try_get("trigger_id")?;
+        let trigger_generation: i64 = due_trigger.try_get("trigger_generation")?;
+        let project_id: Uuid = due_trigger.try_get("project_id")?;
+        let pipeline_id: Uuid = due_trigger.try_get("pipeline_id")?;
+        lock_trigger_transaction(&mut tx, organization_id, trigger_id).await?;
+        // Reopen stale claims under the trigger lock so they can be re-claimed.
+        sqlx::query(
+            "UPDATE trigger_schedule_slots
+             SET outcome = 'open', delivery_id = NULL, updated_at = clock_timestamp()
+             WHERE organization_id = $1 AND trigger_id = $2
+               AND trigger_generation = $3
+               AND outcome = 'claimed'
+               AND updated_at < clock_timestamp() - interval '5 minutes'
+               AND resolved_slot_unix_ms <= $4",
+        )
+        .bind(organization_id)
+        .bind(trigger_id)
+        .bind(trigger_generation)
+        .bind(now_ms)
+        .execute(&mut *tx)
+        .await?;
+        let due_slots = sqlx::query(
+            "SELECT resolved_slot_unix_ms FROM trigger_schedule_slots
+             WHERE organization_id = $1 AND trigger_id = $2
+               AND trigger_generation = $3
+               AND outcome = 'open'
+               AND resolved_slot_unix_ms <= $4
+             ORDER BY resolved_slot_unix_ms ASC
+             FOR UPDATE SKIP LOCKED",
+        )
+        .bind(organization_id)
+        .bind(trigger_id)
+        .bind(trigger_generation)
+        .bind(now_ms)
+        .fetch_all(&mut *tx)
+        .await?;
+        if due_slots.is_empty() {
+            tx.commit().await?;
+            return Ok(None);
+        }
+        let latest: i64 = due_slots
+            .last()
+            .expect("non-empty due slots")
+            .try_get("resolved_slot_unix_ms")?;
+        for row in &due_slots[..due_slots.len() - 1] {
+            let slot_ms: i64 = row.try_get("resolved_slot_unix_ms")?;
+            sqlx::query(
+                "UPDATE trigger_schedule_slots
+                 SET outcome = 'skipped', updated_at = clock_timestamp()
+                 WHERE organization_id = $1 AND trigger_id = $2
+                   AND trigger_generation = $3
+                   AND resolved_slot_unix_ms = $4
+                   AND outcome = 'open'",
+            )
+            .bind(organization_id)
+            .bind(trigger_id)
+            .bind(trigger_generation)
+            .bind(slot_ms)
+            .execute(&mut *tx)
+            .await?;
+        }
+        sqlx::query(
+            "UPDATE trigger_schedule_slots
+             SET outcome = 'claimed', updated_at = clock_timestamp()
+             WHERE organization_id = $1 AND trigger_id = $2
+               AND trigger_generation = $3
+               AND resolved_slot_unix_ms = $4
+               AND outcome = 'open'",
+        )
+        .bind(organization_id)
+        .bind(trigger_id)
+        .bind(trigger_generation)
+        .bind(latest)
+        .execute(&mut *tx)
+        .await?;
+        let trigger_row = sqlx::query(
+            "SELECT v.event_source_identity, v.configuration, v.state,
+                    v.deduplication_window_seconds, v.delivery_ttl_seconds
+             FROM pipeline_trigger_definitions AS d
+             JOIN pipeline_trigger_versions AS v
+               ON v.organization_id = d.organization_id
+              AND v.trigger_id = d.trigger_id
+              AND v.generation = d.current_generation
+             WHERE d.organization_id = $1 AND d.trigger_id = $2
+               AND d.current_generation = $3
+             FOR UPDATE OF d",
+        )
+        .bind(organization_id)
+        .bind(trigger_id)
+        .bind(trigger_generation)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(trigger_row) = trigger_row else {
+            // Generation raced away; terminalize leftover due rows so they cannot
+            // starve sibling schedules on the next poll.
+            sqlx::query(
+                "UPDATE trigger_schedule_slots
+                 SET outcome = 'skipped', updated_at = clock_timestamp()
+                 WHERE organization_id = $1 AND trigger_id = $2
+                   AND trigger_generation = $3
+                   AND outcome IN ('open', 'claimed')
+                   AND resolved_slot_unix_ms <= $4",
+            )
+            .bind(organization_id)
+            .bind(trigger_id)
+            .bind(trigger_generation)
+            .bind(now_ms)
+            .execute(&mut *tx)
+            .await?;
+            tx.commit().await?;
+            return Ok(None);
+        };
+        let state: &str = trigger_row.try_get("state")?;
+        if state != "enabled" {
+            sqlx::query(
+                "UPDATE trigger_schedule_slots
+                 SET outcome = 'skipped', updated_at = clock_timestamp()
+                 WHERE organization_id = $1 AND trigger_id = $2
+                   AND trigger_generation = $3
+                   AND outcome IN ('open', 'claimed')
+                   AND resolved_slot_unix_ms <= $4",
+            )
+            .bind(organization_id)
+            .bind(trigger_id)
+            .bind(trigger_generation)
+            .bind(now_ms)
+            .execute(&mut *tx)
+            .await?;
+            tx.commit().await?;
+            return Ok(None);
+        }
+        let configuration: Value = trigger_row.try_get("configuration")?;
+        let caller_identity: String = trigger_row.try_get("event_source_identity")?;
+        let watermark = sqlx::query(
+            "SELECT last_resolved_slot_unix_ms FROM trigger_schedule_watermarks
+             WHERE organization_id = $1 AND trigger_id = $2
+               AND trigger_generation = $3
+             FOR UPDATE",
+        )
+        .bind(organization_id)
+        .bind(trigger_id)
+        .bind(trigger_generation)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let expected_last = match watermark {
+            Some(row) => row.try_get::<Option<i64>, _>("last_resolved_slot_unix_ms")?,
+            None => None,
+        };
+        let timezone = configuration
+            .get("timezone")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        let calendar_name = configuration
+            .get("calendar")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        let expression = configuration
+            .get("expression")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        let schedule_identity_sha256 =
+            parse_configuration_digest(&configuration, "schedule_identity_sha256")?;
+        let delivery_id = format!("schedule:{trigger_id}:{trigger_generation}:{latest}");
+        let event_id = delivery_id.clone();
+        let canonical_payload = json!({
+            "event_kind": "schedule",
+            "event_time_unix_ms": latest,
+            "payload": {
+                "timezone": timezone,
+                "calendar": calendar_name,
+                "expression": expression,
+                "schedule_identity_sha256": hex::encode(schedule_identity_sha256),
+                "resolved_slot_unix_ms": latest,
+                "expected_last_resolved_slot_unix_ms": expected_last,
+            },
+        });
+        let payload_sha256: [u8; 32] = Sha256::digest(
+            serde_json::to_vec(&canonical_payload)
+                .map_err(|error| StoreError::InvalidTriggerIngress(error.to_string()))?
+                .as_slice(),
+        )
+        .into();
+        let input = NewTriggerDelivery {
+            organization_id,
+            project_id,
+            pipeline_id,
+            trigger_id,
+            expected_trigger_generation: trigger_generation,
+            delivery_id,
+            event_id,
+            event_kind: "schedule".to_owned(),
+            caller_identity,
+            payload_sha256,
+            canonical_payload,
+            parameters: json!({}),
+            requested_platform: "linux".to_owned(),
+            requested_trust_pool: "trusted-linux".to_owned(),
+            event_time_unix_ms: latest,
+            accepted_at_unix_ms: now_ms,
+            schedule_slot: Some(TriggerScheduleSlot {
+                timezone,
+                calendar: calendar_name,
+                expression,
+                schedule_identity_sha256,
+                expected_last_resolved_slot_unix_ms: expected_last,
+                resolved_slot_unix_ms: latest,
+            }),
+        };
+        // Commit the claim/skip work, then accept through the public path so
+        // watermark + delivery share that path's lock order and audit rules.
+        tx.commit().await?;
+        match self.accept_trigger_delivery(&input).await {
+            Ok(TriggerDeliveryAdmission::Created(delivery))
+            | Ok(TriggerDeliveryAdmission::Replayed(delivery)) => Ok(Some(delivery)),
+            Err(error) => {
+                // Re-open a claimed slot that could not admit so a peer can retry.
+                let mut recover = self.tenant_transaction(organization_id).await?;
+                let _ = sqlx::query(
+                    "UPDATE trigger_schedule_slots
+                     SET outcome = 'open', delivery_id = NULL, updated_at = clock_timestamp()
+                     WHERE organization_id = $1 AND trigger_id = $2
+                       AND trigger_generation = $3
+                       AND resolved_slot_unix_ms = $4
+                       AND outcome = 'claimed'",
+                )
+                .bind(organization_id)
+                .bind(trigger_id)
+                .bind(trigger_generation)
+                .bind(latest)
+                .execute(&mut *recover)
+                .await;
+                let _ = recover.commit().await;
+                Err(error)
+            }
+        }
+    }
+
+    /// Count schedule deliveries for proof commands.
+    pub async fn count_schedule_deliveries(
+        &self,
+        organization_id: Uuid,
+        trigger_id: Uuid,
+    ) -> Result<i64, StoreError> {
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        let count = sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM trigger_deliveries
+             WHERE organization_id = $1 AND trigger_id = $2
+               AND event_kind = 'schedule'",
+        )
+        .bind(organization_id)
+        .bind(trigger_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(count)
+    }
 }

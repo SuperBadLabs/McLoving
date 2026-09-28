@@ -337,6 +337,7 @@ async fn main() -> Result<()> {
     let trigger_retry_state = state.clone();
     let trigger_retry_organization = worker.organization_id;
     let notification_delivery_state = state.clone();
+    let schedule_delivery_state = state.clone();
     let server = async {
         axum::serve(
             listener,
@@ -373,6 +374,9 @@ async fn main() -> Result<()> {
     let notification_delivery_loop =
         run_notification_delivery_worker(notification_delivery_state, trigger_retry_organization);
     tokio::pin!(notification_delivery_loop);
+    let schedule_delivery_loop =
+        run_schedule_delivery_worker(schedule_delivery_state, trigger_retry_organization);
+    tokio::pin!(schedule_delivery_loop);
     tokio::select! {
         result = &mut server => result,
         result = &mut agent_server => result,
@@ -380,6 +384,7 @@ async fn main() -> Result<()> {
         result = &mut worker_loop => result,
         result = &mut trigger_retry_loop => result,
         result = &mut notification_delivery_loop => result,
+        result = &mut schedule_delivery_loop => result,
         result = &mut outbox_reaper_loop => result,
     }
 }
@@ -2869,6 +2874,28 @@ const DEFAULT_OUTBOX_RETENTION_HOURS: u64 = 168;
 /// Upper retention bound: ten years, which also keeps the horizon within the
 /// 32-bit range the store accepts.
 const MAX_OUTBOX_RETENTION_HOURS: u64 = 10 * 365 * 24;
+
+/// Fires due native schedule slots (PAR-002): materializes the horizon, skips
+/// older missed open slots after downtime, and admits the latest due slot
+/// through the existing trigger delivery path. `SKIP LOCKED` keeps two
+/// controllers on one database at exactly one delivery per slot.
+async fn run_schedule_delivery_worker(state: ApiState, organization_id: Uuid) -> Result<()> {
+    const POLL_INTERVAL: Duration = Duration::from_secs(1);
+    const SCAN_LIMIT: i64 = 32;
+    loop {
+        match state
+            .process_due_schedule_slots(organization_id, SCAN_LIMIT)
+            .await
+        {
+            Ok(0) => tokio::time::sleep(POLL_INTERVAL).await,
+            Ok(_) => {}
+            Err(error) => {
+                eprintln!("schedule delivery scan failed: {error}");
+                tokio::time::sleep(POLL_INTERVAL).await;
+            }
+        }
+    }
+}
 
 /// Bounds outbox accumulation. No outbox consumer is currently shipped, so
 /// rows are retention-bounded delivery staging rather than a delivery queue;
