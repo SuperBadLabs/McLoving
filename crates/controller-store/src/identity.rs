@@ -1488,6 +1488,25 @@ impl Store {
             return Ok(current.1);
         }
         if current_state == IdentityLifecycle::Active && next != IdentityLifecycle::Active {
+            // Holding the identity row prevents further Owner grants to it.
+            // If a grant landed in the gap before this FOR UPDATE, abort so
+            // the caller retries under the newly discovered project locks.
+            let actual_owner_projects = sqlx::query_scalar::<_, Uuid>(
+                "SELECT project_id
+                 FROM project_memberships
+                 WHERE organization_id = $1 AND identity_id = $2 AND role = 'owner'
+                 ORDER BY project_id",
+            )
+            .bind(organization_id)
+            .bind(identity_id)
+            .fetch_all(&mut *tx)
+            .await?;
+            if actual_owner_projects != owner_projects {
+                return Err(StoreError::IdentityConflict(
+                    "owner memberships changed concurrently; retry the lifecycle transition"
+                        .to_owned(),
+                ));
+            }
             crate::project_roles::ensure_usable_owners_remain_after_deactivation(
                 &mut tx,
                 organization_id,
