@@ -1031,10 +1031,9 @@ async fn static_delegated_bound_generation_is_refused_after_policy_advances() {
         "static Delegated bound to a superseded policy generation must be refused"
     );
 
-    // Stamping the newer current generation without a matching authorization
-    // snapshot is what the API must not do; the store still admits it when
-    // callers supply Some(current) because static has no identity to
-    // reauthorize. API binding of the snapshot generation closes that window.
+    // The store still admits a caller-supplied current generation for static
+    // Delegated (currency-only fence). The API must not construct that
+    // authority from a lattice/scope Allow — only from a mapped snapshot.
     let static_at_gen2 = MembershipAuthority::Delegated {
         caller: None,
         policy_generation: Some(2),

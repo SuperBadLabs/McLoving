@@ -88,8 +88,10 @@ another owner restored. When `ProjectConfigure` came from an imported
 project policy, the write binds that authentication snapshot's policy
 generation (not a later current-generation lookup) and re-checks it under
 the authorization-policy lock so a replacement cannot be stamped onto a
-stale Allow — including for static Delegated callers that have no durable
-identity to reauthorize. Each write is one `identity` audit record naming
+stale Allow. Static credentials may mutate memberships on a policy-backed
+project only when their process-local principal carries a mapped
+`ProjectConfigure` Allow bound to that generation; a lattice/scope Allow
+alone cannot inherit Admin from the policy's current generation. Each write is one `identity` audit record naming
 the authority, the actor's role, the previous role, the reason and the
 fenced generation.
 

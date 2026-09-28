@@ -3732,6 +3732,17 @@ async fn authorize_membership_writer(
                 policy_generation: Some(policy_generation),
             }
         }
+        // A static lattice/scope Allow has no mapped snapshot. Stamping the
+        // database's current generation onto `Delegated { caller: None }`
+        // would grant Admin after only a currency check, bypassing an
+        // authoritative policy that omits or Denies ProjectConfigure.
+        (None, Some(_), _) => {
+            return Err(ApiError::new(
+                StatusCode::FORBIDDEN,
+                "forbidden",
+                "static credentials cannot mutate memberships on a policy-backed project without a mapped ProjectConfigure grant",
+            ));
+        }
         (caller, Some(policy_generation), _) => MembershipAuthority::Delegated {
             caller,
             policy_generation: Some(policy_generation),
