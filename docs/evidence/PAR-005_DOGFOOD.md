@@ -48,6 +48,80 @@ quieter follow-up probe, not a reopen of the promisor-drip bug. Row 1's ~14 min 
 on `4a234c6f` is superseded for throughput by #159.
 
 Consecutive match count after row 3: **3 / 10**.
+
+## Notes (2026-09-27 match #4 on `e9b29a69` / #160 tip)
+
+HeMan admitted main tip `e9b29a690a19` via signed bridge delivery after GitHub's
+repository events API listed no `PushEvent` for the #160 squash-merge (only
+`PullRequestEvent` / activity `pr_merge`). Delivery id
+`branch-e9b29a690a19…` with push time `2026-09-27T18:42:00Z` (merge committer
+date). Build `efceadff-e962-4ebe-be05-8faaf9d19e67` succeeded (all seven steps);
+Foundation run `36341612189` success. HeMan dogfood binaries remain on
+`0220759a` (#159 bulk-prefetch); tip is docs-only relative to that redeploy.
+
+Consecutive match count after row 4: **4 / 10**.
+
+## Notes (2026-09-27 match #5 on `99c42814` / #161 tip)
+
+HeMan admitted PushEvent `22337221839` for main tip `99c42814756b` (#161
+squash). Build `eb314375-49de-4b72-aaf3-4b7de3079b53` succeeded (all seven
+steps); Foundation run `36360102505` success. Dogfood binaries remain on
+`0220759a` (#159); tip is docs-only relative to that redeploy.
+
+Consecutive match count after row 5: **5 / 10**.
+
+## Notes (2026-09-28 match #6 on `83d2cb0b` / #162 tip)
+
+HeMan admitted PushEvent `22341235473` for main tip `83d2cb0b1df0` (#162
+squash). Build `35e0ed35-61a9-45ea-b705-f25e28bc2033` succeeded; Foundation
+run `36364876716` success. Dogfood binaries remain on `0220759a` (#159).
+
+Consecutive match count after row 6: **6 / 10**.
+
+## Notes (2026-09-28 match #7 on `6824c8cb` / #163 tip)
+
+HeMan admitted PushEvent `22345134247` for main tip `6824c8cb1ed0` (#163
+squash). Build `6992c76b-7e18-4ad5-a0b4-82b0a2bb6ec0` succeeded; Foundation
+run `36369627296` success. Dogfood binaries remain on `0220759a` (#159);
+tip is docs-only relative to that redeploy.
+
+Consecutive match count after row 7: **7 / 10**.
+
+## Notes (2026-09-28 match #8 on `cf85367c` / #164 tip)
+
+HeMan admitted main tip `cf85367ccea2` via signed bridge delivery after GitHub's
+repository events API listed no new `PushEvent` for the #164 squash-merge
+(watermark still `22347127820` / `e9b29a69`). Delivery id
+`branch-cf85367ccea2…` with push time `2026-09-28T04:10:12Z` (merge committer
+date). Build `a7f61824-2a76-4291-9f5a-5d17627f3498` succeeded; Foundation run
+`36376562417` success. Dogfood binaries remain on `0220759a` (#159); tip is
+docs-only relative to that redeploy.
+
+Consecutive match count after row 8: **8 / 10**.
+
+## Notes (2026-09-28 match #9 on `326e03fe` / #165 tip)
+
+HeMan admitted PushEvent `22353341144` for main tip `326e03fe0024` (#165
+squash). Build `69db9334-0f9e-4bb5-ac92-f3059ce40de6` succeeded; Foundation
+run `36379650992` success. Dogfood binaries remain on `0220759a` (#159);
+tip is docs-only relative to that redeploy.
+
+Consecutive match count after row 9: **9 / 10**.
+
+## Notes (2026-09-28 match #10 on `9a3468c6` / #166 tip)
+
+HeMan admitted main tip `9a3468c687fa` via signed bridge delivery after GitHub's
+repository events API listed no new `PushEvent` for the #166 squash-merge
+(watermark still `22353341144` / `326e03fe`). Delivery id
+`branch-9a3468c687fa…` with push time `2026-09-28T05:42:25Z` (merge committer
+date). Build `ad6a8ae9-b40e-406b-bde7-6d5376fbd685` succeeded; Foundation run
+`36383073183` success. Dogfood binaries remain on `0220759a` (#159); tip is
+docs-only relative to that redeploy.
+
+Consecutive match count after row 10: **10 / 10**.
+
+### Luigi follow-up (2026-09-27 quiet probe; not a HeMan match row)
+
 Luigi follow-up (2026-09-27 quiet probe): host load ~0.8–1.0, sealed checkout of
 `4f65905` still ~64.6 s wall (attempt start → first lane log). Residual >60 s is
 not load-only. rust-tests exit 101 on build `76343578…` was
@@ -76,3 +150,10 @@ as `revision_mismatch` and counted as a mismatch.
 | 1 | `4a234c6f7f1f` | 2026-09-26T09:07:51.317Z | 36218738244 | success | `b26d79f5-64f2-4625-8314-69189ecc3e37` | succeeded | yes |
 | 2 | `0220759a6669` | 2026-09-27T05:52:49.348Z | 36298039770 | success | `b8e6055b-0e34-452e-9183-6ff147c4c928` | succeeded | yes |
 | 3 | `4f65905a27b5` | 2026-09-27T17:27:04.724Z | 36336956714 | success | `cf3af674-d6a1-4fe3-96a0-5050497f5622` | succeeded | yes |
+| 4 | `e9b29a690a19` | 2026-09-27T23:21:48.587Z | 36341612189 | success | `efceadff-e962-4ebe-be05-8faaf9d19e67` | succeeded | yes |
+| 5 | `99c42814756b` | 2026-09-27T23:51:55.588Z | 36360102505 | success | `eb314375-49de-4b72-aaf3-4b7de3079b53` | succeeded | yes |
+| 6 | `83d2cb0b1df0` | 2026-09-28T01:09:14.701Z | 36364876716 | success | `35e0ed35-61a9-45ea-b705-f25e28bc2033` | succeeded | yes |
+| 7 | `6824c8cb1ed0` | 2026-09-28T02:23:25.870Z | 36369627296 | success | `6992c76b-7e18-4ad5-a0b4-82b0a2bb6ec0` | succeeded | yes |
+| 8 | `cf85367ccea2` | 2026-09-28T04:11:19.605Z | 36376562417 | success | `a7f61824-2a76-4291-9f5a-5d17627f3498` | succeeded | yes |
+| 9 | `326e03fe0024` | 2026-09-28T04:54:39.659Z | 36379650992 | success | `69db9334-0f9e-4bb5-ac92-f3059ce40de6` | succeeded | yes |
+| 10 | `9a3468c687fa` | 2026-09-28T05:43:00.400Z | 36383073183 | success | `ad6a8ae9-b40e-406b-bde7-6d5376fbd685` | succeeded | yes |
