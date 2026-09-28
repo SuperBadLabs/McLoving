@@ -99,6 +99,15 @@ docs-only relative to that redeploy.
 
 Consecutive match count after row 8: **8 / 10**.
 
+## Notes (2026-09-28 match #9 on `326e03fe` / #165 tip)
+
+HeMan admitted PushEvent `22353341144` for main tip `326e03fe0024` (#165
+squash). Build `69db9334-0f9e-4bb5-ac92-f3059ce40de6` succeeded; Foundation
+run `36379650992` success. Dogfood binaries remain on `0220759a` (#159);
+tip is docs-only relative to that redeploy.
+
+Consecutive match count after row 9: **9 / 10**.
+
 ### Luigi follow-up (2026-09-27 quiet probe; not a HeMan match row)
 
 Luigi follow-up (2026-09-27 quiet probe): host load ~0.8–1.0, sealed checkout of
@@ -134,3 +143,4 @@ as `revision_mismatch` and counted as a mismatch.
 | 6 | `83d2cb0b1df0` | 2026-09-28T01:09:14.701Z | 36364876716 | success | `35e0ed35-61a9-45ea-b705-f25e28bc2033` | succeeded | yes |
 | 7 | `6824c8cb1ed0` | 2026-09-28T02:23:25.870Z | 36369627296 | success | `6992c76b-7e18-4ad5-a0b4-82b0a2bb6ec0` | succeeded | yes |
 | 8 | `cf85367ccea2` | 2026-09-28T04:11:19.605Z | 36376562417 | success | `a7f61824-2a76-4291-9f5a-5d17627f3498` | succeeded | yes |
+| 9 | `326e03fe0024` | 2026-09-28T04:54:39.659Z | 36379650992 | success | `69db9334-0f9e-4bb5-ac92-f3059ce40de6` | succeeded | yes |
