@@ -87,6 +87,18 @@ tip is docs-only relative to that redeploy.
 
 Consecutive match count after row 7: **7 / 10**.
 
+## Notes (2026-09-28 match #8 on `cf85367c` / #164 tip)
+
+HeMan admitted main tip `cf85367ccea2` via signed bridge delivery after GitHub's
+repository events API listed no new `PushEvent` for the #164 squash-merge
+(watermark still `22347127820` / `e9b29a69`). Delivery id
+`branch-cf85367ccea2…` with push time `2026-09-28T04:10:12Z` (merge committer
+date). Build `a7f61824-2a76-4291-9f5a-5d17627f3498` succeeded; Foundation run
+`36376562417` success. Dogfood binaries remain on `0220759a` (#159); tip is
+docs-only relative to that redeploy.
+
+Consecutive match count after row 8: **8 / 10**.
+
 ### Luigi follow-up (2026-09-27 quiet probe; not a HeMan match row)
 
 Luigi follow-up (2026-09-27 quiet probe): host load ~0.8–1.0, sealed checkout of
@@ -121,3 +133,4 @@ as `revision_mismatch` and counted as a mismatch.
 | 5 | `99c42814756b` | 2026-09-27T23:51:55.588Z | 36360102505 | success | `eb314375-49de-4b72-aaf3-4b7de3079b53` | succeeded | yes |
 | 6 | `83d2cb0b1df0` | 2026-09-28T01:09:14.701Z | 36364876716 | success | `35e0ed35-61a9-45ea-b705-f25e28bc2033` | succeeded | yes |
 | 7 | `6824c8cb1ed0` | 2026-09-28T02:23:25.870Z | 36369627296 | success | `6992c76b-7e18-4ad5-a0b4-82b0a2bb6ec0` | succeeded | yes |
+| 8 | `cf85367ccea2` | 2026-09-28T04:11:19.605Z | 36376562417 | success | `a7f61824-2a76-4291-9f5a-5d17627f3498` | succeeded | yes |
