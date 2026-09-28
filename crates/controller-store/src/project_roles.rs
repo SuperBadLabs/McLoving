@@ -1105,6 +1105,20 @@ pub(crate) async fn lock_project_memberships_for_lifecycle(
     lock_project_memberships(tx, organization_id, project_id).await
 }
 
+pub(crate) async fn lock_authorization_policy_for_lifecycle(
+    tx: &mut Transaction<'_, Postgres>,
+    organization_id: Uuid,
+    project_id: Uuid,
+) -> Result<(), StoreError> {
+    // Same advisory lock install_authorization_policy holds before identity
+    // FOR SHARE, so lifecycle disable and policy install share one lock order.
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(authorization_policy_lock_key(organization_id, project_id))
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
 /// Before an identity leaves the active lifecycle, refuse if any project would
 /// lose its last usable Owner. Caller must already hold each project's
 /// membership advisory lock (project lock before identity lock).
