@@ -1436,7 +1436,6 @@ impl Store {
         .bind(identity_id)
         .fetch_all(&mut *tx)
         .await?;
-        let owner_projects = owner_projects;
         if next != IdentityLifecycle::Active {
             for project_id in &owner_projects {
                 crate::project_roles::lock_project_memberships_for_lifecycle(
