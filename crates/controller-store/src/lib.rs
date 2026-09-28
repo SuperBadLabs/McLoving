@@ -1422,7 +1422,7 @@ impl Store {
                                 relation.tenant_column
                             )
                     )
-                    AND (SELECT COUNT(*) FROM policies) = 63
+                    AND (SELECT COUNT(*) FROM policies) = 64
                FROM relations",
         )
         .fetch_one(&mut *tx)
