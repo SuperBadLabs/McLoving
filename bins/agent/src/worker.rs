@@ -2652,22 +2652,23 @@ async fn run_assignment(
             .map(|cause| format!("lease_lost_during_execution:{cause}"));
         let step_failure = last_record.reason.clone();
         // Establish or clear affinity retention before the durable terminal
-        // exists. A marker create that fails after begin_finalization would let
-        // recovery publish success and then delete the workspace. A planted
-        // symlink or directory at the marker name is replaced or refused here,
-        // and a refusal becomes a failed terminal instead of a journaled success.
+        // exists. Retain-intended marker failure fails closed (no publication).
+        // A planted symlink or directory at the marker name is replaced or
+        // refused; a rename-and-replace decoy fails the inode check.
         let mut affinity_retain_error: Option<String> = None;
         let intend_retain =
             affinity_should_retain_workspace(assignment.workspace_affinity.as_ref(), terminal);
         if intend_retain {
-            if let Err(error) =
-                write_affinity_retain_marker(&config.workspace_root, &assignment.workspace).await
-            {
-                affinity_retain_error = Some(format!("affinity_retain_refused:{error}"));
-                if terminal == WorkOutcome::Succeeded {
-                    terminal = WorkOutcome::Failed;
-                }
-            }
+            // Fail closed: never publish a retain-intended terminal without a
+            // durable marker. Recovery keys off the marker and would otherwise
+            // delete a pinned Reuse tree. Compare the walked directory to the
+            // executor-retained workspace identity against rename-and-replace.
+            write_affinity_retain_marker(
+                &config.workspace_root,
+                &assignment.workspace,
+                Some(&outcome.workspace_dir_identity),
+            )
+            .await?;
         } else if assignment.workspace_affinity.is_some()
             && let Err(error) =
                 clear_affinity_retain_marker(&config.workspace_root, &assignment.workspace).await
@@ -4360,14 +4361,15 @@ const AFFINITY_RETAIN_MARKER: &str = ".mcloving-affinity-retain";
 async fn write_affinity_retain_marker(
     workspace_root: &Path,
     workspace: &Path,
+    expected: Option<&mcloving_agent_runtime::executor::WorkspaceDirIdentity>,
 ) -> Result<(), AgentError> {
     #[cfg(unix)]
     {
-        write_affinity_retain_marker_unix(workspace_root, workspace)
+        write_affinity_retain_marker_unix(workspace_root, workspace, expected)
     }
     #[cfg(not(unix))]
     {
-        let _ = (workspace_root, workspace);
+        let _ = (workspace_root, workspace, expected);
         Err(AgentError::InvalidAssignment(
             "workspace affinity retain is Linux-only".to_owned(),
         ))
@@ -4423,11 +4425,25 @@ fn open_affinity_workspace_dir(
 fn write_affinity_retain_marker_unix(
     workspace_root: &Path,
     workspace: &Path,
+    expected: Option<&mcloving_agent_runtime::executor::WorkspaceDirIdentity>,
 ) -> Result<(), AgentError> {
     use nix::fcntl::{OFlag, openat};
-    use nix::sys::stat::{Mode, fstatat};
+    use nix::sys::stat::{Mode, fstat, fstatat};
     use nix::unistd::{UnlinkatFlags, fsync, unlinkat, write as nix_write};
     let dir = open_affinity_workspace_dir(workspace_root, workspace)?;
+    if let Some(expected) = expected {
+        let stat = fstat(&dir).map_err(|error| {
+            AgentError::InvalidAssignment(format!(
+                "affinity retain workspace identity refused: {error}"
+            ))
+        })?;
+        if (stat.st_dev as u64) != expected.dev || (stat.st_ino as u64) != expected.ino {
+            return Err(AgentError::InvalidAssignment(
+                "affinity retain refused: workspace path no longer names the executor-retained directory"
+                    .to_owned(),
+            ));
+        }
+    }
     let marker_name = std::ffi::CString::new(AFFINITY_RETAIN_MARKER).expect("marker name");
     match fstatat(
         &dir,
@@ -5055,12 +5071,9 @@ async fn finalize_without_process(
     let mut termination = reason;
     let intend_retain = affinity_should_retain_workspace(workspace_affinity, outcome);
     if intend_retain {
-        if let Err(error) = write_affinity_retain_marker(&config.workspace_root, workspace).await {
-            affinity_retain_error = Some(format!("affinity_retain_refused:{error}"));
-            if outcome == WorkOutcome::Succeeded {
-                outcome = WorkOutcome::Failed;
-            }
-        }
+        // Processless paths have no executor-retained handle; still require a
+        // durable marker before publication so recovery cannot scrub a Reuse tree.
+        write_affinity_retain_marker(&config.workspace_root, workspace, None).await?;
     } else if workspace_affinity.is_some()
         && let Err(error) = clear_affinity_retain_marker(&config.workspace_root, workspace).await
     {
@@ -7244,10 +7257,45 @@ mod tests {
         std::fs::write(&outside, b"secret").unwrap();
         let marker = root.join(&workspace).join(AFFINITY_RETAIN_MARKER);
         std::os::unix::fs::symlink(&outside, &marker).unwrap();
-        write_affinity_retain_marker_unix(&root, &workspace).unwrap();
+        write_affinity_retain_marker_unix(&root, &workspace, None).unwrap();
         assert_eq!(std::fs::read(&outside).unwrap(), b"secret");
         assert!(std::fs::symlink_metadata(&marker).unwrap().is_file());
         assert_eq!(std::fs::read(&marker).unwrap(), b"retain\n");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn affinity_retain_refuses_workspace_inode_mismatch() {
+        use std::os::unix::fs::MetadataExt;
+        let root = std::env::temp_dir().join(format!(
+            "mcloving-affinity-inode-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let workspace = PathBuf::from("org/build/workspace");
+        std::fs::create_dir_all(root.join(&workspace)).unwrap();
+        let meta = std::fs::metadata(root.join(&workspace)).unwrap();
+        let expected = mcloving_agent_runtime::executor::WorkspaceDirIdentity {
+            dev: meta.dev(),
+            ino: meta.ino(),
+        };
+        let relocated = root.join("org/build/relocated");
+        std::fs::rename(root.join(&workspace), &relocated).unwrap();
+        std::fs::create_dir_all(root.join(&workspace)).unwrap();
+        let error = write_affinity_retain_marker_unix(&root, &workspace, Some(&expected))
+            .expect_err("decoy workspace must be refused");
+        assert!(
+            error.to_string().contains("executor-retained"),
+            "{error}"
+        );
+        assert!(!root.join(&workspace).join(AFFINITY_RETAIN_MARKER).exists());
+        write_affinity_retain_marker_unix(
+            &root,
+            Path::new("org/build/relocated"),
+            Some(&expected),
+        )
+        .unwrap();
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -7259,7 +7307,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         let workspace = PathBuf::from("org/build/workspace");
         std::fs::create_dir_all(root.join(&workspace)).unwrap();
-        write_affinity_retain_marker_unix(&root, &workspace).unwrap();
+        write_affinity_retain_marker_unix(&root, &workspace, None).unwrap();
         clear_affinity_retain_marker_unix(&root, &workspace).unwrap();
         let marker = root.join(&workspace).join(AFFINITY_RETAIN_MARKER);
         assert!(std::fs::symlink_metadata(&marker).is_err());
@@ -7276,7 +7324,7 @@ mod tests {
         let workspace = PathBuf::from("org/build/workspace");
         let marker = root.join(&workspace).join(AFFINITY_RETAIN_MARKER);
         std::fs::create_dir_all(marker.join("child")).unwrap();
-        let error = write_affinity_retain_marker_unix(&root, &workspace)
+        let error = write_affinity_retain_marker_unix(&root, &workspace, None)
             .expect_err("non-empty directory marker is refused");
         let rendered = error.to_string();
         assert!(rendered.contains("directory"), "{rendered}");

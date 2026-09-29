@@ -244,9 +244,17 @@ where
     sync_directory(&spool)?;
     sync_directory(&workspace)?;
 
+    let workspace_meta = std::fs::metadata(&workspace)?;
+    let workspace_dir_identity = super::WorkspaceDirIdentity {
+        // Affinity retain is Linux-only; Windows still records a stable identity
+        // from the named path for API symmetry.
+        dev: 0,
+        ino: std::os::windows::fs::MetadataExt::file_index(&workspace_meta).unwrap_or(0),
+    };
     Ok(ExecutionOutcome {
         private_response_accepted: None,
         workspace_snapshot: None,
+        workspace_dir_identity,
         termination,
         exit_code: status.code(),
         process_id,

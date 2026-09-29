@@ -533,9 +533,15 @@ where
         }
         super::workspace_transfer::capture(&workspace, &workspace_control)
     });
+    let workspace_meta = workspace_control.metadata()?;
+    let workspace_dir_identity = super::WorkspaceDirIdentity {
+        dev: std::os::unix::fs::MetadataExt::dev(&workspace_meta),
+        ino: std::os::unix::fs::MetadataExt::ino(&workspace_meta),
+    };
     Ok(ExecutionOutcome {
         private_response_accepted,
         workspace_snapshot,
+        workspace_dir_identity,
         termination: termination.0,
         exit_code: termination.1.code(),
         process_id,
