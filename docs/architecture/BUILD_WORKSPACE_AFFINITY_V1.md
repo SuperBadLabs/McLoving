@@ -30,9 +30,11 @@ a checkout in stage one is visible in stage two without re-acquiring it.
    while further stages remain).
 4. The agent materializes the workspace at
    `{organization_id}/{build_id}/workspace`. On reuse it opens that directory,
-   strips the prior stage's `spool/`, and runs. On success with
-   `retain_on_success` it keeps the tree (marker `.mcloving-affinity-retain`)
-   and removes only the spool; otherwise it removes the whole workspace.
+   strips the prior stage's `spool/`, and runs. Before publishing a successful
+   non-final stage it writes marker `.mcloving-affinity-retain` so a crash after
+   `complete_work` still retains the tree on recovery; reclaim honors the marker
+   only when the journaled phase is `succeeded`, and otherwise clears it and
+   removes the workspace. On reuse the next stage strips spool only.
 5. If a later stage is ready and the pinned agent has no live
    `agent_sessions` row, the controller fails the build with
    `workspace_affinity_agent_gone` rather than offering it to another agent.

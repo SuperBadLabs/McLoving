@@ -2722,6 +2722,20 @@ async fn run_assignment(
             verified_spool_content(&config.workspace_root, &result, "result").await?;
         let persisted: PersistedResult = serde_json::from_slice(&result_content)?;
         let summary = work_completion_summary(&persisted, &result.digest, false)?;
+        // Persist affinity retention before publishing success. A crash after
+        // complete_work but before the marker would otherwise let recovery
+        // reclaim the shared checkout while the controller has already readied
+        // the successor. Honor the marker only for a Succeeded terminal phase.
+        let intend_retain = matches!(terminal, WorkOutcome::Succeeded)
+            && assignment
+                .workspace_affinity
+                .as_ref()
+                .is_some_and(|grant| grant.retain_on_success);
+        if intend_retain {
+            write_affinity_retain_marker(&config.workspace_root, &assignment.workspace).await?;
+        } else {
+            clear_affinity_retain_marker(&config.workspace_root, &assignment.workspace).await?;
+        }
         let completion = authority_rpc(
             publication.control,
             publication.client.complete_work(WorkCompletion {
@@ -2748,9 +2762,7 @@ async fn run_assignment(
                 .workspace_affinity
                 .as_ref()
                 .is_some_and(|grant| grant.retain_on_success);
-        if retain_workspace {
-            write_affinity_retain_marker(&config.workspace_root, &assignment.workspace).await?;
-        } else {
+        if !retain_workspace {
             clear_affinity_retain_marker(&config.workspace_root, &assignment.workspace).await?;
         }
         reclaim_spool_entries(
@@ -4256,8 +4268,16 @@ async fn reclaim_attempt_spools(
     config: &AgentConfig,
     attempt: &mcloving_agent_runtime::ReconciliationAttempt,
 ) -> Result<(), AgentError> {
-    let retain_workspace =
+    let marker_present =
         affinity_retain_marker_present(&config.workspace_root, &attempt.workspace).await?;
+    // Retention is only for a published success. A marker written before
+    // complete_work must not keep the tree when cancellation overrode the
+    // terminal or the attempt failed.
+    let retain_workspace =
+        marker_present && matches!(attempt.phase, AttemptPhase::Succeeded);
+    if marker_present && !retain_workspace {
+        clear_affinity_retain_marker(&config.workspace_root, &attempt.workspace).await?;
+    }
     reclaim_spool_entries(
         config,
         &attempt.organization_id,
