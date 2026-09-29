@@ -220,8 +220,9 @@ pub(crate) async fn grant_for_attempt(
                 (
                     -- Count siblings that still need the shared tree: active
                     -- stages and failed ones that remain schedule_retry-able.
-                    -- Permanently exhausted failures (dead-lettered or latest
-                    -- ordinal already at max_attempts) cannot clear retention.
+                    -- Permanently exhausted failures are only those with a
+                    -- durable dead letter. schedule_retry_as may still raise
+                    -- max_attempts, so ordinal==max_attempts is not final.
                     SELECT count(*)::int FROM nodes AS wn
                     WHERE wn.organization_id = b.organization_id
                       AND wn.build_id = b.id
@@ -230,25 +231,14 @@ pub(crate) async fn grant_for_attempt(
                       AND wn.status NOT IN ('succeeded', 'aborted', 'skipped')
                       AND NOT (
                           wn.status = 'failed'
-                          AND (
-                              EXISTS (
-                                  SELECT 1
-                                  FROM dead_letters AS dl
-                                  JOIN attempts AS da
-                                    ON da.id = dl.attempt_id
-                                   AND da.organization_id = dl.organization_id
-                                  WHERE da.organization_id = wn.organization_id
-                                    AND da.node_id = wn.id
-                              )
-                              OR COALESCE(
-                                  (
-                                      SELECT max(a.ordinal)
-                                      FROM attempts AS a
-                                      WHERE a.organization_id = wn.organization_id
-                                        AND a.node_id = wn.id
-                                  ),
-                                  0
-                              ) >= wn.max_attempts
+                          AND EXISTS (
+                              SELECT 1
+                              FROM dead_letters AS dl
+                              JOIN attempts AS da
+                                ON da.id = dl.attempt_id
+                               AND da.organization_id = dl.organization_id
+                              WHERE da.organization_id = wn.organization_id
+                                AND da.node_id = wn.id
                           )
                       )
                 ) AS remaining_after,

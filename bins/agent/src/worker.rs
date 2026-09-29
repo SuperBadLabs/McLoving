@@ -1726,6 +1726,24 @@ async fn run_assignment(
         payload_digest: assignment.payload_digest,
         workspace: assignment.workspace.clone(),
     })?;
+    // Bind Reuse mode immediately after durable acceptance so a crash during
+    // helper prep, credentials, or StartWork cannot leave an inherited Create
+    // marker that discharge reclaim would delete under the shared tree.
+    if matches!(
+        assignment
+            .workspace_affinity
+            .as_ref()
+            .map(|grant| grant.mode),
+        Some(WorkspaceAffinityMode::Reuse)
+    ) {
+        write_affinity_retain_marker(
+            &config.workspace_root,
+            &assignment.workspace,
+            None,
+            WorkspaceAffinityMode::Reuse,
+        )
+        .await?;
+    }
 
     let lease_window = Duration::from_secs(u64::from(config.lease_seconds));
     // Everything a pre-expiry cancellation must finish before the term ends:
@@ -2080,24 +2098,6 @@ async fn run_assignment(
     let attempt_redactions =
         execution_environment(BTreeMap::new(), credentials.clone())?.redactions;
     let completion_result: Result<(), AgentError> = async {
-        // Bind the retain marker to this Reuse attempt before any step runs so
-        // a pre-result crash + matching discharge cannot still see the inherited
-        // Create mode and delete the shared tree the pinned replacement needs.
-        if matches!(
-            assignment
-                .workspace_affinity
-                .as_ref()
-                .map(|grant| grant.mode),
-            Some(WorkspaceAffinityMode::Reuse)
-        ) {
-            write_affinity_retain_marker(
-                &config.workspace_root,
-                &assignment.workspace,
-                None,
-                WorkspaceAffinityMode::Reuse,
-            )
-            .await?;
-        }
         // One attempt, several ordered steps (PAR-010). Every step's spool is
         // journaled before the first publication, every step's outcome is
         // recorded in the durable result, and execution stops at the first
