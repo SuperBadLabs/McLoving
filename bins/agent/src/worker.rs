@@ -7297,7 +7297,10 @@ mod tests {
         write_affinity_retain_marker_unix(&root, &workspace, None).unwrap();
         assert_eq!(std::fs::read(&outside).unwrap(), b"secret");
         assert!(std::fs::symlink_metadata(&marker).unwrap().is_file());
-        assert_eq!(std::fs::read(&marker).unwrap(), b"retain\n");
+        assert_eq!(
+            std::fs::read(&marker).unwrap(),
+            b"retain\n"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

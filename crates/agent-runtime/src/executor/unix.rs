@@ -142,12 +142,12 @@ where
     if request.reuse_existing_workspace
         && !matches!(request.step_ordinal, Some(ordinal) if ordinal > 0)
     {
-        // Prior stage left its spool and retain marker; strip only those so
-        // checkout content stays for this stage.
-        let retain_marker = workspace.join(".mcloving-affinity-retain");
-        if retain_marker.exists() {
-            tokio::fs::remove_file(&retain_marker).await?;
-        }
+        // Prior stage left its spool and retain marker. Strip only the spool
+        // so checkout content stays. Leave the retain marker in place for the
+        // whole Reuse execution: if the agent crashes, recovery must still see
+        // durable retention intent when discharging the superseded journal
+        // attempt. The next stage strips spool again; final cleanup clears the
+        // marker before publication.
         if attempt_spool.exists() {
             tokio::fs::remove_dir_all(&attempt_spool).await?;
         }
