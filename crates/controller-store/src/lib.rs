@@ -5091,7 +5091,7 @@ impl Store {
             tx.commit().await?;
             return Ok(true);
         }
-        let reconciled = sqlx::query_as::<_, (Uuid, Uuid, i64)>(
+        let reconciled = sqlx::query_as::<_, (Uuid, Uuid, i64, Option<String>)>(
             "UPDATE attempts AS a
              SET status = $4,
                  terminal_summary = $5,
@@ -5146,7 +5146,7 @@ impl Store {
                          )
                      )
                )
-             RETURNING n.id, n.build_id, a.restore_epoch",
+             RETURNING n.id, n.build_id, a.restore_epoch, a.lease_owner",
         )
         .bind(organization_id)
         .bind(attempt_id)
@@ -5155,10 +5155,22 @@ impl Store {
         .bind(&summary)
         .fetch_optional(&mut *tx)
         .await?;
-        let Some((node_id, build_id, restore_epoch)) = reconciled else {
+        let Some((node_id, build_id, restore_epoch, lease_owner)) = reconciled else {
             tx.rollback().await?;
             return Ok(false);
         };
+        if outcome == TerminalOutcome::Succeeded {
+            if let Some(agent_id) = lease_owner.as_deref() {
+                affinity::record_successful_agent(
+                    &mut tx,
+                    organization_id,
+                    build_id,
+                    agent_id,
+                    node_id,
+                )
+                .await?;
+            }
+        }
         if !dag::advance_dag_after_attempt(
             &mut tx,
             organization_id,

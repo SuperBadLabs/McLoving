@@ -5324,14 +5324,14 @@ async fn finalize_without_process(
         authority,
         workspace,
         session_epoch,
-        mut outcome,
+        outcome,
         reason,
         workspace_affinity,
         steps,
     } = completion;
     // Plant retain before begin_finalization when needed. Clear only after the
     // durable published terminal so a crash in this window keeps Reuse intent.
-    let mut termination = reason;
+    let termination = reason;
     let lease_loss_reuse_retain = matches!(
         workspace_affinity.map(|grant| grant.mode),
         Some(WorkspaceAffinityMode::Reuse)

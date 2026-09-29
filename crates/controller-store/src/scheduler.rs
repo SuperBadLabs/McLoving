@@ -249,23 +249,25 @@ impl Store {
                              AND NOT ($6 = ANY(wn.required_capabilities))
                        )
                    )
-                   OR NOT EXISTS (
-                       SELECT 1 FROM nodes AS wn
-                       WHERE wn.organization_id = n.organization_id
-                         AND wn.build_id = n.build_id
-                         AND wn.node_kind = 'work'
-                         AND NOT (wn.required_capabilities <@ $2::text[])
-                   )
-                   OR NOT EXISTS (
-                       -- Mixed trust pools across affinity work nodes cannot share
-                       -- one pin: refuse the claim unless every affinity stage
-                       -- asks for this agent's pool.
-                       SELECT 1 FROM nodes AS wn
-                       WHERE wn.organization_id = n.organization_id
-                         AND wn.build_id = n.build_id
-                         AND wn.node_kind = 'work'
-                         AND $6 = ANY(wn.required_capabilities)
-                         AND wn.required_trust_pool <> $4
+                   OR (
+                       NOT EXISTS (
+                           SELECT 1 FROM nodes AS wn
+                           WHERE wn.organization_id = n.organization_id
+                             AND wn.build_id = n.build_id
+                             AND wn.node_kind = 'work'
+                             AND NOT (wn.required_capabilities <@ $2::text[])
+                       )
+                       AND NOT EXISTS (
+                           -- Mixed trust pools across affinity work nodes cannot share
+                           -- one pin: refuse the claim unless every affinity stage
+                           -- asks for this agent's pool.
+                           SELECT 1 FROM nodes AS wn
+                           WHERE wn.organization_id = n.organization_id
+                             AND wn.build_id = n.build_id
+                             AND wn.node_kind = 'work'
+                             AND $6 = ANY(wn.required_capabilities)
+                             AND wn.required_trust_pool <> $4
+                       )
                    )
                )
                AND (
