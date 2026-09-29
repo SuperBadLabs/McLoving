@@ -603,7 +603,7 @@ async fn commit_replayed_phase(
         attempt.process_id,
     )?;
     if phase.is_terminal() {
-        reclaim_attempt_spools(config, attempt).await?;
+        reclaim_attempt_spools(config, attempt, phase).await?;
     }
     Ok(())
 }
@@ -2722,18 +2722,19 @@ async fn run_assignment(
             verified_spool_content(&config.workspace_root, &result, "result").await?;
         let persisted: PersistedResult = serde_json::from_slice(&result_content)?;
         let summary = work_completion_summary(&persisted, &result.digest, false)?;
-        // Persist affinity retention before publishing success. A crash after
-        // complete_work but before the marker would otherwise let recovery
+        // Persist affinity retention before publishing the terminal. A crash
+        // after complete_work but before the marker would otherwise let recovery
         // reclaim the shared checkout while the controller has already readied
-        // the successor. Honor the marker only for a Succeeded terminal phase.
-        let intend_retain = matches!(terminal, WorkOutcome::Succeeded)
-            && assignment
-                .workspace_affinity
-                .as_ref()
-                .is_some_and(|grant| grant.retain_on_success);
+        // the successor. Keep the tree on failure too when further stages (or a
+        // retry of this one) still need it; only an abort drops it.
+        let intend_retain = assignment
+            .workspace_affinity
+            .as_ref()
+            .is_some_and(|grant| grant.retain_on_success)
+            && !matches!(terminal, WorkOutcome::Aborted);
         if intend_retain {
             write_affinity_retain_marker(&config.workspace_root, &assignment.workspace).await?;
-        } else {
+        } else if assignment.workspace_affinity.is_some() {
             clear_affinity_retain_marker(&config.workspace_root, &assignment.workspace).await?;
         }
         let completion = authority_rpc(
@@ -2757,12 +2758,12 @@ async fn run_assignment(
             published,
             Some(outcome.process_id),
         )?;
-        let retain_workspace = matches!(published, WorkOutcome::Succeeded)
-            && assignment
-                .workspace_affinity
-                .as_ref()
-                .is_some_and(|grant| grant.retain_on_success);
-        if !retain_workspace {
+        let retain_workspace = assignment
+            .workspace_affinity
+            .as_ref()
+            .is_some_and(|grant| grant.retain_on_success)
+            && !matches!(published, WorkOutcome::Aborted);
+        if assignment.workspace_affinity.is_some() && !retain_workspace {
             clear_affinity_retain_marker(&config.workspace_root, &assignment.workspace).await?;
         }
         reclaim_spool_entries(
@@ -4259,7 +4260,7 @@ pub(super) async fn reclaim_terminal_spools(config: &AgentConfig) -> Result<(), 
         .terminal_spools()?
         .attempts;
     for attempt in &attempts {
-        reclaim_attempt_spools(config, attempt).await?;
+        reclaim_attempt_spools(config, attempt, attempt.phase).await?;
     }
     Ok(())
 }
@@ -4267,13 +4268,14 @@ pub(super) async fn reclaim_terminal_spools(config: &AgentConfig) -> Result<(), 
 async fn reclaim_attempt_spools(
     config: &AgentConfig,
     attempt: &mcloving_agent_runtime::ReconciliationAttempt,
+    phase: AttemptPhase,
 ) -> Result<(), AgentError> {
     let marker_present =
         affinity_retain_marker_present(&config.workspace_root, &attempt.workspace).await?;
-    // Retention is only for a published success. A marker written before
-    // complete_work must not keep the tree when cancellation overrode the
-    // terminal or the attempt failed.
-    let retain_workspace = marker_present && matches!(attempt.phase, AttemptPhase::Succeeded);
+    // Use the phase just committed (replay may still show Finalizing on the
+    // attempt snapshot). Keep the tree when a further stage or retry needs it;
+    // drop it on abort.
+    let retain_workspace = marker_present && !matches!(phase, AttemptPhase::Aborted);
     if marker_present && !retain_workspace {
         clear_affinity_retain_marker(&config.workspace_root, &attempt.workspace).await?;
     }
@@ -4339,8 +4341,35 @@ async fn write_affinity_retain_marker(
     workspace_root: &Path,
     workspace: &Path,
 ) -> Result<(), AgentError> {
-    let path = workspace_root.join(workspace).join(AFFINITY_RETAIN_MARKER);
-    tokio::fs::write(&path, b"retain\n").await?;
+    // Create the marker as a new regular file without following a workload-planted
+    // symlink, then sync the file and its parent so a crash after complete_work
+    // still sees retention on recovery.
+    let directory = workspace_root.join(workspace);
+    let path = directory.join(AFFINITY_RETAIN_MARKER);
+    let mut options = std::fs::OpenOptions::new();
+    // Truncate an existing regular marker from a prior retain (retry path);
+    // O_NOFOLLOW refuses a workload-planted symlink either way.
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC);
+    }
+    let mut file = options.open(&path).map_err(|error| {
+        AgentError::InvalidAssignment(format!(
+            "affinity retain marker refused at {}: {error}",
+            path.display()
+        ))
+    })?;
+    use std::io::Write as _;
+    file.write_all(
+        b"retain
+",
+    )?;
+    file.sync_all()?;
+    drop(file);
+    let dir = std::fs::File::open(&directory)?;
+    dir.sync_all()?;
     Ok(())
 }
 
@@ -4349,11 +4378,18 @@ async fn clear_affinity_retain_marker(
     workspace: &Path,
 ) -> Result<(), AgentError> {
     let path = workspace_root.join(workspace).join(AFFINITY_RETAIN_MARKER);
-    match tokio::fs::remove_file(&path).await {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error.into()),
+    match tokio::fs::symlink_metadata(&path).await {
+        Ok(metadata) if metadata.is_file() => tokio::fs::remove_file(&path).await?,
+        Ok(_) => {
+            return Err(AgentError::InvalidAssignment(format!(
+                "affinity retain marker at {} is not a regular file",
+                path.display()
+            )));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
     }
+    Ok(())
 }
 
 async fn affinity_retain_marker_present(

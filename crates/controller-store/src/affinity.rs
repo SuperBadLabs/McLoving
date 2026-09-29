@@ -31,7 +31,14 @@ pub(crate) async fn record_successful_agent(
                SELECT 1 FROM nodes
                WHERE organization_id = $1
                  AND build_id = $2
-                 AND $4 = ANY(required_capabilities)
+                 AND node_kind = 'work'
+           )
+           AND NOT EXISTS (
+               SELECT 1 FROM nodes
+               WHERE organization_id = $1
+                 AND build_id = $2
+                 AND node_kind = 'work'
+                 AND NOT ($4 = ANY(required_capabilities))
            )
          RETURNING id",
     )
@@ -88,6 +95,13 @@ pub(crate) async fn fail_orphaned_affinity_builds(
                SELECT 1 FROM agent_sessions AS s
                WHERE s.agent_id = b.workspace_affinity_agent_id
                  AND $2 = ANY(s.capabilities)
+                 AND EXISTS (
+                     SELECT 1 FROM nodes AS qn
+                     WHERE qn.build_id = b.id
+                       AND qn.organization_id = b.organization_id
+                       AND qn.status = 'queued'
+                       AND qn.required_trust_pool = s.trust_pool
+                 )
            )",
     )
     .bind(organization_id)
@@ -189,7 +203,14 @@ pub(crate) async fn grant_for_attempt(
                SELECT 1 FROM nodes
                WHERE organization_id = b.organization_id
                  AND build_id = b.id
-                 AND $4 = ANY(required_capabilities)
+                 AND node_kind = 'work'
+           )
+           AND NOT EXISTS (
+               SELECT 1 FROM nodes
+               WHERE organization_id = b.organization_id
+                 AND build_id = b.id
+                 AND node_kind = 'work'
+                 AND NOT ($4 = ANY(required_capabilities))
            )",
     )
     .bind(organization_id)

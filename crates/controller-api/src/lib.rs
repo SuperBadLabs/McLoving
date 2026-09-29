@@ -9486,6 +9486,36 @@ stages:
     }
 
     #[test]
+    fn multi_stage_pipelines_are_linux_only_at_admission() {
+        let source = concat!(
+            "version: 1\n",
+            "name: two\n",
+            "stages:\n",
+            "  - id: one\n",
+            "    name: One\n",
+            "    steps:\n",
+            "      - process:\n",
+            "          program: /bin/true\n",
+            "  - id: two\n",
+            "    name: Two\n",
+            "    steps:\n",
+            "      - process:\n",
+            "          program: /bin/true\n",
+        );
+        let pipeline =
+            compile_source_with_parameters(source, BTreeMap::new()).expect("two stages validate");
+        validate_execution_platform(&pipeline, "linux").expect("Linux runs multi-stage");
+        let error = validate_execution_platform(&pipeline, "windows")
+            .expect_err("Windows lacks workspace affinity");
+        assert_eq!(error.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(error.code, "unsupported_execution_spec");
+        assert_eq!(
+            error.message,
+            "multi-stage pipelines require workspace affinity on platform linux only"
+        );
+    }
+
+    #[test]
     fn multi_step_stages_are_linux_only_at_admission() {
         let pipeline = compile_source_with_parameters(&single_stage_source(2), BTreeMap::new())
             .expect("two process steps validate");
