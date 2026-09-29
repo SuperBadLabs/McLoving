@@ -274,7 +274,7 @@ impl Store {
                          AND wn.build_id = n.build_id
                          AND wn.node_kind = 'work'
                          AND wn.id <> n.id
-                         AND wn.status IN ('offered', 'running', 'succeeded')
+                         AND wn.status IN ('offered', 'running')
                    )
                )
                AND NOT EXISTS (

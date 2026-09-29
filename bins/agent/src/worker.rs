@@ -4455,6 +4455,7 @@ fn open_or_create_affinity_agent_dir(
 ) -> Result<std::os::fd::OwnedFd, AgentError> {
     use nix::fcntl::{OFlag, open, openat};
     use nix::sys::stat::Mode;
+    use nix::unistd::fsync;
     let mut dir = open(
         workspace_root,
         OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
@@ -4466,6 +4467,10 @@ fn open_or_create_affinity_agent_dir(
             workspace_root.display()
         ))
     })?;
+    // Parents whose directory entries we create must be fsynced before the
+    // terminal publishes, or power loss can drop an unsynced ancestor and lose
+    // retention intent.
+    let mut created_parents: Vec<std::os::fd::OwnedFd> = Vec::new();
     for component in relative.components() {
         let std::path::Component::Normal(name) = component else {
             return Err(AgentError::InvalidAssignment(
@@ -4491,8 +4496,9 @@ fn open_or_create_affinity_agent_dir(
                             "affinity retain agent mkdir refused: {error}"
                         ))
                     })?;
+                created_parents.push(dir);
                 dir = openat(
-                    &dir,
+                    created_parents.last().expect("parent just pushed"),
                     c_name.as_c_str(),
                     OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
                     Mode::empty(),
@@ -4510,6 +4516,9 @@ fn open_or_create_affinity_agent_dir(
                 )));
             }
         }
+    }
+    for parent in created_parents.iter().rev() {
+        fsync(parent).map_err(std::io::Error::from)?;
     }
     Ok(dir)
 }
@@ -4608,10 +4617,8 @@ fn write_affinity_retain_marker_unix(
             retain_rel.display()
         ))
     })?;
-    let written = nix_write(&file, b"retain
-").map_err(std::io::Error::from)?;
-    if written != b"retain
-".len() {
+    let written = nix_write(&file, b"retain\n").map_err(std::io::Error::from)?;
+    if written != b"retain\n".len() {
         return Err(AgentError::InvalidAssignment(
             "affinity retain marker write was short".to_owned(),
         ));
@@ -7393,8 +7400,7 @@ mod tests {
         write_affinity_retain_marker_unix(&root, &workspace, None).unwrap();
         assert_eq!(std::fs::read(&outside).unwrap(), b"secret");
         assert!(std::fs::symlink_metadata(&marker).unwrap().is_file());
-        assert_eq!(std::fs::read(&marker).unwrap(), b"retain
-");
+        assert_eq!(std::fs::read(&marker).unwrap(), b"retain\n");
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -7451,8 +7457,7 @@ mod tests {
         std::fs::hard_link(&outside, &marker).unwrap();
         write_affinity_retain_marker_unix(&root, &workspace, None).unwrap();
         assert_eq!(std::fs::read(&outside).unwrap(), b"secret-payload");
-        assert_eq!(std::fs::read(&marker).unwrap(), b"retain
-");
+        assert_eq!(std::fs::read(&marker).unwrap(), b"retain\n");
         let _ = std::fs::remove_dir_all(&root);
     }
 
