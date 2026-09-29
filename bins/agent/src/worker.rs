@@ -4348,35 +4348,86 @@ async fn write_affinity_retain_marker(
     workspace_root: &Path,
     workspace: &Path,
 ) -> Result<(), AgentError> {
-    // Create the marker as a new regular file without following a workload-planted
-    // symlink, then sync the file and its parent so a crash after complete_work
-    // still sees retention on recovery.
-    let directory = workspace_root.join(workspace);
-    let path = directory.join(AFFINITY_RETAIN_MARKER);
-    let mut options = std::fs::OpenOptions::new();
-    // Truncate an existing regular marker from a prior retain (retry path);
-    // O_NOFOLLOW refuses a workload-planted symlink either way.
-    options.write(true).create(true).truncate(true);
     #[cfg(unix)]
     {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        options.custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC);
+        write_affinity_retain_marker_unix(workspace_root, workspace)
     }
-    let mut file = options.open(&path).map_err(|error| {
+    #[cfg(not(unix))]
+    {
+        let _ = (workspace_root, workspace);
+        Err(AgentError::InvalidAssignment(
+            "workspace affinity retain is Linux-only".to_owned(),
+        ))
+    }
+}
+
+#[cfg(unix)]
+fn write_affinity_retain_marker_unix(
+    workspace_root: &Path,
+    workspace: &Path,
+) -> Result<(), AgentError> {
+    use nix::fcntl::{OFlag, open, openat};
+    use nix::sys::stat::Mode;
+    use nix::unistd::{fsync, write as nix_write};
+    // Walk each workspace component with O_NOFOLLOW so a workload that
+    // replaced a parent with a symlink cannot redirect the retain marker.
+    let mut dir = open(
+        workspace_root,
+        OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|error| {
         AgentError::InvalidAssignment(format!(
-            "affinity retain marker refused at {}: {error}",
-            path.display()
+            "affinity retain refused at workspace root {}: {error}",
+            workspace_root.display()
         ))
     })?;
-    use std::io::Write as _;
-    file.write_all(
-        b"retain
-",
-    )?;
-    file.sync_all()?;
-    drop(file);
-    let dir = std::fs::File::open(&directory)?;
-    dir.sync_all()?;
+    for component in workspace.components() {
+        let std::path::Component::Normal(name) = component else {
+            return Err(AgentError::InvalidAssignment(
+                "affinity retain workspace must be normalized and relative".to_owned(),
+            ));
+        };
+        let c_name = std::ffi::CString::new(name.as_encoded_bytes()).map_err(|_| {
+            AgentError::InvalidAssignment(
+                "affinity retain workspace component contains NUL".to_owned(),
+            )
+        })?;
+        dir = openat(
+            &dir,
+            c_name.as_c_str(),
+            OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|error| {
+            AgentError::InvalidAssignment(format!(
+                "affinity retain refused under {}: {error}",
+                workspace.display()
+            ))
+        })?;
+    }
+    let marker_name = std::ffi::CString::new(AFFINITY_RETAIN_MARKER).expect("marker name");
+    let file = openat(
+        &dir,
+        marker_name.as_c_str(),
+        OFlag::O_WRONLY | OFlag::O_CREAT | OFlag::O_TRUNC | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+        Mode::from_bits_truncate(0o600),
+    )
+    .map_err(|error| {
+        AgentError::InvalidAssignment(format!(
+            "affinity retain marker refused under {}: {error}",
+            workspace.display()
+        ))
+    })?;
+    let written = nix_write(&file, b"retain\n").map_err(std::io::Error::from)?;
+    if written != b"retain\n".len() {
+        return Err(AgentError::InvalidAssignment(
+            "affinity retain marker write was short".to_owned(),
+        ));
+    }
+    fsync(&file).map_err(std::io::Error::from)?;
+    fsync(&dir).map_err(std::io::Error::from)?;
+    let _ = (file, dir);
     Ok(())
 }
 

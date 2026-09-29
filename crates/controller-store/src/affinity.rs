@@ -95,6 +95,7 @@ pub(crate) async fn fail_orphaned_affinity_builds(
                SELECT 1 FROM agent_sessions AS s
                WHERE s.agent_id = b.workspace_affinity_agent_id
                  AND $2 = ANY(s.capabilities)
+                 AND $3 = ANY(s.features)
                  AND EXISTS (
                      SELECT 1 FROM nodes AS qn
                      WHERE qn.build_id = b.id
@@ -106,6 +107,7 @@ pub(crate) async fn fail_orphaned_affinity_builds(
     )
     .bind(organization_id)
     .bind(mcloving_domain::workspace::WORKSPACE_AFFINITY_CAPABILITY)
+    .bind(mcloving_domain::workspace::WORKSPACE_AFFINITY_FEATURE)
     .fetch_all(&mut **tx)
     .await?;
     let mut failed = 0usize;
