@@ -7344,8 +7344,10 @@ mod tests {
         std::fs::hard_link(&outside, &marker).unwrap();
         write_affinity_retain_marker_unix(&root, &workspace, None).unwrap();
         assert_eq!(std::fs::read(&outside).unwrap(), b"secret-payload");
-        assert_eq!(std::fs::read(&marker).unwrap(), b"retain
-");
+        assert_eq!(
+            std::fs::read(&marker).unwrap(),
+            b"retain\n"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
