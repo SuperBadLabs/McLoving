@@ -4355,12 +4355,17 @@ async fn reclaim_attempt_spools(
     // ambiguous). Marker content encodes Create vs Reuse for pre-result crashes.
     let lease_loss_abort = attempt_result_is_lease_loss(config, attempt).await?;
     let work_cancel_override = attempt_result_is_work_cancel_override(config, attempt).await?;
-    let discharged =
-        affinity_discharge_marker_present(&config.workspace_root, &attempt.workspace).await?;
+    let discharged = affinity_discharge_matches_attempt(
+        &config.workspace_root,
+        &attempt.workspace,
+        &attempt.attempt_id,
+    )
+    .await?;
     // Finalizing alone is not cancellation provenance. A durable discharge
     // marker (operator retry superseded this fence) must keep Reuse retain even
     // when the journal has already been reloaded as Aborted with a work-protocol
-    // result that would otherwise look like a cancel override.
+    // result that would otherwise look like a cancel override. Discharge is
+    // attempt-scoped so a replacement's later reclaim cannot inherit it.
     let cancelled_override = matches!(phase, AttemptPhase::Aborted)
         && !lease_loss_abort
         && !discharged
@@ -4371,11 +4376,12 @@ async fn reclaim_attempt_spools(
         affinity_retain_marker_mode(&config.workspace_root, &attempt.workspace).await?;
     let retain_workspace = if !marker_present || cancelled_override {
         false
+    } else if let Some(should_retain) = durable_retain {
+        // This attempt's durable disposition always wins over a prior discharge.
+        should_retain
     } else if discharged {
         // Discharged Create trees must not block a Create retry; Reuse trees stay.
         !matches!(marker_mode, Some(WorkspaceAffinityMode::Create))
-    } else if let Some(should_retain) = durable_retain {
-        should_retain
     } else {
         // Pre-result crash: marker exists, no affinity_retain in result yet.
         // Create must clear so a retry can recreate; Reuse must keep the tree.
@@ -4459,6 +4465,8 @@ async fn reclaim_spool_entries(
 
 const AFFINITY_RETAIN_MARKER: &str = ".mcloving-affinity-retain";
 const AFFINITY_DISCHARGE_MARKER: &str = ".mcloving-affinity-discharged";
+const AFFINITY_RETAIN_MARKER_TMP: &str = ".mcloving-affinity-retain.tmp";
+const AFFINITY_DISCHARGE_MARKER_TMP: &str = ".mcloving-affinity-discharged.tmp";
 /// Agent-owned retain intent lives outside the workload tree so `git clean`
 /// (or any stage cleanup) cannot erase it during a Reuse execution.
 const AFFINITY_RETAIN_AGENT_ROOT: &str = ".mcloving-agent/affinity-retain";
@@ -4649,6 +4657,13 @@ fn write_affinity_retain_marker_unix(
     let retain_rel = Path::new(AFFINITY_RETAIN_AGENT_ROOT).join(workspace);
     let dir = open_or_create_affinity_agent_dir(workspace_root, &retain_rel)?;
     let marker_name = std::ffi::CString::new(AFFINITY_RETAIN_MARKER).expect("marker name");
+    let tmp_name = std::ffi::CString::new(AFFINITY_RETAIN_MARKER_TMP).expect("tmp marker");
+    // Encode Create vs Reuse so pre-result crash recovery can clear a Create
+    // tree on discharge without blocking a Create retry (WorkspaceAlreadyExists).
+    let payload = match mode {
+        WorkspaceAffinityMode::Create => b"retain:create\n".as_slice(),
+        WorkspaceAffinityMode::Reuse => b"retain:reuse\n".as_slice(),
+    };
     match fstatat(
         &dir,
         marker_name.as_c_str(),
@@ -4659,6 +4674,32 @@ fn write_affinity_retain_marker_unix(
             return Err(AgentError::InvalidAssignment(format!(
                 "affinity retain marker stat refused: {error}"
             )));
+        }
+        Ok(stat) if stat.st_mode & nix::libc::S_IFMT == nix::libc::S_IFREG => {
+            // Keep the existing durable record when the mode is unchanged so a
+            // crash cannot open a window with no marker before the replacement.
+            match openat(
+                &dir,
+                marker_name.as_c_str(),
+                OFlag::O_RDONLY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+                Mode::empty(),
+            ) {
+                Ok(existing) => {
+                    let mut buf = vec![0_u8; payload.len() + 1];
+                    let read =
+                        nix::unistd::read(&existing, &mut buf).map_err(std::io::Error::from)?;
+                    if read == payload.len() && &buf[..read] == payload {
+                        fsync(&dir).map_err(std::io::Error::from)?;
+                        return Ok(());
+                    }
+                }
+                Err(error) => {
+                    return Err(AgentError::InvalidAssignment(format!(
+                        "affinity retain marker read refused: {error}"
+                    )));
+                }
+            }
+            // Wrong mode: replace atomically via temp+rename below (no unlink).
         }
         Ok(stat) if stat.st_mode & nix::libc::S_IFMT == nix::libc::S_IFLNK => {
             unlinkat(&dir, marker_name.as_c_str(), UnlinkatFlags::NoRemoveDir).map_err(
@@ -4676,15 +4717,6 @@ fn write_affinity_retain_marker_unix(
                 ))
             })?;
         }
-        Ok(stat) if stat.st_mode & nix::libc::S_IFMT == nix::libc::S_IFREG => {
-            unlinkat(&dir, marker_name.as_c_str(), UnlinkatFlags::NoRemoveDir).map_err(
-                |error| {
-                    AgentError::InvalidAssignment(format!(
-                        "affinity retain marker regular refused: {error}"
-                    ))
-                },
-            )?;
-        }
         Ok(_) => {
             unlinkat(&dir, marker_name.as_c_str(), UnlinkatFlags::NoRemoveDir).map_err(
                 |error| {
@@ -4695,24 +4727,21 @@ fn write_affinity_retain_marker_unix(
             )?;
         }
     }
+    // Write a temp file then rename over the marker so a crash never leaves the
+    // retained Reuse tree without a durable record between unlink and create.
+    let _ = unlinkat(&dir, tmp_name.as_c_str(), UnlinkatFlags::NoRemoveDir);
     let file = openat(
         &dir,
-        marker_name.as_c_str(),
+        tmp_name.as_c_str(),
         OFlag::O_WRONLY | OFlag::O_CREAT | OFlag::O_EXCL | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
         Mode::from_bits_truncate(0o600),
     )
     .map_err(|error| {
         AgentError::InvalidAssignment(format!(
-            "affinity retain marker refused under {}: {error}",
+            "affinity retain marker tmp refused under {}: {error}",
             retain_rel.display()
         ))
     })?;
-    // Encode Create vs Reuse so pre-result crash recovery can clear a Create
-    // tree on discharge without blocking a Create retry (WorkspaceAlreadyExists).
-    let payload = match mode {
-        WorkspaceAffinityMode::Create => b"retain:create\n".as_slice(),
-        WorkspaceAffinityMode::Reuse => b"retain:reuse\n".as_slice(),
-    };
     let written = nix_write(&file, payload).map_err(std::io::Error::from)?;
     if written != payload.len() {
         return Err(AgentError::InvalidAssignment(
@@ -4720,6 +4749,11 @@ fn write_affinity_retain_marker_unix(
         ));
     }
     fsync(&file).map_err(std::io::Error::from)?;
+    nix::fcntl::renameat(&dir, tmp_name.as_c_str(), &dir, marker_name.as_c_str()).map_err(
+        |error| {
+            AgentError::InvalidAssignment(format!("affinity retain marker rename refused: {error}"))
+        },
+    )?;
     fsync(&dir).map_err(std::io::Error::from)?;
     Ok(())
 }
@@ -4803,6 +4837,17 @@ fn clear_affinity_retain_marker_unix(
             return Err(AgentError::InvalidAssignment(format!(
                 "affinity discharge clear refused: {error}"
             )));
+        }
+    }
+    for tmp in [AFFINITY_RETAIN_MARKER_TMP, AFFINITY_DISCHARGE_MARKER_TMP] {
+        let tmp_name = std::ffi::CString::new(tmp).expect("tmp name");
+        match unlinkat(&dir, tmp_name.as_c_str(), UnlinkatFlags::NoRemoveDir) {
+            Ok(()) | Err(nix::errno::Errno::ENOENT) => {}
+            Err(error) => {
+                return Err(AgentError::InvalidAssignment(format!(
+                    "affinity retain tmp clear refused: {error}"
+                )));
+            }
         }
     }
     // Directory entry removal must reach stable storage before reclaim keys
@@ -4916,14 +4961,20 @@ async fn affinity_retain_marker_mode(
     }
 }
 
-async fn affinity_discharge_marker_present(
+async fn affinity_discharge_matches_attempt(
     workspace_root: &Path,
     workspace: &Path,
+    attempt_id: &str,
 ) -> Result<bool, AgentError> {
-    match tokio::fs::symlink_metadata(affinity_discharge_marker_path(workspace_root, workspace))
-        .await
-    {
-        Ok(metadata) => Ok(metadata.is_file()),
+    let path = affinity_discharge_marker_path(workspace_root, workspace);
+    match tokio::fs::read(&path).await {
+        Ok(bytes) => {
+            let expected = format!(
+                "discharged:{attempt_id}
+"
+            );
+            Ok(bytes == expected.as_bytes())
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(error) => Err(error.into()),
     }
@@ -4938,20 +4989,26 @@ pub(super) async fn record_affinity_authority_discharged(
     if !affinity_retain_marker_present(&config.workspace_root, &attempt.workspace).await? {
         return Ok(());
     }
-    write_affinity_discharge_marker(&config.workspace_root, &attempt.workspace).await
+    write_affinity_discharge_marker(
+        &config.workspace_root,
+        &attempt.workspace,
+        &attempt.attempt_id,
+    )
+    .await
 }
 
 async fn write_affinity_discharge_marker(
     workspace_root: &Path,
     workspace: &Path,
+    attempt_id: &str,
 ) -> Result<(), AgentError> {
     #[cfg(unix)]
     {
-        write_affinity_discharge_marker_unix(workspace_root, workspace)
+        write_affinity_discharge_marker_unix(workspace_root, workspace, attempt_id)
     }
     #[cfg(not(unix))]
     {
-        let _ = (workspace_root, workspace);
+        let _ = (workspace_root, workspace, attempt_id);
         Ok(())
     }
 }
@@ -4960,37 +5017,45 @@ async fn write_affinity_discharge_marker(
 fn write_affinity_discharge_marker_unix(
     workspace_root: &Path,
     workspace: &Path,
+    attempt_id: &str,
 ) -> Result<(), AgentError> {
     use nix::fcntl::{OFlag, openat};
     use nix::sys::stat::Mode;
-    use nix::unistd::{fsync, write as nix_write};
+    use nix::unistd::{UnlinkatFlags, fsync, unlinkat, write as nix_write};
     let retain_rel = Path::new(AFFINITY_RETAIN_AGENT_ROOT).join(workspace);
     let dir = open_or_create_affinity_agent_dir(workspace_root, &retain_rel)?;
     let marker_name = std::ffi::CString::new(AFFINITY_DISCHARGE_MARKER).expect("discharge name");
-    // Idempotent: already discharged is fine.
-    match openat(
+    let tmp_name = std::ffi::CString::new(AFFINITY_DISCHARGE_MARKER_TMP).expect("discharge tmp");
+    let payload = format!("discharged:{attempt_id}\n");
+    let payload = payload.as_bytes();
+    // Atomic temp+rename so a crash never leaves a blank or half-written discharge
+    // record, and so a replacement attempt can overwrite a stale prior discharge.
+    let _ = unlinkat(&dir, tmp_name.as_c_str(), UnlinkatFlags::NoRemoveDir);
+    let file = openat(
         &dir,
-        marker_name.as_c_str(),
+        tmp_name.as_c_str(),
         OFlag::O_WRONLY | OFlag::O_CREAT | OFlag::O_EXCL | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
         Mode::from_bits_truncate(0o600),
-    ) {
-        Ok(file) => {
-            let payload = b"discharged\n";
-            let written = nix_write(&file, payload).map_err(std::io::Error::from)?;
-            if written != payload.len() {
-                return Err(AgentError::InvalidAssignment(
-                    "affinity discharge marker write was short".to_owned(),
-                ));
-            }
-            fsync(&file).map_err(std::io::Error::from)?;
-            fsync(&dir).map_err(std::io::Error::from)?;
-            Ok(())
-        }
-        Err(nix::errno::Errno::EEXIST) => Ok(()),
-        Err(error) => Err(AgentError::InvalidAssignment(format!(
-            "affinity discharge marker refused: {error}"
-        ))),
+    )
+    .map_err(|error| {
+        AgentError::InvalidAssignment(format!("affinity discharge marker tmp refused: {error}"))
+    })?;
+    let written = nix_write(&file, payload).map_err(std::io::Error::from)?;
+    if written != payload.len() {
+        return Err(AgentError::InvalidAssignment(
+            "affinity discharge marker write was short".to_owned(),
+        ));
     }
+    fsync(&file).map_err(std::io::Error::from)?;
+    nix::fcntl::renameat(&dir, tmp_name.as_c_str(), &dir, marker_name.as_c_str()).map_err(
+        |error| {
+            AgentError::InvalidAssignment(format!(
+                "affinity discharge marker rename refused: {error}"
+            ))
+        },
+    )?;
+    fsync(&dir).map_err(std::io::Error::from)?;
+    Ok(())
 }
 
 async fn remove_attempt_workspace(
