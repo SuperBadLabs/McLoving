@@ -2656,7 +2656,6 @@ async fn run_assignment(
         // exists. Retain-intended marker failure fails closed (no publication).
         // A planted symlink or directory at the marker name is replaced or
         // refused; a rename-and-replace decoy fails the inode check.
-        let mut affinity_retain_error: Option<String> = None;
         let lease_loss_reuse_retain = lease_loss.is_some()
             && matches!(
                 assignment
@@ -2669,41 +2668,15 @@ async fn run_assignment(
             affinity_should_retain_workspace(assignment.workspace_affinity.as_ref(), terminal)
                 || (terminal == WorkOutcome::Aborted && lease_loss_reuse_retain);
         if intend_retain {
-            // Fail closed: never publish a retain-intended terminal without a
-            // durable marker. Recovery keys off the marker and would otherwise
-            // delete a pinned Reuse tree. Compare the walked directory to the
-            // executor-retained workspace identity against rename-and-replace.
+            // Fail closed: plant retain before any durable terminal. Do not clear
+            // here — a crash before begin_finalization must keep the marker so a
+            // discharged Reuse retry can reopen the shared tree.
             write_affinity_retain_marker(
                 &config.workspace_root,
                 &assignment.workspace,
                 Some(&outcome.workspace_dir_identity),
             )
             .await?;
-        } else if assignment.workspace_affinity.is_some()
-            && let Err(error) =
-                clear_affinity_retain_marker(&config.workspace_root, &assignment.workspace).await
-        {
-            affinity_retain_error = Some(format!("affinity_retain_clear_refused:{error}"));
-            if terminal == WorkOutcome::Succeeded {
-                terminal = WorkOutcome::Failed;
-                // Final-stage success that cannot clear must still retain if the
-                // converted failure is a Reuse retry, or recovery deletes the tree.
-                if affinity_should_retain_workspace(
-                    assignment.workspace_affinity.as_ref(),
-                    terminal,
-                ) {
-                    write_affinity_retain_marker(
-                        &config.workspace_root,
-                        &assignment.workspace,
-                        Some(&outcome.workspace_dir_identity),
-                    )
-                    .await?;
-                } else {
-                    return Err(AgentError::InvalidAssignment(format!(
-                        "affinity_retain_clear_refused:{error}"
-                    )));
-                }
-            }
         }
         let result = write_result(
             &config.workspace_root,
@@ -2719,9 +2692,8 @@ async fn run_assignment(
                 },
                 // Keep the authority-loss cause primary; capture refusal remains
                 // independently recorded in workspace_transfer.error.
-                reason: affinity_retain_error
+                reason: lease_loss
                     .as_deref()
-                    .or(lease_loss.as_deref())
                     .or(workspace_failure.as_deref())
                     .or(artifact_failure.as_deref())
                     .or(helper_failure)
@@ -4771,9 +4743,65 @@ fn clear_affinity_retain_marker_unix(
             )?;
         }
     }
-    // Directory entry removal must reach stable storage before the terminal
-    // is published, or recovery can observe a reappeared marker.
+    // Directory entry removal must reach stable storage before reclaim keys
+    // off absence, or recovery can observe a reappeared marker.
     fsync(&dir).map_err(std::io::Error::from)?;
+    prune_empty_affinity_retain_dirs(workspace_root, workspace)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn prune_empty_affinity_retain_dirs(
+    workspace_root: &Path,
+    workspace: &Path,
+) -> Result<(), AgentError> {
+    use nix::fcntl::{OFlag, open};
+    use nix::sys::stat::Mode;
+    use nix::unistd::fsync;
+    let retain_root = workspace_root.join(AFFINITY_RETAIN_AGENT_ROOT);
+    let mut current = retain_root.join(workspace);
+    while current != retain_root && current.starts_with(&retain_root) {
+        let parent = current
+            .parent()
+            .ok_or_else(|| {
+                AgentError::InvalidAssignment(
+                    "affinity retain prune escaped workspace root".to_owned(),
+                )
+            })?
+            .to_owned();
+        match std::fs::remove_dir(&current) {
+            Ok(()) => {
+                let parent_fd = open(
+                    &parent,
+                    OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+                    Mode::empty(),
+                )
+                .map_err(|error| {
+                    AgentError::InvalidAssignment(format!(
+                        "affinity retain prune parent open refused: {error}"
+                    ))
+                })?;
+                fsync(&parent_fd).map_err(std::io::Error::from)?;
+                current = parent;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                current = parent;
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::DirectoryNotEmpty | std::io::ErrorKind::PermissionDenied
+                ) =>
+            {
+                break;
+            }
+            Err(error) => {
+                return Err(AgentError::InvalidAssignment(format!(
+                    "affinity retain prune refused: {error}"
+                )));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -5301,9 +5329,8 @@ async fn finalize_without_process(
         workspace_affinity,
         steps,
     } = completion;
-    // Same retain/clear ordering as the process path: plant or clear the marker
-    // before begin_finalization so recovery cannot publish then scrub a Reuse tree.
-    let mut affinity_retain_error: Option<String> = None;
+    // Plant retain before begin_finalization when needed. Clear only after the
+    // durable published terminal so a crash in this window keeps Reuse intent.
     let mut termination = reason;
     let lease_loss_reuse_retain = matches!(
         workspace_affinity.map(|grant| grant.mode),
@@ -5315,16 +5342,6 @@ async fn finalize_without_process(
         // Processless paths have no executor-retained handle; still require a
         // durable marker before publication so recovery cannot scrub a Reuse tree.
         write_affinity_retain_marker(&config.workspace_root, workspace, None).await?;
-    } else if workspace_affinity.is_some()
-        && let Err(error) = clear_affinity_retain_marker(&config.workspace_root, workspace).await
-    {
-        affinity_retain_error = Some(format!("affinity_retain_clear_refused:{error}"));
-        if outcome == WorkOutcome::Succeeded {
-            outcome = WorkOutcome::Failed;
-        }
-    }
-    if let Some(error) = affinity_retain_error.as_ref() {
-        termination = error.clone();
     }
     let result = write_result(
         &config.workspace_root,
@@ -7581,7 +7598,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn affinity_retain_clear_unlinks_and_directory_stays() {
+    fn affinity_retain_clear_unlinks_and_prunes_empty_retain_dirs() {
         let root =
             std::env::temp_dir().join(format!("mcloving-affinity-clear-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
@@ -7589,11 +7606,16 @@ mod tests {
         std::fs::create_dir_all(root.join(&workspace)).unwrap();
         write_affinity_retain_marker_unix(&root, &workspace, None).unwrap();
         clear_affinity_retain_marker_unix(&root, &workspace).unwrap();
-        let marker = root
-            .join(AFFINITY_RETAIN_AGENT_ROOT)
-            .join(&workspace)
-            .join(AFFINITY_RETAIN_MARKER);
-        assert!(std::fs::symlink_metadata(&marker).is_err());
+        let retain_leaf = root.join(AFFINITY_RETAIN_AGENT_ROOT).join(&workspace);
+        assert!(std::fs::symlink_metadata(&retain_leaf).is_err());
+        assert!(
+            !root.join(AFFINITY_RETAIN_AGENT_ROOT).join("org").exists()
+                || root
+                    .join(AFFINITY_RETAIN_AGENT_ROOT)
+                    .read_dir()
+                    .map(|entries| entries.count() == 0)
+                    .unwrap_or(true)
+        );
         assert!(root.join(&workspace).is_dir());
         let _ = std::fs::remove_dir_all(&root);
     }
