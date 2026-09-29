@@ -27,11 +27,18 @@ pub(crate) async fn record_successful_agent(
                SELECT count(*)::int FROM nodes
                WHERE organization_id = $1 AND build_id = $2 AND node_kind = 'work'
            ) > 1
+           AND EXISTS (
+               SELECT 1 FROM nodes
+               WHERE organization_id = $1
+                 AND build_id = $2
+                 AND $4 = ANY(required_capabilities)
+           )
          RETURNING id",
     )
     .bind(organization_id)
     .bind(build_id)
     .bind(agent_id)
+    .bind(mcloving_domain::workspace::WORKSPACE_AFFINITY_CAPABILITY)
     .fetch_optional(&mut **tx)
     .await?;
     if updated.is_none() {
@@ -177,11 +184,18 @@ pub(crate) async fn grant_for_attempt(
                       AND status NOT IN ('succeeded', 'failed', 'aborted', 'skipped')
                 ) AS remaining_after
          FROM builds AS b
-         WHERE b.organization_id = $1 AND b.id = $2 AND b.dag_mode",
+         WHERE b.organization_id = $1 AND b.id = $2 AND b.dag_mode
+           AND EXISTS (
+               SELECT 1 FROM nodes
+               WHERE organization_id = b.organization_id
+                 AND build_id = b.id
+                 AND $4 = ANY(required_capabilities)
+           )",
     )
     .bind(organization_id)
     .bind(build_id)
     .bind(node_id)
+    .bind(mcloving_domain::workspace::WORKSPACE_AFFINITY_CAPABILITY)
     .fetch_optional(&mut **tx)
     .await?;
     let Some(row) = row else {

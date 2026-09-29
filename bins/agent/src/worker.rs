@@ -4282,18 +4282,25 @@ async fn reclaim_spool_entries(
     logs: &[SpoolEntry],
     result: Option<&SpoolEntry>,
     workspace: &Path,
+    retain_workspace: bool,
 ) -> Result<(), AgentError> {
-    // Remove the attempt root first. Log entries live below it, and a workload
-    // may have replaced that root after containment. Cleanup must never follow
-    // such a replacement while trying to reach an individual log.
-    let mut changed = remove_attempt_workspace(&config.workspace_root, workspace).await?;
+    // Remove the attempt root first unless affinity asked to keep it for a
+    // later stage. Log entries live below it, and a workload may have replaced
+    // that root after containment. Cleanup must never follow such a replacement
+    // while trying to reach an individual log.
+    let mut changed = if retain_workspace {
+        Vec::new()
+    } else {
+        remove_attempt_workspace(&config.workspace_root, workspace).await?
+    };
     for entry in logs.iter().chain(result) {
         changed.extend(remove_spool_file(&config.workspace_root, entry).await?);
     }
     // The relocated step spools of a multi-step attempt sit in one fixed
     // directory. Every journaled entry below it was acknowledged before this
     // point, and anything the journal never learned about is exactly the
-    // crash-window orphan this removal exists for.
+    // crash-window orphan this removal exists for. Affinity reuse strips spool
+    // on the next stage; clear it here so a retained workspace stays usable.
     changed.extend(
         remove_terminal_relative_path(&config.workspace_root, &step_spool_area(workspace)).await?,
     );

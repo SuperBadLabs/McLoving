@@ -303,6 +303,11 @@ class TopologyAndDispatchParsing(VerifierHarness):
         reversed_pair: list[str] = []
 
         def hide_a_reversed_chain(text: str) -> str:
+            # Closing the last multi-ticket SERIAL lane is legitimate board
+            # progress; the harness must still exercise the edge check. When
+            # every remaining SERIAL lane is a singleton, temporarily merge a
+            # dependent pair that already has a direct edge.
+            text = self._ensure_multi_ticket_serial(text)
             line, cells, chain, klass = self._lane_row(
                 text,
                 lambda chain_cell, class_cell: class_cell == "SERIAL"
@@ -327,6 +332,68 @@ class TopologyAndDispatchParsing(VerifierHarness):
             f"SERIAL chain {first} -> {second} lacks a direct dependency edge",
             stderr,
         )
+
+    def _ensure_multi_ticket_serial(self, text: str) -> str:
+        """Return board text that contains at least one multi-ticket SERIAL row."""
+        match = VERIFY.TOPOLOGY_SECTION.search(text)
+        self.assertIsNotNone(match, "the board has no topology section")
+        assert match is not None
+        for header, rows in VERIFY.markdown_tables(match.group(1)):
+            chain = header.index(VERIFY.TOPOLOGY_CHAIN_HEADER)
+            klass = header.index(VERIFY.TOPOLOGY_CLASS_HEADER)
+            for _line, cells in rows:
+                if (
+                    len(cells) == len(header)
+                    and cells[klass] == "SERIAL"
+                    and len(VERIFY.TICKET_ID.findall(cells[chain])) > 1
+                ):
+                    return text
+
+        deps: dict[str, list[str]] = {}
+        statuses: dict[str, str] = {}
+        for line in text.splitlines():
+            parsed = VERIFY.ticket_row(line)
+            if parsed is None:
+                continue
+            ticket, status, dependency_cell, _acceptance = parsed
+            statuses[ticket] = status
+            deps[ticket] = VERIFY.TICKET_ID.findall(dependency_cell)
+
+        serial_singles: dict[str, tuple[str, list[str], int, int]] = {}
+        for header, rows in VERIFY.markdown_tables(match.group(1)):
+            chain = header.index(VERIFY.TOPOLOGY_CHAIN_HEADER)
+            klass = header.index(VERIFY.TOPOLOGY_CLASS_HEADER)
+            for line, cells in rows:
+                if len(cells) != len(header) or cells[klass] != "SERIAL":
+                    continue
+                ids = VERIFY.TICKET_ID.findall(cells[chain])
+                if len(ids) == 1:
+                    serial_singles[ids[0]] = (line, cells, chain, klass)
+
+        for predecessor, (pred_line, pred_cells, chain, klass) in serial_singles.items():
+            for successor, (succ_line, _succ_cells, _c, _k) in serial_singles.items():
+                if predecessor == successor:
+                    continue
+                if statuses.get(successor) not in VERIFY.REMAINING_STATUSES:
+                    continue
+                if predecessor not in deps.get(successor, []):
+                    continue
+                merged = self._row(
+                    pred_cells,
+                    pred_cells[0],
+                    chain,
+                    f"`{predecessor}` -> `{successor}`",
+                    klass,
+                    "SERIAL",
+                )
+                text = text.replace(pred_line + "\n", merged + "\n", 1)
+                text = text.replace(succ_line + "\n", "", 1)
+                return text
+        self.fail(
+            "board has no multi-ticket SERIAL lane and no two SERIAL "
+            "singletons with a direct dependency edge to synthesize one"
+        )
+
 
     def test_an_escaped_pipe_in_a_dispatch_cell_is_content_not_a_boundary(self) -> None:
         """The dispatch half of the same split, whose divergence runs the other way.

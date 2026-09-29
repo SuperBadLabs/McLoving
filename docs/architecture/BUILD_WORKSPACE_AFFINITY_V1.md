@@ -6,8 +6,12 @@ a checkout in stage one is visible in stage two without re-acquiring it.
 
 ## Scope
 
-- Applies to product DAG builds with more than one `work` node and without the
-  bounded checkpoint transfer namespace (`workspace_namespace` null).
+- Applies to product DAG builds whose nodes require `workspace-affinity-v1`
+  (admission adds that capability on every stage of a multi-stage product
+  pipeline), with more than one `work` node and without the bounded checkpoint
+  transfer namespace (`workspace_namespace` null). Multi-node DAGs that do not
+  carry the capability are unchanged: they may still run parent and child on
+  different agents.
 - The small checkpoint snapshot mechanism (`BUILD_WORKSPACE_TRANSFER_V1`) keeps
   its caps for the contained sequential path; affinity and transfer are
   mutually exclusive on one assignment.
