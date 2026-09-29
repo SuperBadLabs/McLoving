@@ -965,6 +965,12 @@ async fn send_reconciliation(
                         attempt.fence_token,
                     );
                 }
+                // Persist discharge before Aborted so reclaim can tell operator
+                // supersession apart from a controller cancel override that would
+                // clear Reuse retain. Must precede the journal transition.
+                if receipt.disposition == CancellationDisposition::DischargeRecovered as i32 {
+                    worker::record_affinity_authority_discharged(config, attempt).await?;
+                }
                 journal.transition(
                     &attempt.organization_id,
                     &attempt.attempt_id,
