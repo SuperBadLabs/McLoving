@@ -4499,16 +4499,12 @@ fn open_or_create_affinity_agent_dir(
         ) {
             Ok(next) => dir = next,
             Err(nix::errno::Errno::ENOENT) => {
-                nix::sys::stat::mkdirat(
-                    &dir,
-                    c_name.as_c_str(),
-                    Mode::from_bits_truncate(0o700),
-                )
-                .map_err(|error| {
-                    AgentError::InvalidAssignment(format!(
-                        "affinity retain agent mkdir refused: {error}"
-                    ))
-                })?;
+                nix::sys::stat::mkdirat(&dir, c_name.as_c_str(), Mode::from_bits_truncate(0o700))
+                    .map_err(|error| {
+                        AgentError::InvalidAssignment(format!(
+                            "affinity retain agent mkdir refused: {error}"
+                        ))
+                    })?;
                 dir = openat(
                     &dir,
                     c_name.as_c_str(),
@@ -4542,22 +4538,29 @@ fn write_affinity_retain_marker_unix(
     use nix::sys::stat::{Mode, fstat, fstatat};
     use nix::unistd::{UnlinkatFlags, fsync, unlinkat, write as nix_write};
     // Verify the workload path still names the executor-retained directory
-    // before recording agent-owned retention outside that tree.
-    let workspace_dir = open_affinity_workspace_dir(workspace_root, workspace)?;
-    if let Some(expected) = expected {
-        let stat = fstat(&workspace_dir).map_err(|error| {
-            AgentError::InvalidAssignment(format!(
-                "affinity retain workspace identity refused: {error}"
-            ))
-        })?;
-        if (stat.st_dev as u64) != expected.dev || (stat.st_ino as u64) != expected.ino {
-            return Err(AgentError::InvalidAssignment(
-                "affinity retain refused: workspace path no longer names the executor-retained directory"
-                    .to_owned(),
-            ));
+    // when it exists. A stage may have deleted the tree (`git clean -fdx`);
+    // agent-owned retention still records intent so a Reuse retry/stage can
+    // decide. A successful open that fails the inode check is refused.
+    match open_affinity_workspace_dir(workspace_root, workspace) {
+        Ok(workspace_dir) => {
+            if let Some(expected) = expected {
+                let stat = fstat(&workspace_dir).map_err(|error| {
+                    AgentError::InvalidAssignment(format!(
+                        "affinity retain workspace identity refused: {error}"
+                    ))
+                })?;
+                if (stat.st_dev as u64) != expected.dev || (stat.st_ino as u64) != expected.ino {
+                    return Err(AgentError::InvalidAssignment(
+                        "affinity retain refused: workspace path no longer names the executor-retained directory"
+                            .to_owned(),
+                    ));
+                }
+            }
         }
+        Err(AgentError::InvalidAssignment(message))
+            if message.contains("No such file or directory") => {}
+        Err(error) => return Err(error),
     }
-    drop(workspace_dir);
     let retain_rel = Path::new(AFFINITY_RETAIN_AGENT_ROOT).join(workspace);
     let dir = open_or_create_affinity_agent_dir(workspace_root, &retain_rel)?;
     let marker_name = std::ffi::CString::new(AFFINITY_RETAIN_MARKER).expect("marker name");
@@ -7404,7 +7407,8 @@ mod tests {
         write_affinity_retain_marker_unix(&root, &workspace, None).unwrap();
         assert_eq!(std::fs::read(&outside).unwrap(), b"secret");
         assert!(std::fs::symlink_metadata(&marker).unwrap().is_file());
-        assert_eq!(std::fs::read(&marker).unwrap(), b"retain\n");
+        assert_eq!(std::fs::read(&marker).unwrap(), b"retain
+");
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -7428,18 +7432,18 @@ mod tests {
         let error = write_affinity_retain_marker_unix(&root, &workspace, Some(&expected))
             .expect_err("decoy workspace must be refused");
         assert!(error.to_string().contains("executor-retained"), "{error}");
-        assert!(!root
+        let agent_marker = root
             .join(AFFINITY_RETAIN_AGENT_ROOT)
             .join(&workspace)
-            .join(AFFINITY_RETAIN_MARKER)
-            .exists());
+            .join(AFFINITY_RETAIN_MARKER);
+        assert!(!agent_marker.exists());
         write_affinity_retain_marker_unix(&root, Path::new("org/build/relocated"), Some(&expected))
             .unwrap();
-        assert!(root
+        let relocated_marker = root
             .join(AFFINITY_RETAIN_AGENT_ROOT)
             .join("org/build/relocated")
-            .join(AFFINITY_RETAIN_MARKER)
-            .is_file());
+            .join(AFFINITY_RETAIN_MARKER);
+        assert!(relocated_marker.is_file());
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -7461,7 +7465,8 @@ mod tests {
         std::fs::hard_link(&outside, &marker).unwrap();
         write_affinity_retain_marker_unix(&root, &workspace, None).unwrap();
         assert_eq!(std::fs::read(&outside).unwrap(), b"secret-payload");
-        assert_eq!(std::fs::read(&marker).unwrap(), b"retain\n");
+        assert_eq!(std::fs::read(&marker).unwrap(), b"retain
+");
         let _ = std::fs::remove_dir_all(&root);
     }
 
