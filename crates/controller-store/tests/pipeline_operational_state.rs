@@ -12,8 +12,7 @@ use mcloving_controller_store::{
     PipelineOperationalStateTransition, PipelineOperationalStateTransitionOutcome,
     PipelinePutOutcome, PipelineWrite, RECOVERY_OPERATIONS_V6, RUNTIME_FUNCTION_BOUNDARY_V23,
     RetryDecision, STATE_TRANSFER_V17, Store, StoreError, TENANT_AUDIT_V11, TENANT_SECURITY_V2,
-    WORKSPACE_AFFINITY_V43,
-    TerminalOutcome, WaitReason,
+    TerminalOutcome, WORKSPACE_AFFINITY_V43, WaitReason,
 };
 use serde_json::json;
 use sha2::{Digest, Sha256};
