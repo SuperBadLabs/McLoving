@@ -46,3 +46,14 @@ Boundaries reviewed: agent session fencing, workspace path identity, affinity
 pinning and the agent-gone failure. Closure attribution is recorded in
 `docs/threat-model/README.md`. No production authority beyond the reviewed
 affinity surface is granted.
+
+## Residual: agent presence vs enrollment
+
+`workspace_affinity_agent_gone` treats a missing `agent_sessions` row (or one
+that no longer advertises `workspace-affinity-v1` / the required trust pool) as
+gone. `agent_sessions` is an enrollment/epoch registry updated on open, not a
+heartbeat presence signal; a crashed agent that never re-enrolls under a new
+epoch can leave a stale row and a pinned successor queued until an operator
+clears it. A presence lease or session heartbeat is follow-up work outside this
+ticket; PAR-015 does not blind-reschedule to a different agent.
+

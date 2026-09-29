@@ -2725,13 +2725,17 @@ async fn run_assignment(
         // Persist affinity retention before publishing the terminal. A crash
         // after complete_work but before the marker would otherwise let recovery
         // reclaim the shared checkout while the controller has already readied
-        // the successor. Keep the tree on failure too when further stages (or a
-        // retry of this one) still need it; only an abort drops it.
-        let intend_retain = assignment
-            .workspace_affinity
-            .as_ref()
-            .is_some_and(|grant| grant.retain_on_success)
-            && !matches!(terminal, WorkOutcome::Aborted);
+        // the successor. Keep a failed Reuse tree for retry; never retain a
+        // failed Create tree (retry would get Create again and hit
+        // WorkspaceAlreadyExists). Abort always drops retention.
+        let intend_retain = match assignment.workspace_affinity.as_ref() {
+            Some(grant) if grant.retain_on_success => match terminal {
+                WorkOutcome::Succeeded => true,
+                WorkOutcome::Failed if matches!(grant.mode, WorkspaceAffinityMode::Reuse) => true,
+                _ => false,
+            },
+            _ => false,
+        };
         if intend_retain {
             write_affinity_retain_marker(&config.workspace_root, &assignment.workspace).await?;
         } else if assignment.workspace_affinity.is_some() {
@@ -2758,11 +2762,14 @@ async fn run_assignment(
             published,
             Some(outcome.process_id),
         )?;
-        let retain_workspace = assignment
-            .workspace_affinity
-            .as_ref()
-            .is_some_and(|grant| grant.retain_on_success)
-            && !matches!(published, WorkOutcome::Aborted);
+        let retain_workspace = match assignment.workspace_affinity.as_ref() {
+            Some(grant) if grant.retain_on_success => match published {
+                WorkOutcome::Succeeded => true,
+                WorkOutcome::Failed if matches!(grant.mode, WorkspaceAffinityMode::Reuse) => true,
+                _ => false,
+            },
+            _ => false,
+        };
         if assignment.workspace_affinity.is_some() && !retain_workspace {
             clear_affinity_retain_marker(&config.workspace_root, &assignment.workspace).await?;
         }
