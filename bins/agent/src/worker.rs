@@ -2640,6 +2640,38 @@ async fn run_assignment(
             .filter(|cause| **cause != CONTROLLER_CANCELLATION_TRIGGER)
             .map(|cause| format!("lease_lost_during_execution:{cause}"));
         let step_failure = last_record.reason.clone();
+        // Establish or clear affinity retention before the durable terminal
+        // exists. A marker create that fails after begin_finalization would let
+        // recovery publish success and then delete the workspace. A planted
+        // symlink or directory at the marker name is replaced or refused here,
+        // and a refusal becomes a failed terminal instead of a journaled success.
+        let mut affinity_retain_error: Option<String> = None;
+        let intend_retain = match assignment.workspace_affinity.as_ref() {
+            Some(grant) if grant.retain_on_success => match terminal {
+                WorkOutcome::Succeeded => true,
+                WorkOutcome::Failed if matches!(grant.mode, WorkspaceAffinityMode::Reuse) => true,
+                _ => false,
+            },
+            _ => false,
+        };
+        if intend_retain {
+            if let Err(error) =
+                write_affinity_retain_marker(&config.workspace_root, &assignment.workspace).await
+            {
+                affinity_retain_error = Some(format!("affinity_retain_refused:{error}"));
+                if terminal == WorkOutcome::Succeeded {
+                    terminal = WorkOutcome::Failed;
+                }
+            }
+        } else if assignment.workspace_affinity.is_some()
+            && let Err(error) =
+                clear_affinity_retain_marker(&config.workspace_root, &assignment.workspace).await
+        {
+            affinity_retain_error = Some(format!("affinity_retain_clear_refused:{error}"));
+            if terminal == WorkOutcome::Succeeded {
+                terminal = WorkOutcome::Failed;
+            }
+        }
         let result = write_result(
             &config.workspace_root,
             &assignment.workspace,
@@ -2654,8 +2686,9 @@ async fn run_assignment(
                 },
                 // Keep the authority-loss cause primary; capture refusal remains
                 // independently recorded in workspace_transfer.error.
-                reason: lease_loss
+                reason: affinity_retain_error
                     .as_deref()
+                    .or(lease_loss.as_deref())
                     .or(workspace_failure.as_deref())
                     .or(artifact_failure.as_deref())
                     .or(helper_failure)
@@ -2722,25 +2755,6 @@ async fn run_assignment(
             verified_spool_content(&config.workspace_root, &result, "result").await?;
         let persisted: PersistedResult = serde_json::from_slice(&result_content)?;
         let summary = work_completion_summary(&persisted, &result.digest, false)?;
-        // Persist affinity retention before publishing the terminal. A crash
-        // after complete_work but before the marker would otherwise let recovery
-        // reclaim the shared checkout while the controller has already readied
-        // the successor. Keep a failed Reuse tree for retry; never retain a
-        // failed Create tree (retry would get Create again and hit
-        // WorkspaceAlreadyExists). Abort always drops retention.
-        let intend_retain = match assignment.workspace_affinity.as_ref() {
-            Some(grant) if grant.retain_on_success => match terminal {
-                WorkOutcome::Succeeded => true,
-                WorkOutcome::Failed if matches!(grant.mode, WorkspaceAffinityMode::Reuse) => true,
-                _ => false,
-            },
-            _ => false,
-        };
-        if intend_retain {
-            write_affinity_retain_marker(&config.workspace_root, &assignment.workspace).await?;
-        } else if assignment.workspace_affinity.is_some() {
-            clear_affinity_retain_marker(&config.workspace_root, &assignment.workspace).await?;
-        }
         let completion = authority_rpc(
             publication.control,
             publication.client.complete_work(WorkCompletion {
@@ -4362,15 +4376,12 @@ async fn write_affinity_retain_marker(
 }
 
 #[cfg(unix)]
-fn write_affinity_retain_marker_unix(
+fn open_affinity_workspace_dir(
     workspace_root: &Path,
     workspace: &Path,
-) -> Result<(), AgentError> {
+) -> Result<std::os::fd::OwnedFd, AgentError> {
     use nix::fcntl::{OFlag, open, openat};
     use nix::sys::stat::Mode;
-    use nix::unistd::{fsync, write as nix_write};
-    // Walk each workspace component with O_NOFOLLOW so a workload that
-    // replaced a parent with a symlink cannot redirect the retain marker.
     let mut dir = open(
         workspace_root,
         OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
@@ -4406,7 +4417,57 @@ fn write_affinity_retain_marker_unix(
             ))
         })?;
     }
+    Ok(dir)
+}
+
+#[cfg(unix)]
+fn write_affinity_retain_marker_unix(
+    workspace_root: &Path,
+    workspace: &Path,
+) -> Result<(), AgentError> {
+    use nix::fcntl::{OFlag, openat};
+    use nix::sys::stat::{Mode, fstatat};
+    use nix::unistd::{UnlinkatFlags, fsync, unlinkat, write as nix_write};
+    let dir = open_affinity_workspace_dir(workspace_root, workspace)?;
     let marker_name = std::ffi::CString::new(AFFINITY_RETAIN_MARKER).expect("marker name");
+    match fstatat(
+        &dir,
+        marker_name.as_c_str(),
+        nix::fcntl::AtFlags::AT_SYMLINK_NOFOLLOW,
+    ) {
+        Err(nix::errno::Errno::ENOENT) => {}
+        Err(error) => {
+            return Err(AgentError::InvalidAssignment(format!(
+                "affinity retain marker stat refused: {error}"
+            )));
+        }
+        Ok(stat) if stat.st_mode & nix::libc::S_IFMT == nix::libc::S_IFLNK => {
+            unlinkat(&dir, marker_name.as_c_str(), UnlinkatFlags::NoRemoveDir).map_err(
+                |error| {
+                    AgentError::InvalidAssignment(format!(
+                        "affinity retain marker symlink refused: {error}"
+                    ))
+                },
+            )?;
+        }
+        Ok(stat) if stat.st_mode & nix::libc::S_IFMT == nix::libc::S_IFDIR => {
+            unlinkat(&dir, marker_name.as_c_str(), UnlinkatFlags::RemoveDir).map_err(|error| {
+                AgentError::InvalidAssignment(format!(
+                    "affinity retain marker directory refused: {error}"
+                ))
+            })?;
+        }
+        Ok(stat) if stat.st_mode & nix::libc::S_IFMT == nix::libc::S_IFREG => {}
+        Ok(_) => {
+            unlinkat(&dir, marker_name.as_c_str(), UnlinkatFlags::NoRemoveDir).map_err(
+                |error| {
+                    AgentError::InvalidAssignment(format!(
+                        "affinity retain marker type refused: {error}"
+                    ))
+                },
+            )?;
+        }
+    }
     let file = openat(
         &dir,
         marker_name.as_c_str(),
@@ -4427,7 +4488,6 @@ fn write_affinity_retain_marker_unix(
     }
     fsync(&file).map_err(std::io::Error::from)?;
     fsync(&dir).map_err(std::io::Error::from)?;
-    let _ = (file, dir);
     Ok(())
 }
 
@@ -4435,18 +4495,66 @@ async fn clear_affinity_retain_marker(
     workspace_root: &Path,
     workspace: &Path,
 ) -> Result<(), AgentError> {
-    let path = workspace_root.join(workspace).join(AFFINITY_RETAIN_MARKER);
-    match tokio::fs::symlink_metadata(&path).await {
-        Ok(metadata) if metadata.is_file() => tokio::fs::remove_file(&path).await?,
-        Ok(_) => {
+    #[cfg(unix)]
+    {
+        clear_affinity_retain_marker_unix(workspace_root, workspace)
+    }
+    #[cfg(not(unix))]
+    {
+        let path = workspace_root.join(workspace).join(AFFINITY_RETAIN_MARKER);
+        match tokio::fs::symlink_metadata(&path).await {
+            Ok(metadata) if metadata.is_file() => tokio::fs::remove_file(&path).await?,
+            Ok(_) => {
+                return Err(AgentError::InvalidAssignment(format!(
+                    "affinity retain marker at {} is not a regular file",
+                    path.display()
+                )));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+fn clear_affinity_retain_marker_unix(
+    workspace_root: &Path,
+    workspace: &Path,
+) -> Result<(), AgentError> {
+    use nix::sys::stat::fstatat;
+    use nix::unistd::{UnlinkatFlags, fsync, unlinkat};
+    let dir = open_affinity_workspace_dir(workspace_root, workspace)?;
+    let marker_name = std::ffi::CString::new(AFFINITY_RETAIN_MARKER).expect("marker name");
+    match fstatat(
+        &dir,
+        marker_name.as_c_str(),
+        nix::fcntl::AtFlags::AT_SYMLINK_NOFOLLOW,
+    ) {
+        Err(nix::errno::Errno::ENOENT) => {}
+        Err(error) => {
             return Err(AgentError::InvalidAssignment(format!(
-                "affinity retain marker at {} is not a regular file",
-                path.display()
+                "affinity retain clear stat refused: {error}"
             )));
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error.into()),
+        Ok(stat) if stat.st_mode & nix::libc::S_IFMT == nix::libc::S_IFDIR => {
+            unlinkat(&dir, marker_name.as_c_str(), UnlinkatFlags::RemoveDir).map_err(|error| {
+                AgentError::InvalidAssignment(format!(
+                    "affinity retain clear directory refused: {error}"
+                ))
+            })?;
+        }
+        Ok(_) => {
+            unlinkat(&dir, marker_name.as_c_str(), UnlinkatFlags::NoRemoveDir).map_err(
+                |error| {
+                    AgentError::InvalidAssignment(format!("affinity retain clear refused: {error}"))
+                },
+            )?;
+        }
     }
+    // Directory entry removal must reach stable storage before the terminal
+    // is published, or recovery can observe a reappeared marker.
+    fsync(&dir).map_err(std::io::Error::from)?;
     Ok(())
 }
 
@@ -7077,6 +7185,58 @@ mod tests {
             verify_spool_file(&path, &entry, "log").await,
             Err(AgentError::InvalidAssignment(_))
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn affinity_retain_marker_replaces_a_symlink_without_following_it() {
+        let root =
+            std::env::temp_dir().join(format!("mcloving-affinity-symlink-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let workspace = PathBuf::from("org/build/workspace");
+        std::fs::create_dir_all(root.join(&workspace)).unwrap();
+        let outside = root.join("outside-target");
+        std::fs::write(&outside, b"secret").unwrap();
+        let marker = root.join(&workspace).join(AFFINITY_RETAIN_MARKER);
+        std::os::unix::fs::symlink(&outside, &marker).unwrap();
+        write_affinity_retain_marker_unix(&root, &workspace).unwrap();
+        assert_eq!(std::fs::read(&outside).unwrap(), b"secret");
+        assert!(std::fs::symlink_metadata(&marker).unwrap().is_file());
+        assert_eq!(std::fs::read(&marker).unwrap(), b"retain\n");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn affinity_retain_clear_unlinks_and_directory_stays() {
+        let root =
+            std::env::temp_dir().join(format!("mcloving-affinity-clear-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let workspace = PathBuf::from("org/build/workspace");
+        std::fs::create_dir_all(root.join(&workspace)).unwrap();
+        write_affinity_retain_marker_unix(&root, &workspace).unwrap();
+        clear_affinity_retain_marker_unix(&root, &workspace).unwrap();
+        let marker = root.join(&workspace).join(AFFINITY_RETAIN_MARKER);
+        assert!(std::fs::symlink_metadata(&marker).is_err());
+        assert!(root.join(&workspace).is_dir());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn affinity_retain_refuses_a_nonempty_directory_marker() {
+        let root =
+            std::env::temp_dir().join(format!("mcloving-affinity-dir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let workspace = PathBuf::from("org/build/workspace");
+        let marker = root.join(&workspace).join(AFFINITY_RETAIN_MARKER);
+        std::fs::create_dir_all(marker.join("child")).unwrap();
+        let error = write_affinity_retain_marker_unix(&root, &workspace)
+            .expect_err("non-empty directory marker is refused");
+        let rendered = error.to_string();
+        assert!(rendered.contains("directory"), "{rendered}");
+        assert!(marker.join("child").is_dir());
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
 
