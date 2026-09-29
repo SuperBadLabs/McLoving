@@ -10,6 +10,7 @@ use sqlx::{Acquire, PgPool, Postgres, Row, Transaction};
 use uuid::Uuid;
 
 mod admin_migration;
+mod affinity;
 mod audit;
 mod authorization_mapping;
 pub mod authz;
@@ -213,6 +214,7 @@ pub const PROJECT_ROLE_GRANTS_V41: &str =
     include_str!("../migrations/0041_project_role_grants.sql");
 /// Mutable generation-bound native schedule slots (PAR-002).
 pub const SCHEDULE_SLOTS_V42: &str = include_str!("../migrations/0042_trigger_schedule_slots.sql");
+pub const WORKSPACE_AFFINITY_V43: &str = include_str!("../migrations/0043_workspace_affinity.sql");
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AgentReconciliationDisposition {
@@ -375,6 +377,7 @@ pub struct NewLogChunk<'a> {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AttemptExecution {
     pub workspace_transfer: Option<mcloving_domain::workspace::WorkspaceGrant>,
+    pub workspace_affinity: Option<mcloving_domain::workspace::WorkspaceAffinityGrant>,
     pub build_id: Uuid,
     pub project_id: Uuid,
     pub pipeline_id: Option<Uuid>,
@@ -1545,6 +1548,7 @@ impl Store {
         apply_migration(&mut tx, 40, NOTIFICATIONS_V40).await?;
         apply_migration(&mut tx, 41, PROJECT_ROLE_GRANTS_V41).await?;
         apply_migration(&mut tx, 42, SCHEDULE_SLOTS_V42).await?;
+        apply_migration(&mut tx, 43, WORKSPACE_AFFINITY_V43).await?;
         tx.commit().await?;
         Ok(())
     }
@@ -3362,8 +3366,8 @@ impl Store {
         // execution-authority predicate after acquiring that lock; refreshing
         // cancellation alone could dispatch after lease expiry, requeue, or a
         // restore/fence handoff.
-        let row = sqlx::query_as::<_, (Uuid, Uuid, Option<Uuid>, Value, bool, Option<Uuid>, i64, Option<Value>, bool, Option<Value>, i32)>(
-            "SELECT b.id, b.project_id, b.pipeline_id, n.execution_spec,
+        let row = sqlx::query_as::<_, (Uuid, Uuid, Uuid, Option<Uuid>, Value, bool, Option<Uuid>, i64, Option<Value>, bool, Option<Value>, i32)>(
+            "SELECT b.id, n.id, b.project_id, b.pipeline_id, n.execution_spec,
                     b.cancellation_requested_at IS NOT NULL, b.workspace_namespace, b.workspace_generation, b.workspace_snapshot, b.workspace_closed, b.workspace_receipt, COALESCE(jsonb_array_length(b.dag_contract->'sequential_layout'->'steps'),0)
              FROM attempts AS a
              JOIN nodes AS n
@@ -3388,41 +3392,45 @@ impl Store {
         .bind(agent_id)
         .fetch_optional(&mut *tx)
         .await?;
+        let Some((
+            build_id,
+            node_id,
+            project_id,
+            pipeline_id,
+            execution_spec,
+            cancellation_requested,
+            namespace,
+            generation,
+            snapshot,
+            closed,
+            receipt,
+            step_count,
+        )) = row
+        else {
+            tx.rollback().await?;
+            return Ok(None);
+        };
+        let workspace_affinity =
+            affinity::grant_for_attempt(&mut tx, organization_id, build_id, node_id).await?;
         tx.commit().await?;
-        row.map(
-            |(
+        Ok(Some(AttemptExecution {
+            workspace_transfer: workspace::grant(
+                organization_id,
                 build_id,
-                project_id,
-                pipeline_id,
-                execution_spec,
-                cancellation_requested,
                 namespace,
                 generation,
                 snapshot,
                 closed,
                 receipt,
                 step_count,
-            )| {
-                Ok(AttemptExecution {
-                    workspace_transfer: workspace::grant(
-                        organization_id,
-                        build_id,
-                        namespace,
-                        generation,
-                        snapshot,
-                        closed,
-                        receipt,
-                        step_count,
-                    )?,
-                    build_id,
-                    project_id,
-                    pipeline_id,
-                    execution_spec,
-                    cancellation_requested,
-                })
-            },
-        )
-        .transpose()
+            )?,
+            workspace_affinity,
+            build_id,
+            project_id,
+            pipeline_id,
+            execution_spec,
+            cancellation_requested,
+        }))
     }
 
     /// Idempotently records that an accepted attempt began running.
@@ -7618,6 +7626,9 @@ impl Store {
         .bind(&summary)
         .execute(&mut *tx)
         .await?;
+        if outcome == TerminalOutcome::Succeeded {
+            affinity::record_successful_agent(&mut tx, organization_id, build_id, agent_id).await?;
+        }
         if !dag::advance_dag_after_attempt(
             &mut tx,
             organization_id,

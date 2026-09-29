@@ -620,3 +620,59 @@ mod tests {
         assert_ne!(metadata_only, snapshot().receipt().unwrap());
     }
 }
+
+/// Product multi-stage builds pin later stages to the agent that ran the first
+/// stage and reuse that build's on-disk workspace (PAR-015). The bounded
+/// checkpoint transfer above keeps its caps for the contained sequential path;
+/// affinity is how a checkout in stage one is visible to stage two without
+/// re-acquiring it.
+pub const WORKSPACE_AFFINITY_FEATURE: &str = "build-workspace-affinity-v1";
+pub const WORKSPACE_AFFINITY_CAPABILITY: &str = "workspace-affinity-v1";
+
+/// Wire grant telling the agent how to open and retire one affinity workspace.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceAffinityGrant {
+    pub version: u32,
+    pub mode: WorkspaceAffinityMode,
+    /// When true and the attempt succeeds, keep the build workspace for a
+    /// later stage. Failures, cancellations and the last stage always remove it.
+    pub retain_on_success: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceAffinityMode {
+    Create,
+    Reuse,
+}
+
+impl WorkspaceAffinityGrant {
+    pub fn validate(&self) -> Result<(), WorkspaceError> {
+        if self.version != 1 {
+            return Err(invalid("unsupported workspace affinity version"));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod affinity_tests {
+    use super::*;
+
+    #[test]
+    fn workspace_affinity_grant_validates_version_one() {
+        let grant = WorkspaceAffinityGrant {
+            version: 1,
+            mode: WorkspaceAffinityMode::Create,
+            retain_on_success: true,
+        };
+        grant.validate().unwrap();
+        let bad = WorkspaceAffinityGrant {
+            version: 2,
+            mode: WorkspaceAffinityMode::Reuse,
+            retain_on_success: false,
+        };
+        assert!(bad.validate().is_err());
+    }
+}

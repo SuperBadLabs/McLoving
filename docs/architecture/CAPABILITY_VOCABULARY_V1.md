@@ -30,6 +30,10 @@ configuration by name instead of running it.
 - Any other required capability is an exact opaque token chosen by the
   pipeline (for example `gpu:cuda`). Matching is exact string equality; there
   is no wildcard or prefix matching.
+- Product multi-stage builds additionally require `workspace-affinity-v1`
+  (PAR-015) so later stages pin to the agent that ran the first stage and
+  reuse its on-disk workspace. Agents advertise it only with the negotiated
+  feature `build-workspace-affinity-v1` (Linux).
 - Trust pools are not capabilities. Scheduling takes the trust pool from the
   authenticated agent enrollment (`AGENT_RUNTIME.md`), never from a declared
   capability, and claims only an exact pool match.

@@ -56,6 +56,9 @@ pub enum ExecutionMode {
 pub struct ExecutionRequest {
     /// Optional verified file state copied into this fresh attempt directory.
     pub workspace_seed: Option<mcloving_domain::workspace::WorkspaceSnapshot>,
+    /// When true, open an existing workspace directory instead of creating one
+    /// (PAR-015 affinity reuse across stages of one build).
+    pub reuse_existing_workspace: bool,
     /// Position of this process within a multi-step attempt (PAR-010).
     ///
     /// `None` is the single-step layout every earlier release used: a fresh

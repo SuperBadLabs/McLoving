@@ -1,0 +1,26 @@
+# PAR-015 proof fixture: checkout in stage one, build from that tree in stage
+# two. Workspace affinity pins both stages to the same agent and reuses the
+# build workspace so stage two sees the checkout without re-acquiring it.
+# Replace the mapping digest and commit with the deployed binding's digest and
+# branch head before submit; `mcloving graph` must show both attempts on one
+# agent.
+version: 1
+name: parity-two-stage-checkout
+stages:
+  - id: checkout
+    name: Check out
+    steps:
+      - checkout:
+          mapping_id: mcloving-github
+          mapping_digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+          ref: refs/heads/main
+          commit: "0000000000000000000000000000000000000000"
+          destination: source
+          timeout_seconds: 600
+  - id: build
+    name: Build from checkout
+    steps:
+      - process:
+          program: /bin/sh
+          args: [-ec, "test -f source/README.md && head -5 source/README.md && ls source"]
+          timeout_seconds: 300

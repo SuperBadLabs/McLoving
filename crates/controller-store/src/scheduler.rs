@@ -180,6 +180,7 @@ impl Store {
         )
         .fetch_one(&mut *tx)
         .await?;
+        crate::affinity::fail_orphaned_affinity_builds(&mut tx, request.organization_id).await?;
 
         let candidate = sqlx::query(
             "SELECT n.id AS node_id, n.build_id, a.id AS attempt_id
@@ -211,6 +212,10 @@ impl Store {
                AND n.cancellation_requested_at IS NULL
                AND n.required_capabilities <@ $2::text[]
                AND n.required_trust_pool = $4
+               AND (
+                   b.workspace_affinity_agent_id IS NULL
+                   OR b.workspace_affinity_agent_id = $5
+               )
                AND NOT EXISTS (
                    SELECT 1
                    FROM node_dependencies AS dependency
@@ -246,6 +251,7 @@ impl Store {
         .bind(&request.capabilities)
         .bind(request.fairness_seed)
         .bind(&request.trust_pool)
+        .bind(&request.agent_id)
         .fetch_optional(&mut *tx)
         .await?;
 

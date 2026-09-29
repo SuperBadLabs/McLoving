@@ -160,6 +160,8 @@ pub struct SessionReceipt {
 pub struct SessionFeatures {
     /// The controller confirmed bounded build workspace transfer semantics.
     pub workspace_transfer: bool,
+    /// The controller confirmed build workspace affinity (PAR-015).
+    pub workspace_affinity: bool,
     /// `PollWork` waits server-side, so an empty offer can be re-entered
     /// without a client-side fixed-interval delay.
     pub long_poll_work_delivery: bool,
@@ -190,6 +192,10 @@ impl SessionFeatures {
             workspace_transfer: cfg!(target_os = "linux")
                 && features.iter().any(|feature| {
                     feature == mcloving_domain::workspace::WORKSPACE_TRANSFER_FEATURE
+                }),
+            workspace_affinity: cfg!(target_os = "linux")
+                && features.iter().any(|feature| {
+                    feature == mcloving_domain::workspace::WORKSPACE_AFFINITY_FEATURE
                 }),
             long_poll_work_delivery: features
                 .iter()
@@ -1458,6 +1464,7 @@ const fn platform_feature() -> &'static str {
 fn session_protocol_features(mut features: Vec<String>) -> Vec<String> {
     if cfg!(target_os = "linux") {
         features.push(mcloving_domain::workspace::WORKSPACE_TRANSFER_FEATURE.to_owned());
+        features.push(mcloving_domain::workspace::WORKSPACE_AFFINITY_FEATURE.to_owned());
     }
     features
 }
@@ -1470,6 +1477,7 @@ fn session_capabilities() -> Vec<String> {
     ];
     if cfg!(target_os = "linux") {
         capabilities.push(mcloving_domain::workspace::WORKSPACE_TRANSFER_CAPABILITY.to_owned());
+        capabilities.push(mcloving_domain::workspace::WORKSPACE_AFFINITY_CAPABILITY.to_owned());
     }
     // Only the Unix executor lays out per-step spools; a Windows agent that
     // advertised this would be offered work it must then refuse for good.
@@ -1526,6 +1534,7 @@ pub async fn run_execution_service_smoke(
     journal.accept(&acceptance)?;
     let request = ExecutionRequest {
         workspace_seed: None,
+        reuse_existing_workspace: false,
         step_ordinal: None,
         container: None,
         workspace_root: workspace_root.to_owned(),
@@ -1592,6 +1601,7 @@ pub async fn run_creation_boundary_service_smoke(
     journal.accept(&acceptance)?;
     let request = ExecutionRequest {
         workspace_seed: None,
+        reuse_existing_workspace: false,
         step_ordinal: None,
         container: None,
         workspace_root: workspace_root.to_owned(),

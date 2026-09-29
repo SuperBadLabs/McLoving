@@ -34,7 +34,9 @@ use mcloving_domain::artifacts::ArtifactSpec;
 use mcloving_domain::cache_intent::{CacheIntentSpec, CacheWorkContext, cache_assignment_digest};
 use mcloving_domain::input_intent::{InputIntentSpec, InputWorkContext, input_assignment_digest};
 use mcloving_domain::source_intent::CheckoutStepSpec;
-use mcloving_domain::workspace::{WorkspaceGrant, WorkspaceTransferResult};
+use mcloving_domain::workspace::{
+    WorkspaceAffinityGrant, WorkspaceAffinityMode, WorkspaceGrant, WorkspaceTransferResult,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -191,6 +193,7 @@ struct ValidatedAssignment {
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     work_context: CacheWorkContext,
     workspace_grant: Option<WorkspaceGrant>,
+    workspace_affinity: Option<WorkspaceAffinityGrant>,
     authority: WorkAuthority,
     workspace: PathBuf,
     payload_digest: [u8; 32],
@@ -424,6 +427,11 @@ pub(super) async fn poll_and_run_one(
     if !assignment.workspace_transfer_json.is_empty() && !features.workspace_transfer {
         return Err(AgentError::InvalidAssignment(
             "workspace transfer was not negotiated".to_owned(),
+        ));
+    }
+    if !assignment.workspace_affinity_json.is_empty() && !features.workspace_affinity {
+        return Err(AgentError::InvalidAssignment(
+            "workspace affinity was not negotiated".to_owned(),
         ));
     }
     match validate_assignment_with_features(config, session_epoch, assignment, features)? {
@@ -958,10 +966,37 @@ fn validate_assignment_with_features(
         }
         Some(grant)
     };
-    let workspace = PathBuf::from(format!(
-        "{}/{}/{}",
-        assignment.organization_id, assignment.attempt_id, assignment.fence_token
-    ));
+    let workspace_affinity = if assignment.workspace_affinity_json.is_empty() {
+        None
+    } else {
+        if !cfg!(target_os = "linux") || assignment.workspace_affinity_json.len() > 4_096 {
+            return Err(AgentError::InvalidAssignment(
+                "unsupported workspace affinity".to_owned(),
+            ));
+        }
+        if workspace_grant.is_some() {
+            return Err(AgentError::InvalidAssignment(
+                "workspace affinity and workspace transfer are mutually exclusive".to_owned(),
+            ));
+        }
+        let grant: WorkspaceAffinityGrant =
+            serde_json::from_slice(&assignment.workspace_affinity_json)?;
+        grant
+            .validate()
+            .map_err(|error| AgentError::InvalidAssignment(error.to_string()))?;
+        Some(grant)
+    };
+    let workspace = if workspace_affinity.is_some() {
+        PathBuf::from(format!(
+            "{}/{}/workspace",
+            assignment.organization_id, assignment.build_id
+        ))
+    } else {
+        PathBuf::from(format!(
+            "{}/{}/{}",
+            assignment.organization_id, assignment.attempt_id, assignment.fence_token
+        ))
+    };
     let authority = WorkAuthority {
         agent_id: config.agent_id.clone(),
         session_epoch,
@@ -988,6 +1023,7 @@ fn validate_assignment_with_features(
                     checkouts: Vec::new(),
                     work_context: cache_context,
                     workspace_grant,
+                    workspace_affinity: workspace_affinity.clone(),
                     authority,
                     workspace,
                     payload_digest,
@@ -1046,6 +1082,11 @@ fn validate_assignment_with_features(
                         "artifact work requires a session that negotiated artifact-upload-v1",
                     ));
                 }
+                if workspace_affinity.is_some() && !features.workspace_affinity {
+                    return Ok(AssignmentDisposition::ForAnotherRuntime(
+                        "workspace affinity requires a session that negotiated build-workspace-affinity-v1",
+                    ));
+                }
                 if workspace_grant.is_some() {
                     return Ok(AssignmentDisposition::Unsupported(UnsupportedAssignment {
                         authority,
@@ -1060,6 +1101,7 @@ fn validate_assignment_with_features(
                     checkouts,
                     work_context: cache_context,
                     workspace_grant: None,
+                    workspace_affinity: workspace_affinity.clone(),
                     authority,
                     workspace,
                     payload_digest,
@@ -1097,6 +1139,7 @@ fn validate_assignment_with_features(
                         checkouts: Vec::new(),
                         work_context: cache_context,
                         workspace_grant,
+                        workspace_affinity: workspace_affinity.clone(),
                         authority,
                         workspace,
                         payload_digest,
@@ -1135,6 +1178,7 @@ fn validate_assignment_with_features(
                         checkouts: Vec::new(),
                         work_context: cache_context,
                         workspace_grant,
+                        workspace_affinity: workspace_affinity.clone(),
                         authority,
                         workspace,
                         payload_digest,
@@ -2110,6 +2154,11 @@ async fn run_assignment(
                 } else {
                     None
                 },
+                reuse_existing_workspace: index == 0
+                    && matches!(
+                        assignment.workspace_affinity.as_ref().map(|g| g.mode),
+                        Some(WorkspaceAffinityMode::Reuse)
+                    ),
                 step_ordinal: multi_step.then_some(ordinal),
                 container: container_runtime.as_ref().zip(step_container.as_ref()).map(
                     |((runtime, image), name)| mcloving_agent_runtime::executor::ContainerSpec {
@@ -2694,6 +2743,16 @@ async fn run_assignment(
             published,
             Some(outcome.process_id),
         )?;
+        let retain_workspace = matches!(published, WorkOutcome::Succeeded)
+            && assignment
+                .workspace_affinity
+                .as_ref()
+                .is_some_and(|grant| grant.retain_on_success);
+        if retain_workspace {
+            write_affinity_retain_marker(&config.workspace_root, &assignment.workspace).await?;
+        } else {
+            clear_affinity_retain_marker(&config.workspace_root, &assignment.workspace).await?;
+        }
         reclaim_spool_entries(
             config,
             &organization,
@@ -2703,6 +2762,7 @@ async fn run_assignment(
             &logs,
             Some(&result),
             &assignment.workspace,
+            retain_workspace,
         )
         .await?;
         Ok(())
@@ -4196,6 +4256,8 @@ async fn reclaim_attempt_spools(
     config: &AgentConfig,
     attempt: &mcloving_agent_runtime::ReconciliationAttempt,
 ) -> Result<(), AgentError> {
+    let retain_workspace =
+        affinity_retain_marker_present(&config.workspace_root, &attempt.workspace).await?;
     reclaim_spool_entries(
         config,
         &attempt.organization_id,
@@ -4205,6 +4267,7 @@ async fn reclaim_attempt_spools(
         &attempt.logs,
         attempt.result.as_ref(),
         &attempt.workspace,
+        retain_workspace,
     )
     .await
 }
@@ -4242,6 +4305,41 @@ async fn reclaim_spool_entries(
         session_epoch,
     )?;
     Ok(())
+}
+
+const AFFINITY_RETAIN_MARKER: &str = ".mcloving-affinity-retain";
+
+async fn write_affinity_retain_marker(
+    workspace_root: &Path,
+    workspace: &Path,
+) -> Result<(), AgentError> {
+    let path = workspace_root.join(workspace).join(AFFINITY_RETAIN_MARKER);
+    tokio::fs::write(&path, b"retain\n").await?;
+    Ok(())
+}
+
+async fn clear_affinity_retain_marker(
+    workspace_root: &Path,
+    workspace: &Path,
+) -> Result<(), AgentError> {
+    let path = workspace_root.join(workspace).join(AFFINITY_RETAIN_MARKER);
+    match tokio::fs::remove_file(&path).await {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+async fn affinity_retain_marker_present(
+    workspace_root: &Path,
+    workspace: &Path,
+) -> Result<bool, AgentError> {
+    let path = workspace_root.join(workspace).join(AFFINITY_RETAIN_MARKER);
+    match tokio::fs::symlink_metadata(&path).await {
+        Ok(metadata) => Ok(metadata.is_file()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
+    }
 }
 
 async fn remove_attempt_workspace(
@@ -4774,6 +4872,7 @@ async fn finalize_without_process(
         &[],
         Some(&result),
         workspace,
+        false,
     )
     .await?;
     Ok(())

@@ -851,6 +851,7 @@ impl AgentControl for ControllerAgentService {
             ACCEPT_LEASE_STATE_FEATURE.to_owned(),
             INLINE_TERMINAL_LOGS_FEATURE.to_owned(),
             mcloving_domain::workspace::WORKSPACE_TRANSFER_FEATURE.to_owned(),
+            mcloving_domain::workspace::WORKSPACE_AFFINITY_FEATURE.to_owned(),
             mcloving_domain::multi_step::MULTI_STEP_EXECUTION_FEATURE.to_owned(),
             mcloving_domain::live_logs::LIVE_LOG_STREAM_FEATURE.to_owned(),
             mcloving_domain::artifacts::ARTIFACT_UPLOAD_FEATURE.to_owned(),
@@ -1201,6 +1202,24 @@ impl AgentControl for ControllerAgentService {
         {
             capabilities.retain(|capability| {
                 capability != mcloving_domain::artifacts::ARTIFACT_UPLOAD_CAPABILITY
+            });
+        }
+        // PAR-015: multi-stage workspace affinity is the same shape — strip the
+        // capability unless this session negotiated the wire feature.
+        if capabilities.iter().any(|capability| {
+            capability == mcloving_domain::workspace::WORKSPACE_AFFINITY_CAPABILITY
+        }) && !self
+            .store
+            .agent_session_supports(
+                &request.agent_id,
+                request.session_epoch,
+                mcloving_domain::workspace::WORKSPACE_AFFINITY_FEATURE,
+            )
+            .await
+            .map_err(internal_store_error)?
+        {
+            capabilities.retain(|capability| {
+                capability != mcloving_domain::workspace::WORKSPACE_AFFINITY_CAPABILITY
             });
         }
         // Subscribe before the first claim query. PostgreSQL notifications are
@@ -1995,6 +2014,13 @@ async fn try_assign_work(
             .map(serde_json::to_vec)
             .transpose()
             .map_err(|error| Status::internal(format!("serialize workspace grant: {error}")))?
+            .unwrap_or_default(),
+        workspace_affinity_json: execution
+            .workspace_affinity
+            .as_ref()
+            .map(serde_json::to_vec)
+            .transpose()
+            .map_err(|error| Status::internal(format!("serialize workspace affinity: {error}")))?
             .unwrap_or_default(),
     };
     if execution
@@ -3922,7 +3948,7 @@ mod cache_intent_tests {
     use super::*;
     fn assignment() -> WorkAssignment {
         let id = |v| Uuid::from_u128(v).to_string();
-        WorkAssignment {organization_id:id(1),project_id:id(2),pipeline_id:id(3),build_id:id(4),node_id:id(5),attempt_id:id(6),fence_token:1,execution_spec_json:serde_json::to_vec(&serde_json::json!({"version":3,"steps":[{"kind":"cache_intent","mapping_id":"fixture","mapping_digest":format!("sha256:{}","a".repeat(64)),"operation":"read","logical_key_sha256":"b".repeat(64),"input_sha256":"c".repeat(64),"timeout_seconds":30}]})).unwrap(),payload_digest:Vec::new(),workspace_transfer_json:Vec::new()}
+        WorkAssignment {organization_id:id(1),project_id:id(2),pipeline_id:id(3),build_id:id(4),node_id:id(5),attempt_id:id(6),fence_token:1,execution_spec_json:serde_json::to_vec(&serde_json::json!({"version":3,"steps":[{"kind":"cache_intent","mapping_id":"fixture","mapping_digest":format!("sha256:{}","a".repeat(64)),"operation":"read","logical_key_sha256":"b".repeat(64),"input_sha256":"c".repeat(64),"timeout_seconds":30}]})).unwrap(),payload_digest:Vec::new(),workspace_transfer_json:Vec::new(),workspace_affinity_json:Vec::new()}
     }
     #[test]
     fn cache_wire_digest_requires_complete_authority_and_exact_typed_payload() {
@@ -3990,7 +4016,7 @@ mod input_intent_tests {
     use super::*;
     fn assignment() -> WorkAssignment {
         let id = |v| Uuid::from_u128(v).to_string();
-        WorkAssignment {organization_id:id(1),project_id:id(2),pipeline_id:id(3),build_id:id(4),node_id:id(5),attempt_id:id(6),fence_token:1,execution_spec_json:serde_json::to_vec(&serde_json::json!({"version":4,"steps":[{"kind":"input_intent","mapping_id":"fixture","mapping_digest":format!("sha256:{}","a".repeat(64)),"timeout_seconds":30}]})).unwrap(),payload_digest:Vec::new(),workspace_transfer_json:Vec::new()}
+        WorkAssignment {organization_id:id(1),project_id:id(2),pipeline_id:id(3),build_id:id(4),node_id:id(5),attempt_id:id(6),fence_token:1,execution_spec_json:serde_json::to_vec(&serde_json::json!({"version":4,"steps":[{"kind":"input_intent","mapping_id":"fixture","mapping_digest":format!("sha256:{}","a".repeat(64)),"timeout_seconds":30}]})).unwrap(),payload_digest:Vec::new(),workspace_transfer_json:Vec::new(),workspace_affinity_json:Vec::new()}
     }
     #[test]
     fn input_wire_digest_requires_complete_authority_and_exact_typed_payload() {
