@@ -5125,6 +5125,7 @@ mod tests {
             project_id: String::new(),
             pipeline_id: String::new(),
             workspace_transfer_json: Vec::new(),
+            workspace_affinity_json: Vec::new(),
             organization_id: "00000000-0000-0000-0000-000000000123".to_owned(),
             build_id: "00000000-0000-0000-0000-000000000124".to_owned(),
             node_id: "00000000-0000-0000-0000-000000000125".to_owned(),

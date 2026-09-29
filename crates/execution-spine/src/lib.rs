@@ -429,6 +429,7 @@ pub async fn run_claim(
     ));
     let request = ExecutionRequest {
         workspace_seed: None,
+        reuse_existing_workspace: false,
         step_ordinal: None,
         container: None,
         workspace_root: config.workspace_root.clone(),
