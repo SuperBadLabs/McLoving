@@ -70,7 +70,10 @@ pub(crate) async fn record_successful_agent(
     Ok(())
 }
 
-/// Fail ready affinity successors whose pinned agent has no live session.
+/// Fail ready affinity successors whose pinned agent has no live session
+/// that can still run the queued node (feature, trust pool, and full
+/// required_capabilities). A pinned agent missing a later stage capability
+/// must not leave the build queued forever.
 pub(crate) async fn fail_orphaned_affinity_builds(
     tx: &mut Transaction<'_, Postgres>,
     organization_id: Uuid,
@@ -91,17 +94,18 @@ pub(crate) async fn fail_orphaned_affinity_builds(
            AND n.status = 'queued'
            AND n.cancellation_requested_at IS NULL
            AND b.cancellation_requested_at IS NULL
-           AND NOT EXISTS (
-               SELECT 1 FROM agent_sessions AS s
-               WHERE s.agent_id = b.workspace_affinity_agent_id
-                 AND $2 = ANY(s.capabilities)
-                 AND $3 = ANY(s.features)
-                 AND EXISTS (
-                     SELECT 1 FROM nodes AS qn
-                     WHERE qn.build_id = b.id
-                       AND qn.organization_id = b.organization_id
-                       AND qn.status = 'queued'
+           AND EXISTS (
+               SELECT 1 FROM nodes AS qn
+               WHERE qn.build_id = b.id
+                 AND qn.organization_id = b.organization_id
+                 AND qn.status = 'queued'
+                 AND NOT EXISTS (
+                     SELECT 1 FROM agent_sessions AS s
+                     WHERE s.agent_id = b.workspace_affinity_agent_id
+                       AND $2 = ANY(s.capabilities)
+                       AND $3 = ANY(s.features)
                        AND qn.required_trust_pool = s.trust_pool
+                       AND qn.required_capabilities <@ s.capabilities
                  )
            )",
     )

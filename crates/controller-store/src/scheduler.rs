@@ -216,6 +216,37 @@ impl Store {
                    b.workspace_affinity_agent_id IS NULL
                    OR b.workspace_affinity_agent_id = $5
                )
+               AND (
+                   -- Once pinned, claim_next already restricts to that agent.
+                   -- Before the pin, only claim an affinity multi-stage build when
+                   -- this agent can satisfy every work node's required_capabilities,
+                   -- or a later stage can queue forever against an under-capable pin.
+                   b.workspace_affinity_agent_id IS NOT NULL
+                   OR b.workspace_namespace IS NOT NULL
+                   OR NOT (
+                       b.dag_mode
+                       AND (
+                           SELECT count(*)::int FROM nodes AS wn
+                           WHERE wn.organization_id = n.organization_id
+                             AND wn.build_id = n.build_id
+                             AND wn.node_kind = 'work'
+                       ) > 1
+                       AND NOT EXISTS (
+                           SELECT 1 FROM nodes AS wn
+                           WHERE wn.organization_id = n.organization_id
+                             AND wn.build_id = n.build_id
+                             AND wn.node_kind = 'work'
+                             AND NOT ($6 = ANY(wn.required_capabilities))
+                       )
+                   )
+                   OR NOT EXISTS (
+                       SELECT 1 FROM nodes AS wn
+                       WHERE wn.organization_id = n.organization_id
+                         AND wn.build_id = n.build_id
+                         AND wn.node_kind = 'work'
+                         AND NOT (wn.required_capabilities <@ $2::text[])
+                   )
+               )
                AND NOT EXISTS (
                    SELECT 1
                    FROM node_dependencies AS dependency
@@ -252,6 +283,7 @@ impl Store {
         .bind(request.fairness_seed)
         .bind(&request.trust_pool)
         .bind(&request.agent_id)
+        .bind(mcloving_domain::workspace::WORKSPACE_AFFINITY_CAPABILITY)
         .fetch_optional(&mut *tx)
         .await?;
 
