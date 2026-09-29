@@ -57,3 +57,13 @@ epoch can leave a stale row and a pinned successor queued until an operator
 clears it. A presence lease or session heartbeat is follow-up work outside this
 ticket; PAR-015 does not blind-reschedule to a different agent.
 
+## Residual: rolling-upgrade capability strip
+
+`workspace-affinity-v1` is advertised by Linux agents and stripped on work
+poll by controllers that negotiated `build-workspace-affinity-v1`, matching
+`multi-step-v1` and `artifact-upload-v1`. An older controller replica that
+neither negotiates the feature nor strips the capability can still claim a
+node requiring affinity and omit `workspace_affinity_json` / the pin. Full
+protection is completing the controller rollout before admitting multi-stage
+affinity builds; this ticket does not add a separate fleet-version gate.
+
