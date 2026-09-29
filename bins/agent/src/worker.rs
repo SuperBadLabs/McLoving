@@ -2080,6 +2080,24 @@ async fn run_assignment(
     let attempt_redactions =
         execution_environment(BTreeMap::new(), credentials.clone())?.redactions;
     let completion_result: Result<(), AgentError> = async {
+        // Bind the retain marker to this Reuse attempt before any step runs so
+        // a pre-result crash + matching discharge cannot still see the inherited
+        // Create mode and delete the shared tree the pinned replacement needs.
+        if matches!(
+            assignment
+                .workspace_affinity
+                .as_ref()
+                .map(|grant| grant.mode),
+            Some(WorkspaceAffinityMode::Reuse)
+        ) {
+            write_affinity_retain_marker(
+                &config.workspace_root,
+                &assignment.workspace,
+                None,
+                WorkspaceAffinityMode::Reuse,
+            )
+            .await?;
+        }
         // One attempt, several ordered steps (PAR-010). Every step's spool is
         // journaled before the first publication, every step's outcome is
         // recorded in the durable result, and execution stops at the first
@@ -4376,12 +4394,14 @@ async fn reclaim_attempt_spools(
         affinity_retain_marker_mode(&config.workspace_root, &attempt.workspace).await?;
     let retain_workspace = if !marker_present || cancelled_override {
         false
-    } else if let Some(should_retain) = durable_retain {
-        // This attempt's durable disposition always wins over a prior discharge.
-        should_retain
     } else if discharged {
-        // Discharged Create trees must not block a Create retry; Reuse trees stay.
+        // Matching discharge of THIS attempt: mode decides. A superseded
+        // Reuse tree must stay for the pinned replacement even when this
+        // attempt had already persisted affinity_retain=false; a discharged
+        // Create must clear so an unpinned Create retry can recreate.
         !matches!(marker_mode, Some(WorkspaceAffinityMode::Create))
+    } else if let Some(should_retain) = durable_retain {
+        should_retain
     } else {
         // Pre-result crash: marker exists, no affinity_retain in result yet.
         // Create must clear so a retry can recreate; Reuse must keep the tree.

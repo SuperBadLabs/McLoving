@@ -220,12 +220,37 @@ pub(crate) async fn grant_for_attempt(
                 (
                     -- Count siblings that still need the shared tree: active
                     -- stages and failed ones that remain schedule_retry-able.
-                    SELECT count(*)::int FROM nodes
-                    WHERE organization_id = b.organization_id
-                      AND build_id = b.id
-                      AND node_kind = 'work'
-                      AND id <> $3
-                      AND status NOT IN ('succeeded', 'aborted', 'skipped')
+                    -- Permanently exhausted failures (dead-lettered or latest
+                    -- ordinal already at max_attempts) cannot clear retention.
+                    SELECT count(*)::int FROM nodes AS wn
+                    WHERE wn.organization_id = b.organization_id
+                      AND wn.build_id = b.id
+                      AND wn.node_kind = 'work'
+                      AND wn.id <> $3
+                      AND wn.status NOT IN ('succeeded', 'aborted', 'skipped')
+                      AND NOT (
+                          wn.status = 'failed'
+                          AND (
+                              EXISTS (
+                                  SELECT 1
+                                  FROM dead_letters AS dl
+                                  JOIN attempts AS da
+                                    ON da.id = dl.attempt_id
+                                   AND da.organization_id = dl.organization_id
+                                  WHERE da.organization_id = wn.organization_id
+                                    AND da.node_id = wn.id
+                              )
+                              OR COALESCE(
+                                  (
+                                      SELECT max(a.ordinal)
+                                      FROM attempts AS a
+                                      WHERE a.organization_id = wn.organization_id
+                                        AND a.node_id = wn.id
+                                  ),
+                                  0
+                              ) >= wn.max_attempts
+                          )
+                      )
                 ) AS remaining_after,
                 n.node_kind = 'work' AND $4 = ANY(n.required_capabilities) AS affinity_work
          FROM builds AS b
