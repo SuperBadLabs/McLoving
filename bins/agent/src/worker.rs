@@ -4303,24 +4303,6 @@ pub(super) async fn reclaim_terminal_spools(config: &AgentConfig) -> Result<(), 
     Ok(())
 }
 
-async fn attempt_result_is_aborted(
-    config: &AgentConfig,
-    attempt: &mcloving_agent_runtime::ReconciliationAttempt,
-) -> Result<bool, AgentError> {
-    let Some(result_entry) = &attempt.result else {
-        return Ok(false);
-    };
-    let content = match verified_spool_content(&config.workspace_root, result_entry, "result").await
-    {
-        Ok(content) => content,
-        Err(_) => return Ok(false),
-    };
-    let Ok(persisted) = serde_json::from_slice::<PersistedResult>(&content) else {
-        return Ok(false);
-    };
-    Ok(persisted.outcome == "aborted")
-}
-
 async fn reclaim_attempt_spools(
     config: &AgentConfig,
     attempt: &mcloving_agent_runtime::ReconciliationAttempt,
@@ -4329,11 +4311,15 @@ async fn reclaim_attempt_spools(
     let marker_present =
         affinity_retain_marker_present(&config.workspace_root, &attempt.workspace).await?;
     // Agent-owned retain intent survives Reuse execution. Keep the tree for a
-    // later stage or a pinned retry. Cancellation that overrode a Failed+Reuse
-    // publish leaves phase Aborted with an aborted durable result — clear then.
-    // Operator-superseded discharge is Aborted without that cancelled result.
+    // later stage or a pinned retry. Cancellation that overrode publication
+    // reaches reclaim as Aborted while the journal attempt was still
+    // Finalizing/Cancelling (result bytes may still say failed). Operator
+    // schedule_retry discharge is Aborted from ReconciliationRequired instead.
     let cancelled_override = matches!(phase, AttemptPhase::Aborted)
-        && attempt_result_is_aborted(config, attempt).await?;
+        && matches!(
+            attempt.phase,
+            AttemptPhase::Finalizing | AttemptPhase::Cancelling
+        );
     let retain_workspace = marker_present && !cancelled_override;
     if marker_present && !retain_workspace {
         clear_affinity_retain_marker(&config.workspace_root, &attempt.workspace).await?;

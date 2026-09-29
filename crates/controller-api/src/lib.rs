@@ -5130,6 +5130,26 @@ async fn admit_pipeline_parameters(
         )
     })?;
     let multi_stage = pipeline.stages.len() > 1;
+    if multi_stage {
+        let has_connector = pipeline.stages.iter().any(|stage| {
+            stage
+                .steps
+                .iter()
+                .any(|step| matches!(step, Step::ConnectorIntent(_)))
+        });
+        if has_connector {
+            // Connector intents run on the controller-owned effect runtime, not
+            // a remote affinity agent. Pinning the build to a remote agent (or
+            // requiring affinity on the effect worker) queues the pipeline
+            // forever. Reject at admission until affinity routing can name
+            // controller-owned stages explicitly.
+            return Err(ApiError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "pipeline_rejected",
+                "multi-stage workspace affinity cannot include connector_intent stages",
+            ));
+        }
+    }
     let nodes = pipeline
         .stages
         .iter()
