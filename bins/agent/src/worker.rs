@@ -2656,8 +2656,15 @@ async fn run_assignment(
         // A planted symlink or directory at the marker name is replaced or
         // refused; a rename-and-replace decoy fails the inode check.
         let mut affinity_retain_error: Option<String> = None;
-        let intend_retain =
-            affinity_should_retain_workspace(assignment.workspace_affinity.as_ref(), terminal);
+        let lease_loss_reuse_retain = lease_loss.is_some()
+            && matches!(
+                assignment.workspace_affinity.as_ref().map(|grant| grant.mode),
+                Some(WorkspaceAffinityMode::Reuse)
+            );
+        let intend_retain = affinity_should_retain_workspace(
+            assignment.workspace_affinity.as_ref(),
+            terminal,
+        ) || (terminal == WorkOutcome::Aborted && lease_loss_reuse_retain);
         if intend_retain {
             // Fail closed: never publish a retain-intended terminal without a
             // durable marker. Recovery keys off the marker and would otherwise
@@ -2799,8 +2806,10 @@ async fn run_assignment(
             published,
             Some(outcome.process_id),
         )?;
-        let retain_workspace =
-            affinity_should_retain_workspace(assignment.workspace_affinity.as_ref(), published);
+        let retain_workspace = affinity_should_retain_workspace(
+            assignment.workspace_affinity.as_ref(),
+            published,
+        ) || (published == WorkOutcome::Aborted && lease_loss_reuse_retain);
         if assignment.workspace_affinity.is_some() && !retain_workspace {
             clear_affinity_retain_marker(&config.workspace_root, &assignment.workspace).await?;
         }
@@ -4303,6 +4312,19 @@ pub(super) async fn reclaim_terminal_spools(config: &AgentConfig) -> Result<(), 
     Ok(())
 }
 
+async fn attempt_result_is_lease_loss(
+    config: &AgentConfig,
+    attempt: &mcloving_agent_runtime::ReconciliationAttempt,
+) -> Result<bool, AgentError> {
+    let Some(result) = recovered_persisted_result(config, attempt).await? else {
+        return Ok(false);
+    };
+    Ok(result
+        .reason
+        .as_deref()
+        .is_some_and(|reason| reason.starts_with("lease_lost_during_execution:")))
+}
+
 async fn reclaim_attempt_spools(
     config: &AgentConfig,
     attempt: &mcloving_agent_runtime::ReconciliationAttempt,
@@ -4315,11 +4337,13 @@ async fn reclaim_attempt_spools(
     // reaches reclaim as Aborted while the journal attempt was still
     // Finalizing/Cancelling (result bytes may still say failed). Operator
     // schedule_retry discharge is Aborted from ReconciliationRequired instead.
+    let lease_loss_abort = attempt_result_is_lease_loss(config, attempt).await?;
     let cancelled_override = matches!(phase, AttemptPhase::Aborted)
         && matches!(
             attempt.phase,
             AttemptPhase::Finalizing | AttemptPhase::Cancelling
-        );
+        )
+        && !lease_loss_abort;
     let retain_workspace = marker_present && !cancelled_override;
     if marker_present && !retain_workspace {
         clear_affinity_retain_marker(&config.workspace_root, &attempt.workspace).await?;
@@ -4492,10 +4516,10 @@ fn open_or_create_affinity_agent_dir(
             Err(nix::errno::Errno::ENOENT) => {
                 nix::sys::stat::mkdirat(&dir, c_name.as_c_str(), Mode::from_bits_truncate(0o700))
                     .map_err(|error| {
-                        AgentError::InvalidAssignment(format!(
-                            "affinity retain agent mkdir refused: {error}"
-                        ))
-                    })?;
+                    AgentError::InvalidAssignment(format!(
+                        "affinity retain agent mkdir refused: {error}"
+                    ))
+                })?;
                 created_parents.push(dir);
                 dir = openat(
                     created_parents.last().expect("parent just pushed"),
@@ -4529,7 +4553,7 @@ fn write_affinity_retain_marker_unix(
     workspace: &Path,
     expected: Option<&mcloving_agent_runtime::executor::WorkspaceDirIdentity>,
 ) -> Result<(), AgentError> {
-    use nix::fcntl::{OFlag, open, openat};
+    use nix::fcntl::{OFlag, openat};
     use nix::sys::stat::{Mode, fstat, fstatat};
     use nix::unistd::{UnlinkatFlags, fsync, unlinkat, write as nix_write};
     // Verify the workload path still names the executor-retained directory
@@ -5205,7 +5229,12 @@ async fn finalize_without_process(
     // before begin_finalization so recovery cannot publish then scrub a Reuse tree.
     let mut affinity_retain_error: Option<String> = None;
     let mut termination = reason;
-    let intend_retain = affinity_should_retain_workspace(workspace_affinity, outcome);
+    let lease_loss_reuse_retain = matches!(
+        workspace_affinity.map(|grant| grant.mode),
+        Some(WorkspaceAffinityMode::Reuse)
+    ) && termination.starts_with("lease_lost_during_execution:");
+    let intend_retain = affinity_should_retain_workspace(workspace_affinity, outcome)
+        || (outcome == WorkOutcome::Aborted && lease_loss_reuse_retain);
     if intend_retain {
         // Processless paths have no executor-retained handle; still require a
         // durable marker before publication so recovery cannot scrub a Reuse tree.
@@ -5281,7 +5310,8 @@ async fn finalize_without_process(
         published,
         None,
     )?;
-    let retain_workspace = affinity_should_retain_workspace(workspace_affinity, published);
+    let retain_workspace = affinity_should_retain_workspace(workspace_affinity, published)
+        || (published == WorkOutcome::Aborted && lease_loss_reuse_retain);
     if workspace_affinity.is_some() && !retain_workspace {
         clear_affinity_retain_marker(&config.workspace_root, workspace).await?;
     }

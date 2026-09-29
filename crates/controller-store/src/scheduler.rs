@@ -180,7 +180,13 @@ impl Store {
         )
         .fetch_one(&mut *tx)
         .await?;
-        crate::affinity::fail_orphaned_affinity_builds(&mut tx, request.organization_id).await?;
+        // Unfenced Store::claim_next callers never enroll agent_sessions; orphan
+        // detection would false-fail a pinned build whose claimant is present in
+        // the request. Session-fenced polls keep the check.
+        if session_epoch.is_some() {
+            crate::affinity::fail_orphaned_affinity_builds(&mut tx, request.organization_id)
+                .await?;
+        }
 
         let candidate = sqlx::query(
             "SELECT n.id AS node_id, n.build_id, a.id AS attempt_id

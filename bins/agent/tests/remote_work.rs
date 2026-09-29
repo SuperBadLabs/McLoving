@@ -1020,7 +1020,33 @@ async fn queued_stages_drain_without_waiting_out_the_poll_interval() {
     })
     .await
     .expect("three queued stages complete without draining one per interval");
-    assert_eq!(status.status, "succeeded");
+    if status.status != "succeeded" {
+        let events: Vec<(String, serde_json::Value)> = sqlx::query_as(
+            "SELECT kind, payload
+             FROM build_events
+             WHERE organization_id = $1 AND build_id = $2
+             ORDER BY id ASC",
+        )
+        .bind(organization_id)
+        .bind(admission.build_id)
+        .fetch_all(&pool)
+        .await
+        .unwrap_or_default();
+        let nodes: Vec<(String, Option<String>, String)> = sqlx::query_as(
+            "SELECT node_key, logical_outcome, status FROM nodes
+             WHERE organization_id = $1 AND build_id = $2
+             ORDER BY queued_at ASC NULLS LAST, id ASC",
+        )
+        .bind(organization_id)
+        .bind(admission.build_id)
+        .fetch_all(&pool)
+        .await
+        .unwrap_or_default();
+        panic!(
+            "drain-gate expected succeeded, got {}; nodes={nodes:?}; events={events:?}",
+            status.status
+        );
+    }
     let drained_in = activity.elapsed();
     assert!(
         drained_in < Duration::from_millis(7500),
