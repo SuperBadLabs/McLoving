@@ -4273,8 +4273,7 @@ async fn reclaim_attempt_spools(
     // Retention is only for a published success. A marker written before
     // complete_work must not keep the tree when cancellation overrode the
     // terminal or the attempt failed.
-    let retain_workspace =
-        marker_present && matches!(attempt.phase, AttemptPhase::Succeeded);
+    let retain_workspace = marker_present && matches!(attempt.phase, AttemptPhase::Succeeded);
     if marker_present && !retain_workspace {
         clear_affinity_retain_marker(&config.workspace_root, &attempt.workspace).await?;
     }

@@ -12,6 +12,7 @@ use mcloving_controller_store::{
     PipelineOperationalStateTransition, PipelineOperationalStateTransitionOutcome,
     PipelinePutOutcome, PipelineWrite, RECOVERY_OPERATIONS_V6, RUNTIME_FUNCTION_BOUNDARY_V23,
     RetryDecision, STATE_TRANSFER_V17, Store, StoreError, TENANT_AUDIT_V11, TENANT_SECURITY_V2,
+    WORKSPACE_AFFINITY_V43,
     TerminalOutcome, WaitReason,
 };
 use serde_json::json;
@@ -922,6 +923,19 @@ async fn migration_0027_backfills_existing_enabled_pipelines_and_freezes_unbound
     .await
     .expect("read historic build binding");
     assert_eq!(binding, (None, None, None, None));
+    // claim_next's affinity orphan check reads builds.workspace_affinity_agent_id
+    // (migration 43). Apply that column on top of the v27 schema so the current
+    // scheduler SQL can run while the unbound-build refusal under test stays.
+    let mut tx = pool.begin().await.expect("begin v43 affinity column");
+    sqlx::raw_sql(WORKSPACE_AFFINITY_V43)
+        .execute(&mut *tx)
+        .await
+        .expect("apply v43");
+    sqlx::query("INSERT INTO mcloving_schema_migrations (version) VALUES (43)")
+        .execute(&mut *tx)
+        .await
+        .expect("record v43");
+    tx.commit().await.expect("commit v43");
     let migrated_store = Store::new(pool.clone());
     assert!(
         migrated_store
