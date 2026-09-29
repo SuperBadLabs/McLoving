@@ -635,8 +635,9 @@ pub const WORKSPACE_AFFINITY_CAPABILITY: &str = "workspace-affinity-v1";
 pub struct WorkspaceAffinityGrant {
     pub version: u32,
     pub mode: WorkspaceAffinityMode,
-    /// When true and the attempt succeeds, keep the build workspace for a
-    /// later stage. Failures, cancellations and the last stage always remove it.
+    /// When true, keep the build workspace for a later stage on success, and
+    /// also on failed `Reuse` attempts so a retry can reopen the shared tree.
+    /// Create failures, cancellations, and last-stage completion remove it.
     pub retain_on_success: bool,
 }
 

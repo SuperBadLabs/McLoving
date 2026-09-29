@@ -248,6 +248,10 @@ struct ProcesslessCompletion<'a> {
     session_epoch: u64,
     outcome: WorkOutcome,
     reason: String,
+    /// Affinity grant for this attempt, when the stage is pinned. Processless
+    /// failures on `Reuse` must retain the shared tree or a retry reopens a
+    /// workspace the previous failure already deleted.
+    workspace_affinity: Option<&'a WorkspaceAffinityGrant>,
     /// Per-step records of a multi-step attempt whose first step never
     /// spawned; empty for every single-step processless completion.
     steps: Vec<StepRecord>,
@@ -1671,6 +1675,7 @@ async fn refuse_unsupported_assignment(
             session_epoch,
             outcome,
             reason,
+            workspace_affinity: None,
             steps: Vec::new(),
         },
         AuthorityRpcControl {
@@ -1787,6 +1792,7 @@ async fn run_assignment(
                 session_epoch,
                 outcome: WorkOutcome::Aborted,
                 reason: "cancelled_before_process_spawn".to_owned(),
+                workspace_affinity: assignment.workspace_affinity.as_ref(),
                 steps: Vec::new(),
             },
             AuthorityRpcControl {
@@ -1859,6 +1865,7 @@ async fn run_assignment(
                         .as_ref()
                         .map_or("helper_binding_rejected", HelperIntent::binding_failure)
                         .to_owned(),
+                    workspace_affinity: assignment.workspace_affinity.as_ref(),
                     steps: Vec::new(),
                 },
                 AuthorityRpcControl {
@@ -1892,6 +1899,7 @@ async fn run_assignment(
                     session_epoch,
                     outcome: WorkOutcome::Failed,
                     reason: "source_binding_rejected".to_owned(),
+                    workspace_affinity: assignment.workspace_affinity.as_ref(),
                     steps: Vec::new(),
                 },
                 AuthorityRpcControl {
@@ -1988,6 +1996,7 @@ async fn run_assignment(
                         session_epoch,
                         outcome: WorkOutcome::Aborted,
                         reason: "cancelled_while_waiting_for_credentials".to_owned(),
+                        workspace_affinity: assignment.workspace_affinity.as_ref(),
                         steps: Vec::new(),
                     },
                     AuthorityRpcControl {
@@ -2034,6 +2043,7 @@ async fn run_assignment(
                     session_epoch,
                     outcome: WorkOutcome::Aborted,
                     reason: "cancelled_while_starting_work".to_owned(),
+                    workspace_affinity: assignment.workspace_affinity.as_ref(),
                     steps: Vec::new(),
                 },
                 AuthorityRpcControl {
@@ -2407,6 +2417,7 @@ async fn run_assignment(
                                 session_epoch,
                                 outcome: spawn_outcome,
                                 reason: spawn_reason,
+                                workspace_affinity: assignment.workspace_affinity.as_ref(),
                                 steps: if multi_step {
                                     vec![spawn_record]
                                 } else {
@@ -2646,14 +2657,8 @@ async fn run_assignment(
         // symlink or directory at the marker name is replaced or refused here,
         // and a refusal becomes a failed terminal instead of a journaled success.
         let mut affinity_retain_error: Option<String> = None;
-        let intend_retain = match assignment.workspace_affinity.as_ref() {
-            Some(grant) if grant.retain_on_success => match terminal {
-                WorkOutcome::Succeeded => true,
-                WorkOutcome::Failed if matches!(grant.mode, WorkspaceAffinityMode::Reuse) => true,
-                _ => false,
-            },
-            _ => false,
-        };
+        let intend_retain =
+            affinity_should_retain_workspace(assignment.workspace_affinity.as_ref(), terminal);
         if intend_retain {
             if let Err(error) =
                 write_affinity_retain_marker(&config.workspace_root, &assignment.workspace).await
@@ -2776,14 +2781,8 @@ async fn run_assignment(
             published,
             Some(outcome.process_id),
         )?;
-        let retain_workspace = match assignment.workspace_affinity.as_ref() {
-            Some(grant) if grant.retain_on_success => match published {
-                WorkOutcome::Succeeded => true,
-                WorkOutcome::Failed if matches!(grant.mode, WorkspaceAffinityMode::Reuse) => true,
-                _ => false,
-            },
-            _ => false,
-        };
+        let retain_workspace =
+            affinity_should_retain_workspace(assignment.workspace_affinity.as_ref(), published);
         if assignment.workspace_affinity.is_some() && !retain_workspace {
             clear_affinity_retain_marker(&config.workspace_root, &assignment.workspace).await?;
         }
@@ -5016,6 +5015,24 @@ async fn recovered_persisted_result(
     Ok(Some(serde_json::from_slice(&content)?))
 }
 
+
+/// Keep the affinity workspace when a later stage must reopen it: success with
+/// `retain_on_success`, or a failed `Reuse` attempt (process or processless).
+/// Create failures clear the tree so a retry does not hit WorkspaceAlreadyExists.
+fn affinity_should_retain_workspace(
+    grant: Option<&WorkspaceAffinityGrant>,
+    outcome: WorkOutcome,
+) -> bool {
+    match grant {
+        Some(grant) if grant.retain_on_success => match outcome {
+            WorkOutcome::Succeeded => true,
+            WorkOutcome::Failed if matches!(grant.mode, WorkspaceAffinityMode::Reuse) => true,
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
 async fn finalize_without_process(
     config: &AgentConfig,
     client: &mut AgentControlClient<Channel>,
@@ -5027,10 +5044,34 @@ async fn finalize_without_process(
         authority,
         workspace,
         session_epoch,
-        outcome,
+        mut outcome,
         reason,
+        workspace_affinity,
         steps,
     } = completion;
+    // Same retain/clear ordering as the process path: plant or clear the marker
+    // before begin_finalization so recovery cannot publish then scrub a Reuse tree.
+    let mut affinity_retain_error: Option<String> = None;
+    let mut termination = reason;
+    let intend_retain = affinity_should_retain_workspace(workspace_affinity, outcome);
+    if intend_retain {
+        if let Err(error) = write_affinity_retain_marker(&config.workspace_root, workspace).await {
+            affinity_retain_error = Some(format!("affinity_retain_refused:{error}"));
+            if outcome == WorkOutcome::Succeeded {
+                outcome = WorkOutcome::Failed;
+            }
+        }
+    } else if workspace_affinity.is_some()
+        && let Err(error) = clear_affinity_retain_marker(&config.workspace_root, workspace).await
+    {
+        affinity_retain_error = Some(format!("affinity_retain_clear_refused:{error}"));
+        if outcome == WorkOutcome::Succeeded {
+            outcome = WorkOutcome::Failed;
+        }
+    }
+    if let Some(error) = affinity_retain_error.as_ref() {
+        termination = error.clone();
+    }
     let result = write_result(
         &config.workspace_root,
         workspace,
@@ -5038,8 +5079,8 @@ async fn finalize_without_process(
             workspace_transfer: None,
             outcome,
             exit_code: None,
-            termination: &reason,
-            reason: Some(&reason),
+            termination: &termination,
+            reason: Some(&termination),
             completion_protocol: WORK_COMPLETION_PROTOCOL,
             cancellation_outcome: None,
             steps: &steps,
@@ -5091,6 +5132,10 @@ async fn finalize_without_process(
         published,
         None,
     )?;
+    let retain_workspace = affinity_should_retain_workspace(workspace_affinity, published);
+    if workspace_affinity.is_some() && !retain_workspace {
+        clear_affinity_retain_marker(&config.workspace_root, workspace).await?;
+    }
     reclaim_spool_entries(
         config,
         &authority.organization_id,
@@ -5100,7 +5145,7 @@ async fn finalize_without_process(
         &[],
         Some(&result),
         workspace,
-        false,
+        retain_workspace,
     )
     .await?;
     Ok(())
@@ -7237,6 +7282,41 @@ mod tests {
         assert!(rendered.contains("directory"), "{rendered}");
         assert!(marker.join("child").is_dir());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn processless_reuse_failure_retains_affinity_workspace() {
+        let reuse = WorkspaceAffinityGrant {
+            version: 1,
+            mode: WorkspaceAffinityMode::Reuse,
+            retain_on_success: true,
+        };
+        let create = WorkspaceAffinityGrant {
+            version: 1,
+            mode: WorkspaceAffinityMode::Create,
+            retain_on_success: true,
+        };
+        assert!(affinity_should_retain_workspace(
+            Some(&reuse),
+            WorkOutcome::Failed
+        ));
+        assert!(affinity_should_retain_workspace(
+            Some(&reuse),
+            WorkOutcome::Succeeded
+        ));
+        assert!(!affinity_should_retain_workspace(
+            Some(&reuse),
+            WorkOutcome::Aborted
+        ));
+        assert!(!affinity_should_retain_workspace(
+            Some(&create),
+            WorkOutcome::Failed
+        ));
+        assert!(affinity_should_retain_workspace(
+            Some(&create),
+            WorkOutcome::Succeeded
+        ));
+        assert!(!affinity_should_retain_workspace(None, WorkOutcome::Failed));
     }
 }
 
