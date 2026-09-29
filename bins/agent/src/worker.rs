@@ -24,6 +24,7 @@ use mcloving_agent_runtime::executor::{
 };
 use mcloving_agent_runtime::executor::{
     flush_terminal_cleanup, remove_terminal_relative_path as remove_runtime_terminal_path,
+    remove_terminal_relative_path_retaining as remove_runtime_terminal_path_retaining,
 };
 use mcloving_agent_runtime::{
     Acceptance, AttemptPhase, Finalization, Journal, LogReservation, MAX_ATTEMPT_OUTPUT_BYTES,
@@ -2658,13 +2659,15 @@ async fn run_assignment(
         let mut affinity_retain_error: Option<String> = None;
         let lease_loss_reuse_retain = lease_loss.is_some()
             && matches!(
-                assignment.workspace_affinity.as_ref().map(|grant| grant.mode),
+                assignment
+                    .workspace_affinity
+                    .as_ref()
+                    .map(|grant| grant.mode),
                 Some(WorkspaceAffinityMode::Reuse)
             );
-        let intend_retain = affinity_should_retain_workspace(
-            assignment.workspace_affinity.as_ref(),
-            terminal,
-        ) || (terminal == WorkOutcome::Aborted && lease_loss_reuse_retain);
+        let intend_retain =
+            affinity_should_retain_workspace(assignment.workspace_affinity.as_ref(), terminal)
+                || (terminal == WorkOutcome::Aborted && lease_loss_reuse_retain);
         if intend_retain {
             // Fail closed: never publish a retain-intended terminal without a
             // durable marker. Recovery keys off the marker and would otherwise
@@ -2806,10 +2809,9 @@ async fn run_assignment(
             published,
             Some(outcome.process_id),
         )?;
-        let retain_workspace = affinity_should_retain_workspace(
-            assignment.workspace_affinity.as_ref(),
-            published,
-        ) || (published == WorkOutcome::Aborted && lease_loss_reuse_retain);
+        let retain_workspace =
+            affinity_should_retain_workspace(assignment.workspace_affinity.as_ref(), published)
+                || (published == WorkOutcome::Aborted && lease_loss_reuse_retain);
         if assignment.workspace_affinity.is_some() && !retain_workspace {
             clear_affinity_retain_marker(&config.workspace_root, &assignment.workspace).await?;
         }
@@ -4334,16 +4336,11 @@ async fn reclaim_attempt_spools(
         affinity_retain_marker_present(&config.workspace_root, &attempt.workspace).await?;
     // Agent-owned retain intent survives Reuse execution. Keep the tree for a
     // later stage or a pinned retry. Cancellation that overrode publication
-    // reaches reclaim as Aborted while the journal attempt was still
-    // Finalizing/Cancelling (result bytes may still say failed). Operator
-    // schedule_retry discharge is Aborted from ReconciliationRequired instead.
+    // journals Aborted; lease-loss aborts keep retain via durable result reason.
+    // Startup reclaim sees attempt.phase already Aborted, so provenance must
+    // not depend on the pre-terminal Finalizing/Cancelling phase alone.
     let lease_loss_abort = attempt_result_is_lease_loss(config, attempt).await?;
-    let cancelled_override = matches!(phase, AttemptPhase::Aborted)
-        && matches!(
-            attempt.phase,
-            AttemptPhase::Finalizing | AttemptPhase::Cancelling
-        )
-        && !lease_loss_abort;
+    let cancelled_override = matches!(phase, AttemptPhase::Aborted) && !lease_loss_abort;
     let retain_workspace = marker_present && !cancelled_override;
     if marker_present && !retain_workspace {
         clear_affinity_retain_marker(&config.workspace_root, &attempt.workspace).await?;
@@ -4384,16 +4381,33 @@ async fn reclaim_spool_entries(
         remove_attempt_workspace(&config.workspace_root, workspace).await?
     };
     for entry in logs.iter().chain(result) {
-        changed.extend(remove_spool_file(&config.workspace_root, entry).await?);
+        // Result bytes live under `.agent-results/`; only paths under the
+        // retained workspace leaf need the raised prune stop.
+        changed.extend(
+            if retain_workspace && entry.relative_path.starts_with(workspace) {
+                remove_spool_file_retaining(&config.workspace_root, entry, workspace).await?
+            } else {
+                remove_spool_file(&config.workspace_root, entry).await?
+            },
+        );
     }
     // The relocated step spools of a multi-step attempt sit in one fixed
     // directory. Every journaled entry below it was acknowledged before this
     // point, and anything the journal never learned about is exactly the
     // crash-window orphan this removal exists for. Affinity reuse strips spool
     // on the next stage; clear it here so a retained workspace stays usable.
-    changed.extend(
-        remove_terminal_relative_path(&config.workspace_root, &step_spool_area(workspace)).await?,
-    );
+    // When retaining, prune must stop at the workspace leaf — otherwise an
+    // empty affinity tree is deleted and the next Reuse open fails.
+    changed.extend(if retain_workspace {
+        remove_terminal_relative_path_retaining(
+            &config.workspace_root,
+            &step_spool_area(workspace),
+            workspace,
+        )
+        .await?
+    } else {
+        remove_terminal_relative_path(&config.workspace_root, &step_spool_area(workspace)).await?
+    });
     flush_terminal_cleanup(&config.workspace_root, workspace, changed).await?;
     Journal::open(&config.journal_path)?.retire_terminal_spools(
         organization_id,
@@ -4779,6 +4793,25 @@ async fn remove_spool_file(
     remove_terminal_relative_path(workspace_root, &entry.relative_path).await
 }
 
+async fn remove_spool_file_retaining(
+    workspace_root: &Path,
+    entry: &SpoolEntry,
+    retain_workspace: &Path,
+) -> Result<Vec<PathBuf>, AgentError> {
+    if entry.relative_path.is_absolute()
+        || entry
+            .relative_path
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err(AgentError::InvalidAssignment(
+            "terminal spool path must be normalized and relative".to_owned(),
+        ));
+    }
+    remove_terminal_relative_path_retaining(workspace_root, &entry.relative_path, retain_workspace)
+        .await
+}
+
 /// Removes one terminal path, returning the directories whose entry lists
 /// changed and that still exist — the durability boundaries its caller
 /// flushes once, before retiring the descriptors that referenced the path.
@@ -4787,6 +4820,16 @@ async fn remove_terminal_relative_path(
     relative_path: &Path,
 ) -> Result<Vec<PathBuf>, AgentError> {
     remove_runtime_terminal_path(workspace_root, relative_path)
+        .await
+        .map_err(Into::into)
+}
+
+async fn remove_terminal_relative_path_retaining(
+    workspace_root: &Path,
+    relative_path: &Path,
+    retain_relative: &Path,
+) -> Result<Vec<PathBuf>, AgentError> {
+    remove_runtime_terminal_path_retaining(workspace_root, relative_path, retain_relative)
         .await
         .map_err(Into::into)
 }

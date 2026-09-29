@@ -1042,8 +1042,21 @@ async fn queued_stages_drain_without_waiting_out_the_poll_interval() {
         .fetch_all(&pool)
         .await
         .unwrap_or_default();
+        let attempts: Vec<(String, String, Option<serde_json::Value>)> = sqlx::query_as(
+            "SELECT n.node_key, a.status, a.terminal_summary
+             FROM attempts AS a
+             JOIN nodes AS n
+               ON n.organization_id = a.organization_id AND n.id = a.node_id
+             WHERE a.organization_id = $1 AND n.build_id = $2
+             ORDER BY a.created_at ASC NULLS LAST, a.id ASC",
+        )
+        .bind(organization_id)
+        .bind(admission.build_id)
+        .fetch_all(&pool)
+        .await
+        .unwrap_or_default();
         panic!(
-            "drain-gate expected succeeded, got {}; nodes={nodes:?}; events={events:?}",
+            "drain-gate expected succeeded, got {}; nodes={nodes:?}; attempts={attempts:?}; events={events:?}",
             status.status
         );
     }

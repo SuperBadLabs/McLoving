@@ -24,7 +24,9 @@ mod windows;
 #[cfg(unix)]
 mod workspace_transfer;
 
-pub use cleanup::{flush_terminal_cleanup, remove_terminal_relative_path};
+pub use cleanup::{
+    flush_terminal_cleanup, remove_terminal_relative_path, remove_terminal_relative_path_retaining,
+};
 
 #[cfg(unix)]
 use unix::{

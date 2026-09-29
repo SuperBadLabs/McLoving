@@ -254,10 +254,11 @@ impl Store {
                    )
                )
                AND (
-                   -- Before the pin, at most one affinity work node may be active so
-                   -- parallel roots cannot both take Create grants and then race the pin.
-                   b.workspace_affinity_agent_id IS NOT NULL
-                   OR b.workspace_namespace IS NOT NULL
+                   -- Affinity multi-stage work is single-flight before and after the
+                   -- pin: parallel ready children would both receive Reuse grants for
+                   -- the same workspace and race shared spool/. Transfer namespaces
+                   -- keep their own isolation and bypass this gate.
+                   b.workspace_namespace IS NOT NULL
                    OR NOT (
                        b.dag_mode
                        AND (
