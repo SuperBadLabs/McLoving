@@ -7395,7 +7395,11 @@ mod tests {
         std::fs::create_dir_all(root.join(&workspace)).unwrap();
         let outside = root.join("outside-target");
         std::fs::write(&outside, b"secret").unwrap();
-        let marker = root.join(&workspace).join(AFFINITY_RETAIN_MARKER);
+        let marker = root
+            .join(AFFINITY_RETAIN_AGENT_ROOT)
+            .join(&workspace)
+            .join(AFFINITY_RETAIN_MARKER);
+        std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
         std::os::unix::fs::symlink(&outside, &marker).unwrap();
         write_affinity_retain_marker_unix(&root, &workspace, None).unwrap();
         assert_eq!(std::fs::read(&outside).unwrap(), b"secret");
