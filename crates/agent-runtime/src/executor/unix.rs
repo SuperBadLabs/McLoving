@@ -142,12 +142,9 @@ where
     if request.reuse_existing_workspace
         && !matches!(request.step_ordinal, Some(ordinal) if ordinal > 0)
     {
-        // Prior stage left its spool and retain marker. Strip only the spool
-        // so checkout content stays. Leave the retain marker in place for the
-        // whole Reuse execution: if the agent crashes, recovery must still see
-        // durable retention intent when discharging the superseded journal
-        // attempt. The next stage strips spool again; final cleanup clears the
-        // marker before publication.
+        // Prior stage left its spool. Strip only the spool so checkout content
+        // stays. Retention intent is agent-owned outside this tree, so a stage
+        // cleanup cannot erase it. The next stage strips spool again.
         if attempt_spool.exists() {
             tokio::fs::remove_dir_all(&attempt_spool).await?;
         }
