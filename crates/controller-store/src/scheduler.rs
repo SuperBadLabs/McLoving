@@ -219,8 +219,12 @@ impl Store {
                AND n.required_capabilities <@ $2::text[]
                AND n.required_trust_pool = $4
                AND (
+                   -- Pin only affinity work nodes. Join/post (and any non-work
+                   -- DAG node) must remain claimable by agents that cover their
+                   -- own requirements, or orphan scan fails a valid build.
                    b.workspace_affinity_agent_id IS NULL
                    OR b.workspace_affinity_agent_id = $5
+                   OR n.node_kind <> 'work'
                )
                AND (
                    -- Once pinned, claim_next already restricts to that agent.

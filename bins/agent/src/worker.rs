@@ -4327,6 +4327,19 @@ async fn attempt_result_is_lease_loss(
         .is_some_and(|reason| reason.starts_with("lease_lost_during_execution:")))
 }
 
+async fn attempt_result_is_work_cancel_override(
+    config: &AgentConfig,
+    attempt: &mcloving_agent_runtime::ReconciliationAttempt,
+) -> Result<bool, AgentError> {
+    let Some(result) = recovered_persisted_result(config, attempt).await? else {
+        return Ok(false);
+    };
+    // Controller cancel can override a published work terminal to Aborted while
+    // the durable result still names the original Failed/Succeeded outcome.
+    Ok(result.completion_protocol == WORK_COMPLETION_PROTOCOL
+        && result.outcome != outcome_name(WorkOutcome::Aborted))
+}
+
 async fn reclaim_attempt_spools(
     config: &AgentConfig,
     attempt: &mcloving_agent_runtime::ReconciliationAttempt,
@@ -4335,12 +4348,20 @@ async fn reclaim_attempt_spools(
     let marker_present =
         affinity_retain_marker_present(&config.workspace_root, &attempt.workspace).await?;
     // Agent-owned retain intent survives Reuse execution. Keep the tree for a
-    // later stage or a pinned retry. Cancellation that overrode publication
-    // journals Aborted; lease-loss aborts keep retain via durable result reason.
-    // Startup reclaim sees attempt.phase already Aborted, so provenance must
-    // not depend on the pre-terminal Finalizing/Cancelling phase alone.
+    // later stage or a pinned retry. Cancellation that overrode a work terminal
+    // journals Aborted while result bytes may still say failed; lease-loss
+    // aborts keep retain via durable reason. Operator DischargeRecovered is
+    // Aborted without a work-protocol override and must keep the marker.
+    // Startup reclaim sees attempt.phase already Aborted, so also key off the
+    // durable work-protocol override rather than pre-terminal phase alone.
     let lease_loss_abort = attempt_result_is_lease_loss(config, attempt).await?;
-    let cancelled_override = matches!(phase, AttemptPhase::Aborted) && !lease_loss_abort;
+    let work_cancel_override = attempt_result_is_work_cancel_override(config, attempt).await?;
+    let cancelled_override = matches!(phase, AttemptPhase::Aborted)
+        && !lease_loss_abort
+        && (matches!(
+            attempt.phase,
+            AttemptPhase::Finalizing | AttemptPhase::Cancelling
+        ) || work_cancel_override);
     let retain_workspace = marker_present && !cancelled_override;
     if marker_present && !retain_workspace {
         clear_affinity_retain_marker(&config.workspace_root, &attempt.workspace).await?;
@@ -4391,23 +4412,23 @@ async fn reclaim_spool_entries(
             },
         );
     }
-    // The relocated step spools of a multi-step attempt sit in one fixed
-    // directory. Every journaled entry below it was acknowledged before this
-    // point, and anything the journal never learned about is exactly the
-    // crash-window orphan this removal exists for. Affinity reuse strips spool
-    // on the next stage; clear it here so a retained workspace stays usable.
-    // When retaining, prune must stop at the workspace leaf — otherwise an
-    // empty affinity tree is deleted and the next Reuse open fails.
-    changed.extend(if retain_workspace {
-        remove_terminal_relative_path_retaining(
-            &config.workspace_root,
-            &step_spool_area(workspace),
-            workspace,
-        )
-        .await?
-    } else {
-        remove_terminal_relative_path(&config.workspace_root, &step_spool_area(workspace)).await?
-    });
+    // The relocated step spools of a multi-step attempt sit under
+    // `.agent-results/` (not the affinity leaf). Strip them with the ordinary
+    // prune stop. When retaining the workload tree, also strip in-tree
+    // `workspace/spool` without pruning the retained affinity leaf itself.
+    changed.extend(
+        remove_terminal_relative_path(&config.workspace_root, &step_spool_area(workspace)).await?,
+    );
+    if retain_workspace {
+        changed.extend(
+            remove_terminal_relative_path_retaining(
+                &config.workspace_root,
+                &workspace.join("spool"),
+                workspace,
+            )
+            .await?,
+        );
+    }
     flush_terminal_cleanup(&config.workspace_root, workspace, changed).await?;
     Journal::open(&config.journal_path)?.retire_terminal_spools(
         organization_id,
@@ -4591,7 +4612,17 @@ fn write_affinity_retain_marker_unix(
             }
         }
         Err(AgentError::InvalidAssignment(message))
-            if message.contains("No such file or directory") => {}
+            if message.contains("No such file or directory") =>
+        {
+            // Processless paths pass expected=None and may retain intent after
+            // the workload deleted the tree. An executor-backed terminal that
+            // still carries an identity must refuse: there is no tree to reopen.
+            if expected.is_some() {
+                return Err(AgentError::InvalidAssignment(
+                    "affinity retain refused: executor workspace is missing".to_owned(),
+                ));
+            }
+        }
         Err(error) => return Err(error),
     }
     let retain_rel = Path::new(AFFINITY_RETAIN_AGENT_ROOT).join(workspace);
