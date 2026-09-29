@@ -4465,7 +4465,9 @@ async fn reclaim_spool_entries(
 
 const AFFINITY_RETAIN_MARKER: &str = ".mcloving-affinity-retain";
 const AFFINITY_DISCHARGE_MARKER: &str = ".mcloving-affinity-discharged";
+#[cfg(unix)]
 const AFFINITY_RETAIN_MARKER_TMP: &str = ".mcloving-affinity-retain.tmp";
+#[cfg(unix)]
 const AFFINITY_DISCHARGE_MARKER_TMP: &str = ".mcloving-affinity-discharged.tmp";
 /// Agent-owned retain intent lives outside the workload tree so `git clean`
 /// (or any stage cleanup) cannot erase it during a Reuse execution.
