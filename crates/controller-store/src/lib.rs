@@ -7627,7 +7627,14 @@ impl Store {
         .execute(&mut *tx)
         .await?;
         if outcome == TerminalOutcome::Succeeded {
-            affinity::record_successful_agent(&mut tx, organization_id, build_id, agent_id).await?;
+            affinity::record_successful_agent(
+                &mut tx,
+                organization_id,
+                build_id,
+                agent_id,
+                node_id,
+            )
+            .await?;
         }
         if !dag::advance_dag_after_attempt(
             &mut tx,

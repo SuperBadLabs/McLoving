@@ -4318,7 +4318,9 @@ async fn attempt_result_is_lease_loss(
     config: &AgentConfig,
     attempt: &mcloving_agent_runtime::ReconciliationAttempt,
 ) -> Result<bool, AgentError> {
-    let Some(result) = recovered_persisted_result(config, attempt).await? else {
+    // Unreadable or forged result bytes must not fail reclaim itself; treat as
+    // not lease-loss so ordinary Aborted cleanup can still proceed.
+    let Ok(Some(result)) = recovered_persisted_result(config, attempt).await else {
         return Ok(false);
     };
     Ok(result
@@ -4331,7 +4333,7 @@ async fn attempt_result_is_work_cancel_override(
     config: &AgentConfig,
     attempt: &mcloving_agent_runtime::ReconciliationAttempt,
 ) -> Result<bool, AgentError> {
-    let Some(result) = recovered_persisted_result(config, attempt).await? else {
+    let Ok(Some(result)) = recovered_persisted_result(config, attempt).await else {
         return Ok(false);
     };
     // Controller cancel can override a published work terminal to Aborted while

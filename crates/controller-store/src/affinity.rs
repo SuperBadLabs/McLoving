@@ -11,7 +11,23 @@ pub(crate) async fn record_successful_agent(
     organization_id: Uuid,
     build_id: Uuid,
     agent_id: &str,
+    node_id: Uuid,
 ) -> Result<(), StoreError> {
+    let affinity_work: bool = sqlx::query_scalar(
+        "SELECT node_kind = 'work' AND $4 = ANY(required_capabilities)
+         FROM nodes
+         WHERE organization_id = $1 AND build_id = $2 AND id = $3",
+    )
+    .bind(organization_id)
+    .bind(build_id)
+    .bind(node_id)
+    .bind(mcloving_domain::workspace::WORKSPACE_AFFINITY_CAPABILITY)
+    .fetch_optional(&mut **tx)
+    .await?
+    .unwrap_or(false);
+    if !affinity_work {
+        return Ok(());
+    }
     let updated = sqlx::query_scalar::<_, Uuid>(
         "UPDATE builds
          SET workspace_affinity_agent_id = COALESCE(workspace_affinity_agent_id, $3)
@@ -92,6 +108,8 @@ pub(crate) async fn fail_orphaned_affinity_builds(
            AND b.workspace_affinity_agent_id IS NOT NULL
            AND b.workspace_namespace IS NULL
            AND n.status = 'queued'
+           AND n.node_kind = 'work'
+           AND $2 = ANY(n.required_capabilities)
            AND n.cancellation_requested_at IS NULL
            AND b.cancellation_requested_at IS NULL
            AND EXISTS (
@@ -99,6 +117,8 @@ pub(crate) async fn fail_orphaned_affinity_builds(
                WHERE qn.build_id = b.id
                  AND qn.organization_id = b.organization_id
                  AND qn.status = 'queued'
+                 AND qn.node_kind = 'work'
+                 AND $2 = ANY(qn.required_capabilities)
                  AND NOT EXISTS (
                      SELECT 1 FROM agent_sessions AS s
                      WHERE s.agent_id = b.workspace_affinity_agent_id
@@ -197,14 +217,21 @@ pub(crate) async fn grant_for_attempt(
                       AND node_kind = 'work'
                 ) AS work_nodes,
                 (
+                    -- Count siblings that still need the shared tree: active
+                    -- stages and failed ones that remain schedule_retry-able.
                     SELECT count(*)::int FROM nodes
                     WHERE organization_id = b.organization_id
                       AND build_id = b.id
                       AND node_kind = 'work'
                       AND id <> $3
-                      AND status NOT IN ('succeeded', 'failed', 'aborted', 'skipped')
-                ) AS remaining_after
+                      AND status NOT IN ('succeeded', 'aborted', 'skipped')
+                ) AS remaining_after,
+                n.node_kind = 'work' AND $4 = ANY(n.required_capabilities) AS affinity_work
          FROM builds AS b
+         JOIN nodes AS n
+           ON n.organization_id = b.organization_id
+          AND n.build_id = b.id
+          AND n.id = $3
          WHERE b.organization_id = $1 AND b.id = $2 AND b.dag_mode
            AND EXISTS (
                SELECT 1 FROM nodes
@@ -229,6 +256,10 @@ pub(crate) async fn grant_for_attempt(
     let Some(row) = row else {
         return Ok(None);
     };
+    let affinity_work: bool = row.try_get("affinity_work")?;
+    if !affinity_work {
+        return Ok(None);
+    }
     let transfer: bool = row.try_get("transfer")?;
     let work_nodes: i32 = row.try_get("work_nodes")?;
     if transfer || work_nodes <= 1 {
