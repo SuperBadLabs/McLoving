@@ -247,6 +247,36 @@ impl Store {
                          AND NOT (wn.required_capabilities <@ $2::text[])
                    )
                )
+               AND (
+                   -- Before the pin, at most one affinity work node may be active so
+                   -- parallel roots cannot both take Create grants and then race the pin.
+                   b.workspace_affinity_agent_id IS NOT NULL
+                   OR b.workspace_namespace IS NOT NULL
+                   OR NOT (
+                       b.dag_mode
+                       AND (
+                           SELECT count(*)::int FROM nodes AS wn
+                           WHERE wn.organization_id = n.organization_id
+                             AND wn.build_id = n.build_id
+                             AND wn.node_kind = 'work'
+                       ) > 1
+                       AND NOT EXISTS (
+                           SELECT 1 FROM nodes AS wn
+                           WHERE wn.organization_id = n.organization_id
+                             AND wn.build_id = n.build_id
+                             AND wn.node_kind = 'work'
+                             AND NOT ($6 = ANY(wn.required_capabilities))
+                       )
+                   )
+                   OR NOT EXISTS (
+                       SELECT 1 FROM nodes AS wn
+                       WHERE wn.organization_id = n.organization_id
+                         AND wn.build_id = n.build_id
+                         AND wn.node_kind = 'work'
+                         AND wn.id <> n.id
+                         AND wn.status IN ('offered', 'running', 'succeeded')
+                   )
+               )
                AND NOT EXISTS (
                    SELECT 1
                    FROM node_dependencies AS dependency

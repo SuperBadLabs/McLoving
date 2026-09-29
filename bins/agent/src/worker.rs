@@ -4539,7 +4539,18 @@ fn clear_affinity_retain_marker_unix(
 ) -> Result<(), AgentError> {
     use nix::sys::stat::fstatat;
     use nix::unistd::{UnlinkatFlags, fsync, unlinkat};
-    let dir = open_affinity_workspace_dir(workspace_root, workspace)?;
+    // A Create attempt cancelled or refused before spawn never created the
+    // workspace; treat a missing tree as already cleared so processless
+    // finalization does not tear down the agent session.
+    let dir = match open_affinity_workspace_dir(workspace_root, workspace) {
+        Ok(dir) => dir,
+        Err(AgentError::InvalidAssignment(message))
+            if message.contains("No such file or directory") =>
+        {
+            return Ok(());
+        }
+        Err(error) => return Err(error),
+    };
     let marker_name = std::ffi::CString::new(AFFINITY_RETAIN_MARKER).expect("marker name");
     match fstatat(
         &dir,
@@ -7268,10 +7279,8 @@ mod tests {
     #[test]
     fn affinity_retain_refuses_workspace_inode_mismatch() {
         use std::os::unix::fs::MetadataExt;
-        let root = std::env::temp_dir().join(format!(
-            "mcloving-affinity-inode-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("mcloving-affinity-inode-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let workspace = PathBuf::from("org/build/workspace");
         std::fs::create_dir_all(root.join(&workspace)).unwrap();
@@ -7285,10 +7294,7 @@ mod tests {
         std::fs::create_dir_all(root.join(&workspace)).unwrap();
         let error = write_affinity_retain_marker_unix(&root, &workspace, Some(&expected))
             .expect_err("decoy workspace must be refused");
-        assert!(
-            error.to_string().contains("executor-retained"),
-            "{error}"
-        );
+        assert!(error.to_string().contains("executor-retained"), "{error}");
         assert!(!root.join(&workspace).join(AFFINITY_RETAIN_MARKER).exists());
         write_affinity_retain_marker_unix(
             &root,
@@ -7296,6 +7302,18 @@ mod tests {
             Some(&expected),
         )
         .unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn affinity_retain_clear_tolerates_missing_create_workspace() {
+        let root =
+            std::env::temp_dir().join(format!("mcloving-affinity-missing-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let workspace = PathBuf::from("org/build/workspace");
+        clear_affinity_retain_marker_unix(&root, &workspace).unwrap();
         let _ = std::fs::remove_dir_all(&root);
     }
 
