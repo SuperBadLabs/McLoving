@@ -174,8 +174,7 @@ pub(crate) async fn fail_orphaned_affinity_builds(
             summary,
         )
         .await?;
-        crate::dag::record_terminal_notifications(tx, organization_id, build_id, "failed")
-            .await?;
+        crate::dag::record_terminal_notifications(tx, organization_id, build_id, "failed").await?;
         failed += 1;
     }
     Ok(failed)

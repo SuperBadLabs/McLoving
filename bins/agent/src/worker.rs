@@ -2676,6 +2676,23 @@ async fn run_assignment(
             affinity_retain_error = Some(format!("affinity_retain_clear_refused:{error}"));
             if terminal == WorkOutcome::Succeeded {
                 terminal = WorkOutcome::Failed;
+                // Final-stage success that cannot clear must still retain if the
+                // converted failure is a Reuse retry, or recovery deletes the tree.
+                if affinity_should_retain_workspace(
+                    assignment.workspace_affinity.as_ref(),
+                    terminal,
+                ) {
+                    write_affinity_retain_marker(
+                        &config.workspace_root,
+                        &assignment.workspace,
+                        Some(&outcome.workspace_dir_identity),
+                    )
+                    .await?;
+                } else {
+                    return Err(AgentError::InvalidAssignment(format!(
+                        "affinity_retain_clear_refused:{error}"
+                    )));
+                }
             }
         }
         let result = write_result(
@@ -4289,17 +4306,16 @@ pub(super) async fn reclaim_terminal_spools(config: &AgentConfig) -> Result<(), 
 async fn reclaim_attempt_spools(
     config: &AgentConfig,
     attempt: &mcloving_agent_runtime::ReconciliationAttempt,
-    phase: AttemptPhase,
+    _phase: AttemptPhase,
 ) -> Result<(), AgentError> {
     let marker_present =
         affinity_retain_marker_present(&config.workspace_root, &attempt.workspace).await?;
-    // Use the phase just committed (replay may still show Finalizing on the
-    // attempt snapshot). Keep the tree when a further stage or retry needs it;
-    // drop it on abort.
-    let retain_workspace = marker_present && !matches!(phase, AttemptPhase::Aborted);
-    if marker_present && !retain_workspace {
-        clear_affinity_retain_marker(&config.workspace_root, &attempt.workspace).await?;
-    }
+    // A durable retain marker means a later stage or a pinned retry still needs
+    // the tree — including when this journal attempt is discharged as Aborted
+    // after schedule_retry supersedes it. Intentional cancels clear the marker
+    // before publication, so Aborted+marker is the superseded-retry case, not
+    // final cleanup. (_phase retained for call-site clarity / future policy.)
+    let retain_workspace = marker_present;
     reclaim_spool_entries(
         config,
         &attempt.organization_id,
@@ -4472,7 +4488,17 @@ fn write_affinity_retain_marker_unix(
                 ))
             })?;
         }
-        Ok(stat) if stat.st_mode & nix::libc::S_IFMT == nix::libc::S_IFREG => {}
+        Ok(stat) if stat.st_mode & nix::libc::S_IFMT == nix::libc::S_IFREG => {
+            // Unlink rather than O_TRUNC: a workload may have hard-linked the
+            // marker name to another agent-writable file on the same FS.
+            unlinkat(&dir, marker_name.as_c_str(), UnlinkatFlags::NoRemoveDir).map_err(
+                |error| {
+                    AgentError::InvalidAssignment(format!(
+                        "affinity retain marker regular refused: {error}"
+                    ))
+                },
+            )?;
+        }
         Ok(_) => {
             unlinkat(&dir, marker_name.as_c_str(), UnlinkatFlags::NoRemoveDir).map_err(
                 |error| {
@@ -4486,7 +4512,7 @@ fn write_affinity_retain_marker_unix(
     let file = openat(
         &dir,
         marker_name.as_c_str(),
-        OFlag::O_WRONLY | OFlag::O_CREAT | OFlag::O_TRUNC | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+        OFlag::O_WRONLY | OFlag::O_CREAT | OFlag::O_EXCL | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
         Mode::from_bits_truncate(0o600),
     )
     .map_err(|error| {
@@ -7296,12 +7322,27 @@ mod tests {
             .expect_err("decoy workspace must be refused");
         assert!(error.to_string().contains("executor-retained"), "{error}");
         assert!(!root.join(&workspace).join(AFFINITY_RETAIN_MARKER).exists());
-        write_affinity_retain_marker_unix(
-            &root,
-            Path::new("org/build/relocated"),
-            Some(&expected),
-        )
-        .unwrap();
+        write_affinity_retain_marker_unix(&root, Path::new("org/build/relocated"), Some(&expected))
+            .unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn affinity_retain_replaces_hard_linked_regular_marker() {
+        let root =
+            std::env::temp_dir().join(format!("mcloving-affinity-hardlink-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let workspace = PathBuf::from("org/build/workspace");
+        std::fs::create_dir_all(root.join(&workspace)).unwrap();
+        let outside = root.join("linked-target");
+        std::fs::write(&outside, b"secret-payload").unwrap();
+        let marker = root.join(&workspace).join(AFFINITY_RETAIN_MARKER);
+        std::fs::hard_link(&outside, &marker).unwrap();
+        write_affinity_retain_marker_unix(&root, &workspace, None).unwrap();
+        assert_eq!(std::fs::read(&outside).unwrap(), b"secret-payload");
+        assert_eq!(std::fs::read(&marker).unwrap(), b"retain
+");
         let _ = std::fs::remove_dir_all(&root);
     }
 
