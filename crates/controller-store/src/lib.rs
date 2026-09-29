@@ -5066,6 +5066,32 @@ impl Store {
             tx.rollback().await?;
             return Ok(false);
         }
+        let affinity_work: bool = sqlx::query_scalar(
+            "SELECT n.node_kind = 'work'
+                    AND $3 = ANY(n.required_capabilities)
+                    AND (
+                        SELECT count(*)::int FROM nodes AS wn
+                        WHERE wn.organization_id = n.organization_id
+                          AND wn.build_id = n.build_id
+                          AND wn.node_kind = 'work'
+                    ) > 1
+             FROM attempts AS a
+             JOIN nodes AS n ON n.organization_id = a.organization_id AND n.id = a.node_id
+             WHERE a.organization_id = $1 AND a.id = $2",
+        )
+        .bind(organization_id)
+        .bind(attempt_id)
+        .bind(mcloving_domain::workspace::WORKSPACE_AFFINITY_CAPABILITY)
+        .fetch_optional(&mut *tx)
+        .await?
+        .unwrap_or(false);
+        // Affinity Create/Reuse success must come from the agent path that
+        // plants retain intent. Operator Succeeded here would pin and advance
+        // without a marker; discharge reclaim then deletes the shared tree.
+        if affinity_work && outcome == TerminalOutcome::Succeeded {
+            tx.rollback().await?;
+            return Ok(false);
+        }
         let exact_replay = sqlx::query_scalar::<_, bool>(
             "SELECT EXISTS (
                  SELECT 1
@@ -5159,17 +5185,17 @@ impl Store {
             tx.rollback().await?;
             return Ok(false);
         };
-        if outcome == TerminalOutcome::Succeeded {
-            if let Some(agent_id) = lease_owner.as_deref() {
-                affinity::record_successful_agent(
-                    &mut tx,
-                    organization_id,
-                    build_id,
-                    agent_id,
-                    node_id,
-                )
-                .await?;
-            }
+        if outcome == TerminalOutcome::Succeeded
+            && let Some(agent_id) = lease_owner.as_deref()
+        {
+            affinity::record_successful_agent(
+                &mut tx,
+                organization_id,
+                build_id,
+                agent_id,
+                node_id,
+            )
+            .await?;
         }
         if !dag::advance_dag_after_attempt(
             &mut tx,
