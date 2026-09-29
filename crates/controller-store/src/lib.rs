@@ -1616,11 +1616,17 @@ impl Store {
     ) -> Result<bool, StoreError> {
         let session_epoch =
             i64::try_from(session_epoch).map_err(|_| StoreError::InvalidAgentSession)?;
+        // Touch updated_at on every authorized RPC so affinity orphan detection
+        // can tell a live pinned session from a permanently disconnected one
+        // without a separate presence channel.
         Ok(sqlx::query_scalar::<_, bool>(
-            "SELECT EXISTS(
-                 SELECT 1 FROM agent_sessions
+            "WITH touched AS (
+                 UPDATE agent_sessions
+                 SET updated_at = clock_timestamp()
                  WHERE agent_id = $1 AND session_epoch = $2
-             )",
+                 RETURNING 1
+             )
+             SELECT EXISTS(SELECT 1 FROM touched)",
         )
         .bind(agent_id)
         .bind(session_epoch)

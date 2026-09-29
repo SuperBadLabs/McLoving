@@ -4350,12 +4350,14 @@ async fn reclaim_attempt_spools(
     // durable work-protocol override rather than pre-terminal phase alone.
     let lease_loss_abort = attempt_result_is_lease_loss(config, attempt).await?;
     let work_cancel_override = attempt_result_is_work_cancel_override(config, attempt).await?;
+    // Finalizing alone is not cancellation provenance: a crash after
+    // begin_finalization can leave that phase while an operator discharges the
+    // expired authority for a pinned Reuse retry. Cancelling (or an already
+    // Aborted journal with a work-protocol override) still clears.
     let cancelled_override = matches!(phase, AttemptPhase::Aborted)
         && !lease_loss_abort
-        && (matches!(
-            attempt.phase,
-            AttemptPhase::Finalizing | AttemptPhase::Cancelling
-        ) || work_cancel_override);
+        && (matches!(attempt.phase, AttemptPhase::Cancelling)
+            || (matches!(attempt.phase, AttemptPhase::Aborted) && work_cancel_override));
     let durable_retain = attempt_result_affinity_retain(config, attempt).await?;
     let retain_workspace = marker_present && !cancelled_override && durable_retain.unwrap_or(true);
     if marker_present && !retain_workspace {

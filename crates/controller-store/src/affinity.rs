@@ -126,6 +126,7 @@ pub(crate) async fn fail_orphaned_affinity_builds(
                        AND $3 = ANY(s.features)
                        AND qn.required_trust_pool = s.trust_pool
                        AND qn.required_capabilities <@ s.capabilities
+                       AND s.updated_at > clock_timestamp() - interval '5 minutes'
                  )
            )",
     )
