@@ -111,6 +111,9 @@ struct PersistedResult {
     #[serde(default = "default_completion_protocol")]
     completion_protocol: String,
     cancellation_outcome: Option<i32>,
+    /// Reclaim honor: false clears a leftover marker after final-stage success.
+    #[serde(default)]
+    affinity_retain: Option<bool>,
     #[serde(default)]
     steps: Vec<StepRecord>,
 }
@@ -266,6 +269,7 @@ struct DurableResult<'a> {
     reason: Option<&'a str>,
     completion_protocol: &'a str,
     cancellation_outcome: Option<i32>,
+    affinity_retain: Option<bool>,
     /// Per-step outcomes of a multi-step attempt; empty for single-step work
     /// so the single-step result bytes are unchanged.
     steps: &'a [StepRecord],
@@ -2700,6 +2704,12 @@ async fn run_assignment(
                     .or(step_failure.as_deref()),
                 completion_protocol: WORK_COMPLETION_PROTOCOL,
                 cancellation_outcome: None,
+                affinity_retain: assignment.workspace_affinity.as_ref().map(|_| {
+                    affinity_should_retain_workspace(
+                        assignment.workspace_affinity.as_ref(),
+                        terminal,
+                    ) || (terminal == WorkOutcome::Aborted && lease_loss_reuse_retain)
+                }),
                 steps: if multi_step { &step_records } else { &[] },
             },
         )
@@ -4314,6 +4324,16 @@ async fn attempt_result_is_work_cancel_override(
         && result.outcome != outcome_name(WorkOutcome::Aborted))
 }
 
+async fn attempt_result_affinity_retain(
+    config: &AgentConfig,
+    attempt: &mcloving_agent_runtime::ReconciliationAttempt,
+) -> Result<Option<bool>, AgentError> {
+    let Ok(Some(result)) = recovered_persisted_result(config, attempt).await else {
+        return Ok(None);
+    };
+    Ok(result.affinity_retain)
+}
+
 async fn reclaim_attempt_spools(
     config: &AgentConfig,
     attempt: &mcloving_agent_runtime::ReconciliationAttempt,
@@ -4336,7 +4356,8 @@ async fn reclaim_attempt_spools(
             attempt.phase,
             AttemptPhase::Finalizing | AttemptPhase::Cancelling
         ) || work_cancel_override);
-    let retain_workspace = marker_present && !cancelled_override;
+    let durable_retain = attempt_result_affinity_retain(config, attempt).await?;
+    let retain_workspace = marker_present && !cancelled_override && durable_retain.unwrap_or(true);
     if marker_present && !retain_workspace {
         clear_affinity_retain_marker(&config.workspace_root, &attempt.workspace).await?;
     }
@@ -5011,6 +5032,7 @@ async fn write_result(
         reason,
         completion_protocol,
         cancellation_outcome,
+        affinity_retain,
         steps,
     } = result;
     let relative_parent = PathBuf::from(AGENT_RESULT_DIRECTORY)
@@ -5027,6 +5049,7 @@ async fn write_result(
         "reason": reason,
         "completion_protocol": completion_protocol,
         "cancellation_outcome": cancellation_outcome,
+        "affinity_retain": affinity_retain,
     });
     if !steps.is_empty() {
         value["steps"] = serde_json::to_value(steps)?;
@@ -5226,6 +5249,7 @@ pub(super) async fn persist_recovered_cancellation(
             reason: interrupted_step.as_deref(),
             completion_protocol: CANCELLATION_COMPLETION_PROTOCOL,
             cancellation_outcome: Some(cancellation_outcome),
+            affinity_retain: None,
             steps: &[],
         },
     )
@@ -5354,6 +5378,10 @@ async fn finalize_without_process(
             reason: Some(&termination),
             completion_protocol: WORK_COMPLETION_PROTOCOL,
             cancellation_outcome: None,
+            affinity_retain: workspace_affinity.map(|_| {
+                affinity_should_retain_workspace(workspace_affinity, outcome)
+                    || (outcome == WorkOutcome::Aborted && lease_loss_reuse_retain)
+            }),
             steps: &steps,
         },
     )
@@ -5879,6 +5907,7 @@ mod tests {
             reason: None,
             completion_protocol: WORK_COMPLETION_PROTOCOL.to_owned(),
             cancellation_outcome: None,
+            affinity_retain: None,
             steps: vec![
                 StepRecord {
                     ordinal: 0,
@@ -6818,6 +6847,7 @@ mod tests {
                 reason: Some("process_spawn_failed: refused"),
                 completion_protocol: WORK_COMPLETION_PROTOCOL,
                 cancellation_outcome: None,
+                affinity_retain: None,
                 steps: &[],
             },
         )
@@ -6834,6 +6864,7 @@ mod tests {
                 reason: Some("process_spawn_failed: refused"),
                 completion_protocol: WORK_COMPLETION_PROTOCOL,
                 cancellation_outcome: None,
+                affinity_retain: None,
                 steps: &[],
             },
         )
@@ -6880,6 +6911,7 @@ mod tests {
                 reason: None,
                 completion_protocol: CANCELLATION_COMPLETION_PROTOCOL,
                 cancellation_outcome: Some(CancellationOutcome::Terminated as i32),
+                affinity_retain: None,
                 steps: &[],
             },
         )
@@ -6925,6 +6957,7 @@ mod tests {
                     reason: Some("refused"),
                     completion_protocol: WORK_COMPLETION_PROTOCOL,
                     cancellation_outcome: None,
+                    affinity_retain: None,
                     steps: &[],
                 },
             )
@@ -6972,6 +7005,7 @@ mod tests {
                     reason: Some("refused"),
                     completion_protocol: WORK_COMPLETION_PROTOCOL,
                     cancellation_outcome: None,
+                    affinity_retain: None,
                     steps: &[],
                 },
             )
@@ -7006,6 +7040,7 @@ mod tests {
                 reason: Some("restored"),
                 completion_protocol: WORK_COMPLETION_PROTOCOL,
                 cancellation_outcome: None,
+                affinity_retain: None,
                 steps: &[],
             },
         )
@@ -7039,6 +7074,7 @@ mod tests {
                 reason: None,
                 completion_protocol: WORK_COMPLETION_PROTOCOL,
                 cancellation_outcome: None,
+                affinity_retain: None,
                 steps: &[],
             },
         )
@@ -7087,6 +7123,7 @@ mod tests {
                 reason: None,
                 completion_protocol: CANCELLATION_COMPLETION_PROTOCOL,
                 cancellation_outcome: Some(CancellationOutcome::Terminated as i32),
+                affinity_retain: None,
                 steps: &[],
             },
         )
@@ -7167,6 +7204,7 @@ mod tests {
                 reason: None,
                 completion_protocol: WORK_COMPLETION_PROTOCOL,
                 cancellation_outcome: None,
+                affinity_retain: None,
                 steps: &[],
             },
         )
