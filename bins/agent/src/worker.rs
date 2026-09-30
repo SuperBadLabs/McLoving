@@ -4422,6 +4422,13 @@ async fn reclaim_attempt_spools(
         // Create must clear so a retry can recreate; Reuse must keep the tree.
         matches!(marker_mode, Some(WorkspaceAffinityMode::Reuse))
     };
+    // A rename-and-replace decoy must not be kept after discharge merely
+    // because the marker still says Reuse: revalidate the recorded inode.
+    let retain_workspace = if retain_workspace {
+        affinity_retain_identity_still_matches(&config.workspace_root, &attempt.workspace).await?
+    } else {
+        false
+    };
     if marker_present && !retain_workspace {
         clear_affinity_retain_marker(&config.workspace_root, &attempt.workspace).await?;
     }
@@ -4695,12 +4702,38 @@ fn write_affinity_retain_marker_unix(
     let dir = open_or_create_affinity_agent_dir(workspace_root, &retain_rel)?;
     let marker_name = std::ffi::CString::new(AFFINITY_RETAIN_MARKER).expect("marker name");
     let tmp_name = std::ffi::CString::new(AFFINITY_RETAIN_MARKER_TMP).expect("tmp marker");
-    // Encode Create vs Reuse so pre-result crash recovery can clear a Create
-    // tree on discharge without blocking a Create retry (WorkspaceAlreadyExists).
-    let payload = match mode {
-        WorkspaceAffinityMode::Create => b"retain:create\n".as_slice(),
-        WorkspaceAffinityMode::Reuse => b"retain:reuse\n".as_slice(),
+    // Encode Create/Reuse plus the verified workspace inode so discharge reclaim
+    // cannot keep a renamed replacement directory that is no longer the tree.
+    let identity = match expected {
+        Some(id) => Some(mcloving_agent_runtime::executor::WorkspaceDirIdentity {
+            dev: id.dev,
+            ino: id.ino,
+        }),
+        None => affinity_workspace_dir_identity(workspace_root, workspace),
     };
+    let payload_owned = match (mode, identity.as_ref()) {
+        (WorkspaceAffinityMode::Create, Some(id)) => {
+            format!(
+                "retain:create:{}:{}
+",
+                id.dev, id.ino
+            )
+        }
+        (WorkspaceAffinityMode::Reuse, Some(id)) => {
+            format!(
+                "retain:reuse:{}:{}
+",
+                id.dev, id.ino
+            )
+        }
+        (WorkspaceAffinityMode::Create, None) => "retain:create
+"
+        .to_owned(),
+        (WorkspaceAffinityMode::Reuse, None) => "retain:reuse
+"
+        .to_owned(),
+    };
+    let payload = payload_owned.as_bytes();
     match fstatat(
         &dir,
         marker_name.as_c_str(),
@@ -4980,22 +5013,83 @@ fn affinity_discharge_marker_path(workspace_root: &Path, workspace: &Path) -> Pa
 
 /// Read Create/Reuse mode from the agent-owned retain marker. Legacy `retain\n`
 /// (no mode suffix) is treated as Reuse so pre-existing markers keep the tree.
+fn parse_affinity_retain_marker(bytes: &[u8]) -> (WorkspaceAffinityMode, Option<(u64, u64)>) {
+    let text = std::str::from_utf8(bytes)
+        .unwrap_or("")
+        .trim_end_matches('\n');
+    let mut parts = text.split(':');
+    let _ = parts.next(); // "retain"
+    let mode = match parts.next() {
+        Some("create") => WorkspaceAffinityMode::Create,
+        _ => WorkspaceAffinityMode::Reuse,
+    };
+    let identity = match (parts.next(), parts.next()) {
+        (Some(dev), Some(ino)) => match (dev.parse::<u64>(), ino.parse::<u64>()) {
+            (Ok(dev), Ok(ino)) => Some((dev, ino)),
+            _ => None,
+        },
+        _ => None,
+    };
+    (mode, identity)
+}
+
 async fn affinity_retain_marker_mode(
     workspace_root: &Path,
     workspace: &Path,
 ) -> Result<Option<WorkspaceAffinityMode>, AgentError> {
     let path = affinity_retain_marker_path(workspace_root, workspace);
     match tokio::fs::read(&path).await {
-        Ok(bytes) => Ok(Some(match bytes.as_slice() {
-            b"retain:create\n" | b"retain:create" => WorkspaceAffinityMode::Create,
-            b"retain:reuse\n" | b"retain:reuse" | b"retain\n" | b"retain" => {
-                WorkspaceAffinityMode::Reuse
-            }
-            _ => WorkspaceAffinityMode::Reuse,
-        })),
+        Ok(bytes) => Ok(Some(parse_affinity_retain_marker(&bytes).0)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error.into()),
     }
+}
+
+async fn affinity_retain_marker_identity(
+    workspace_root: &Path,
+    workspace: &Path,
+) -> Result<Option<(u64, u64)>, AgentError> {
+    let path = affinity_retain_marker_path(workspace_root, workspace);
+    match tokio::fs::read(&path).await {
+        Ok(bytes) => Ok(parse_affinity_retain_marker(&bytes).1),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+#[cfg(unix)]
+fn affinity_workspace_dir_identity(
+    workspace_root: &Path,
+    workspace: &Path,
+) -> Option<mcloving_agent_runtime::executor::WorkspaceDirIdentity> {
+    use nix::sys::stat::fstat;
+    let dir = open_affinity_workspace_dir(workspace_root, workspace).ok()?;
+    let stat = fstat(&dir).ok()?;
+    Some(mcloving_agent_runtime::executor::WorkspaceDirIdentity {
+        dev: stat.st_dev as u64,
+        ino: stat.st_ino as u64,
+    })
+}
+
+#[cfg(not(unix))]
+fn affinity_workspace_dir_identity(
+    _workspace_root: &Path,
+    _workspace: &Path,
+) -> Option<mcloving_agent_runtime::executor::WorkspaceDirIdentity> {
+    None
+}
+
+async fn affinity_retain_identity_still_matches(
+    workspace_root: &Path,
+    workspace: &Path,
+) -> Result<bool, AgentError> {
+    let Some((dev, ino)) = affinity_retain_marker_identity(workspace_root, workspace).await? else {
+        return Ok(true);
+    };
+    let Some(current) = affinity_workspace_dir_identity(workspace_root, workspace) else {
+        return Ok(false);
+    };
+    Ok(current.dev == dev && current.ino == ino)
 }
 
 async fn affinity_discharge_matches_attempt(
@@ -7830,7 +7924,11 @@ mod tests {
             .unwrap();
         assert_eq!(std::fs::read(&outside).unwrap(), b"secret");
         assert!(std::fs::symlink_metadata(&marker).unwrap().is_file());
-        assert_eq!(std::fs::read(&marker).unwrap(), b"retain:reuse\n");
+        let marker_bytes = std::fs::read(&marker).unwrap();
+        assert!(
+            marker_bytes.starts_with(b"retain:reuse"),
+            "{marker_bytes:?}"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -7898,7 +7996,11 @@ mod tests {
         write_affinity_retain_marker_unix(&root, &workspace, None, WorkspaceAffinityMode::Reuse)
             .unwrap();
         assert_eq!(std::fs::read(&outside).unwrap(), b"secret-payload");
-        assert_eq!(std::fs::read(&marker).unwrap(), b"retain:reuse\n");
+        let marker_bytes = std::fs::read(&marker).unwrap();
+        assert!(
+            marker_bytes.starts_with(b"retain:reuse"),
+            "{marker_bytes:?}"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
