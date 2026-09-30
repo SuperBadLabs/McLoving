@@ -4347,6 +4347,16 @@ async fn attempt_result_is_work_cancel_override(
         && result.outcome != outcome_name(WorkOutcome::Aborted))
 }
 
+async fn attempt_result_is_cancellation_protocol(
+    config: &AgentConfig,
+    attempt: &mcloving_agent_runtime::ReconciliationAttempt,
+) -> Result<bool, AgentError> {
+    let Ok(Some(result)) = recovered_persisted_result(config, attempt).await else {
+        return Ok(false);
+    };
+    Ok(result.completion_protocol == CANCELLATION_COMPLETION_PROTOCOL)
+}
+
 async fn attempt_result_affinity_retain(
     config: &AgentConfig,
     attempt: &mcloving_agent_runtime::ReconciliationAttempt,
@@ -4373,6 +4383,7 @@ async fn reclaim_attempt_spools(
     // ambiguous). Marker content encodes Create vs Reuse for pre-result crashes.
     let lease_loss_abort = attempt_result_is_lease_loss(config, attempt).await?;
     let work_cancel_override = attempt_result_is_work_cancel_override(config, attempt).await?;
+    let cancellation_protocol = attempt_result_is_cancellation_protocol(config, attempt).await?;
     let discharged = affinity_discharge_matches_attempt(
         &config.workspace_root,
         &attempt.workspace,
@@ -4384,11 +4395,15 @@ async fn reclaim_attempt_spools(
     // when the journal has already been reloaded as Aborted with a work-protocol
     // result that would otherwise look like a cancel override. Discharge is
     // attempt-scoped so a replacement's later reclaim cannot inherit it.
+    // Pre-result recovery writes a cancellation-protocol Aborted with no
+    // affinity_retain; that is true cancellation and must clear, not the Reuse
+    // marker-mode fallback.
     let cancelled_override = matches!(phase, AttemptPhase::Aborted)
         && !lease_loss_abort
         && !discharged
         && (matches!(attempt.phase, AttemptPhase::Cancelling)
-            || (matches!(attempt.phase, AttemptPhase::Aborted) && work_cancel_override));
+            || (matches!(attempt.phase, AttemptPhase::Aborted)
+                && (work_cancel_override || cancellation_protocol)));
     let durable_retain = attempt_result_affinity_retain(config, attempt).await?;
     let marker_mode =
         affinity_retain_marker_mode(&config.workspace_root, &attempt.workspace).await?;

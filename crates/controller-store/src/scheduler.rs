@@ -231,8 +231,12 @@ impl Store {
                    -- Before the pin, only claim an affinity multi-stage build when
                    -- this agent can satisfy every work node's required_capabilities,
                    -- or a later stage can queue forever against an under-capable pin.
+                   -- Join/post candidates skip this gate: they are not the pin source
+                   -- and must stay claimable when work failed before establishing a pin.
                    b.workspace_affinity_agent_id IS NOT NULL
                    OR b.workspace_namespace IS NOT NULL
+                   OR n.node_kind <> 'work'
+                   OR NOT ($6 = ANY(n.required_capabilities))
                    OR NOT (
                        b.dag_mode
                        AND (
