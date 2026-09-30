@@ -243,9 +243,7 @@ pub(crate) async fn grant_for_attempt(
                           )
                       )
                 ) AS remaining_after,
-                n.node_kind = 'work' AND $4 = ANY(n.required_capabilities) AS affinity_work,
-                a.ordinal AS attempt_ordinal,
-                n.max_attempts AS max_attempts
+                n.node_kind = 'work' AND $4 = ANY(n.required_capabilities) AS affinity_work
          FROM builds AS b
          JOIN nodes AS n
            ON n.organization_id = b.organization_id
@@ -296,14 +294,14 @@ pub(crate) async fn grant_for_attempt(
     } else {
         WorkspaceAffinityMode::Create
     };
-    let attempt_ordinal: i32 = row.try_get("attempt_ordinal")?;
-    let max_attempts: i32 = row.try_get("max_attempts")?;
     let grant = WorkspaceAffinityGrant {
         version: 1,
         mode,
         retain_on_success: remaining_after > 0,
-        // This attempt can still be followed by another ordinal when it fails.
-        retain_on_failure: attempt_ordinal < max_attempts,
+        // Always retain Failed Reuse until a durable dead letter (or sibling
+        // success with retain_on_success=false) can retire the tree. Operators
+        // may raise max_attempts via schedule_retry_as, so ordinal is not final.
+        retain_on_failure: true,
     };
     grant
         .validate()

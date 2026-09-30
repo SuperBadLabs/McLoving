@@ -7962,6 +7962,12 @@ mod tests {
             version: 1,
             mode: WorkspaceAffinityMode::Reuse,
             retain_on_success: false,
+            retain_on_failure: true,
+        };
+        let reuse_dead = WorkspaceAffinityGrant {
+            version: 1,
+            mode: WorkspaceAffinityMode::Reuse,
+            retain_on_success: false,
             retain_on_failure: false,
         };
         let create = WorkspaceAffinityGrant {
@@ -7974,8 +7980,12 @@ mod tests {
             Some(&reuse),
             WorkOutcome::Failed
         ));
-        assert!(!affinity_should_retain_workspace(
+        assert!(affinity_should_retain_workspace(
             Some(&reuse_final),
+            WorkOutcome::Failed
+        ));
+        assert!(!affinity_should_retain_workspace(
+            Some(&reuse_dead),
             WorkOutcome::Failed
         ));
         assert!(!affinity_should_retain_workspace(

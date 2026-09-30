@@ -5082,6 +5082,13 @@ impl Store {
                           AND wn.build_id = n.build_id
                           AND wn.node_kind = 'work'
                     ) > 1
+                    AND NOT EXISTS (
+                        SELECT 1 FROM nodes AS wn
+                        WHERE wn.organization_id = n.organization_id
+                          AND wn.build_id = n.build_id
+                          AND wn.node_kind = 'work'
+                          AND NOT ($3 = ANY(wn.required_capabilities))
+                    )
              FROM attempts AS a
              JOIN nodes AS n ON n.organization_id = a.organization_id AND n.id = a.node_id
              WHERE a.organization_id = $1 AND a.id = $2",
