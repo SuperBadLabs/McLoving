@@ -636,11 +636,19 @@ pub struct WorkspaceAffinityGrant {
     pub version: u32,
     pub mode: WorkspaceAffinityMode,
     /// When true, keep the build workspace after a successful attempt so a
-    /// later stage can reopen it. Failed `Reuse` attempts retain regardless
-    /// of this flag so a final-stage retry can reopen the shared tree. Create
-    /// failures and cancellations remove it; successful last-stage completion
-    /// clears it when this flag is false.
+    /// later stage can reopen it. Create failures and cancellations remove
+    /// it; successful last-stage completion clears it when this flag is false.
     pub retain_on_success: bool,
+    /// When true, keep after a Failed Reuse so a retry of this node (or a
+    /// sibling still counted in retain_on_success) can reopen the tree.
+    /// False when this attempt is already at max_attempts so a subsequent
+    /// dead-letter cannot leak the workspace forever.
+    #[serde(default = "default_retain_on_failure")]
+    pub retain_on_failure: bool,
+}
+
+fn default_retain_on_failure() -> bool {
+    true
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -669,12 +677,14 @@ mod affinity_tests {
             version: 1,
             mode: WorkspaceAffinityMode::Create,
             retain_on_success: true,
+            retain_on_failure: true,
         };
         grant.validate().unwrap();
         let bad = WorkspaceAffinityGrant {
             version: 2,
             mode: WorkspaceAffinityMode::Reuse,
             retain_on_success: false,
+            retain_on_failure: true,
         };
         assert!(bad.validate().is_err());
     }

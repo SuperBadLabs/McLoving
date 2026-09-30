@@ -5558,10 +5558,11 @@ async fn recovered_persisted_result(
     Ok(Some(serde_json::from_slice(&content)?))
 }
 
-/// Keep the affinity workspace when a later stage must reopen it: success when
-/// `retain_on_success` is set, or any failed `Reuse` attempt (including the
-/// final stage) so a retry can reopen the shared tree. Create failures clear
-/// the tree so a retry does not hit WorkspaceAlreadyExists.
+/// Keep the affinity workspace when a later stage or a retry must reopen it:
+/// success when `retain_on_success` is set; Failed Reuse when `retain_on_failure`
+/// or `retain_on_success` (siblings still need the tree). Create failures clear
+/// the tree so a retry does not hit WorkspaceAlreadyExists. Final Failed Reuse
+/// with both flags false clears so a subsequent dead-letter cannot leak the tree.
 fn affinity_should_retain_workspace(
     grant: Option<&WorkspaceAffinityGrant>,
     outcome: WorkOutcome,
@@ -5569,7 +5570,12 @@ fn affinity_should_retain_workspace(
     match grant {
         Some(grant) => match outcome {
             WorkOutcome::Succeeded if grant.retain_on_success => true,
-            WorkOutcome::Failed if matches!(grant.mode, WorkspaceAffinityMode::Reuse) => true,
+            WorkOutcome::Failed
+                if matches!(grant.mode, WorkspaceAffinityMode::Reuse)
+                    && (grant.retain_on_failure || grant.retain_on_success) =>
+            {
+                true
+            }
             _ => false,
         },
         None => false,
@@ -7950,22 +7956,25 @@ mod tests {
             version: 1,
             mode: WorkspaceAffinityMode::Reuse,
             retain_on_success: true,
+            retain_on_failure: true,
         };
         let reuse_final = WorkspaceAffinityGrant {
             version: 1,
             mode: WorkspaceAffinityMode::Reuse,
             retain_on_success: false,
+            retain_on_failure: false,
         };
         let create = WorkspaceAffinityGrant {
             version: 1,
             mode: WorkspaceAffinityMode::Create,
             retain_on_success: true,
+            retain_on_failure: true,
         };
         assert!(affinity_should_retain_workspace(
             Some(&reuse),
             WorkOutcome::Failed
         ));
-        assert!(affinity_should_retain_workspace(
+        assert!(!affinity_should_retain_workspace(
             Some(&reuse_final),
             WorkOutcome::Failed
         ));

@@ -22,6 +22,7 @@ pub(crate) async fn record_successful_agent(
     .bind(build_id)
     .bind(node_id)
     .bind(mcloving_domain::workspace::WORKSPACE_AFFINITY_CAPABILITY)
+    .bind(attempt_id)
     .fetch_optional(&mut **tx)
     .await?
     .unwrap_or(false);
@@ -207,6 +208,7 @@ pub(crate) async fn grant_for_attempt(
     organization_id: Uuid,
     build_id: Uuid,
     node_id: Uuid,
+    attempt_id: Uuid,
 ) -> Result<Option<WorkspaceAffinityGrant>, StoreError> {
     let row = sqlx::query(
         "SELECT b.workspace_affinity_agent_id,
@@ -242,12 +244,18 @@ pub(crate) async fn grant_for_attempt(
                           )
                       )
                 ) AS remaining_after,
-                n.node_kind = 'work' AND $4 = ANY(n.required_capabilities) AS affinity_work
+                n.node_kind = 'work' AND $4 = ANY(n.required_capabilities) AS affinity_work,
+                a.ordinal AS attempt_ordinal,
+                n.max_attempts AS max_attempts
          FROM builds AS b
          JOIN nodes AS n
            ON n.organization_id = b.organization_id
           AND n.build_id = b.id
           AND n.id = $3
+         JOIN attempts AS a
+           ON a.organization_id = n.organization_id
+          AND a.node_id = n.id
+          AND a.id = $5
          WHERE b.organization_id = $1 AND b.id = $2 AND b.dag_mode
            AND EXISTS (
                SELECT 1 FROM nodes
@@ -267,6 +275,7 @@ pub(crate) async fn grant_for_attempt(
     .bind(build_id)
     .bind(node_id)
     .bind(mcloving_domain::workspace::WORKSPACE_AFFINITY_CAPABILITY)
+    .bind(attempt_id)
     .fetch_optional(&mut **tx)
     .await?;
     let Some(row) = row else {
@@ -288,10 +297,14 @@ pub(crate) async fn grant_for_attempt(
     } else {
         WorkspaceAffinityMode::Create
     };
+    let attempt_ordinal: i32 = row.try_get("attempt_ordinal")?;
+    let max_attempts: i32 = row.try_get("max_attempts")?;
     let grant = WorkspaceAffinityGrant {
         version: 1,
         mode,
         retain_on_success: remaining_after > 0,
+        // This attempt can still be followed by another ordinal when it fails.
+        retain_on_failure: attempt_ordinal < max_attempts,
     };
     grant
         .validate()
@@ -310,12 +323,14 @@ mod tests {
             version: 1,
             mode: WorkspaceAffinityMode::Create,
             retain_on_success: true,
+            retain_on_failure: true,
         };
         create.validate().unwrap();
         let reuse = WorkspaceAffinityGrant {
             version: 1,
             mode: WorkspaceAffinityMode::Reuse,
             retain_on_success: false,
+            retain_on_failure: true,
         };
         reuse.validate().unwrap();
         assert_ne!(create.mode, reuse.mode);

@@ -3417,7 +3417,8 @@ impl Store {
             return Ok(None);
         };
         let workspace_affinity =
-            affinity::grant_for_attempt(&mut tx, organization_id, build_id, node_id).await?;
+            affinity::grant_for_attempt(&mut tx, organization_id, build_id, node_id, attempt_id)
+                .await?;
         tx.commit().await?;
         Ok(Some(AttemptExecution {
             workspace_transfer: workspace::grant(
