@@ -22,7 +22,6 @@ pub(crate) async fn record_successful_agent(
     .bind(build_id)
     .bind(node_id)
     .bind(mcloving_domain::workspace::WORKSPACE_AFFINITY_CAPABILITY)
-    .bind(attempt_id)
     .fetch_optional(&mut **tx)
     .await?
     .unwrap_or(false);
