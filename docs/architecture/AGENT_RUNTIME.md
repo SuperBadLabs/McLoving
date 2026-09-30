@@ -246,7 +246,10 @@ discharge a parked reconciliation).
 ## Portable execution boundary
 
 - Each attempt receives one new normalized workspace beneath a configured
-  canonical root.
+  canonical root. Product multi-stage builds that negotiate
+  `build-workspace-affinity-v1` (PAR-015) instead share
+  `{organization}/{build}/workspace` across stages on the pinned agent;
+  later stages open that directory and strip only the prior stage's spool.
 - Existing destinations, absolute paths, traversal, non-directory parents, and
   symlink or reparse-point components are rejected.
 - Standard output and error are written directly to files, fsynced, and hashed

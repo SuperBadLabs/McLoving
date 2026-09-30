@@ -24,7 +24,9 @@ mod windows;
 #[cfg(unix)]
 mod workspace_transfer;
 
-pub use cleanup::{flush_terminal_cleanup, remove_terminal_relative_path};
+pub use cleanup::{
+    flush_terminal_cleanup, remove_terminal_relative_path, remove_terminal_relative_path_retaining,
+};
 
 #[cfg(unix)]
 use unix::{
@@ -56,6 +58,9 @@ pub enum ExecutionMode {
 pub struct ExecutionRequest {
     /// Optional verified file state copied into this fresh attempt directory.
     pub workspace_seed: Option<mcloving_domain::workspace::WorkspaceSnapshot>,
+    /// When true, open an existing workspace directory instead of creating one
+    /// (PAR-015 affinity reuse across stages of one build).
+    pub reuse_existing_workspace: bool,
     /// Position of this process within a multi-step attempt (PAR-010).
     ///
     /// `None` is the single-step layout every earlier release used: a fresh
@@ -212,12 +217,23 @@ pub enum Containment {
     PodmanContainer,
 }
 
+/// Device/inode of the executor-retained workspace directory handle. Used to
+/// refuse affinity retain markers written into a pathname that no longer names
+/// that directory (rename-and-replace decoys).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WorkspaceDirIdentity {
+    pub dev: u64,
+    pub ino: u64,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExecutionOutcome {
     /// Only mediated private IO sets this; ordinary process status is unchanged.
     pub private_response_accepted: Option<bool>,
     /// Capture occurs only after containment; failure preserves process/log evidence.
     pub workspace_snapshot: Option<Result<mcloving_domain::workspace::WorkspaceSnapshot, String>>,
+    /// Identity of the workspace directory retained across the workload.
+    pub workspace_dir_identity: WorkspaceDirIdentity,
     pub termination: Termination,
     pub exit_code: Option<i32>,
     pub process_id: u32,

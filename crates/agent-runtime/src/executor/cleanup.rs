@@ -20,6 +20,34 @@ pub async fn remove_terminal_relative_path(
     workspace_root: &Path,
     relative_path: &Path,
 ) -> Result<Vec<PathBuf>, ExecutionError> {
+    remove_terminal_relative_path_inner(workspace_root, relative_path, None).await
+}
+
+/// Like [`remove_terminal_relative_path`], but empty-directory pruning stops at
+/// `retain_relative` instead of the organization anchor.
+///
+/// Affinity reclaim strips `spool/` while keeping `{org}/{build}/workspace`.
+/// Without a retain stop, pruning would delete that empty workspace leaf and
+/// the next Reuse stage would fail open.
+pub async fn remove_terminal_relative_path_retaining(
+    workspace_root: &Path,
+    relative_path: &Path,
+    retain_relative: &Path,
+) -> Result<Vec<PathBuf>, ExecutionError> {
+    validate_relative_path(retain_relative)?;
+    if !relative_path.starts_with(retain_relative) {
+        return Err(ExecutionError::InvalidWorkspace(
+            crate::JournalError::InvalidRelativePath,
+        ));
+    }
+    remove_terminal_relative_path_inner(workspace_root, relative_path, Some(retain_relative)).await
+}
+
+async fn remove_terminal_relative_path_inner(
+    workspace_root: &Path,
+    relative_path: &Path,
+    retain_relative: Option<&Path>,
+) -> Result<Vec<PathBuf>, ExecutionError> {
     validate_relative_path(relative_path)?;
     let root_metadata = match tokio::fs::symlink_metadata(workspace_root).await {
         Ok(metadata) => metadata,
@@ -87,17 +115,23 @@ pub async fn remove_terminal_relative_path(
     workspace_root_guard.ensure_original(workspace_root)?;
     // Keep bounded per-organization anchors so successive attempts extend
     // durable directory entries instead of recreating and re-flushing the
-    // whole chain from the workspace root.
-    let mut anchor = workspace_root.to_owned();
-    let mut components = relative_path.components();
-    if let Some(Component::Normal(first)) = components.next() {
-        anchor.push(first);
-        if first == AGENT_RESULT_DIRECTORY
-            && let Some(Component::Normal(organization)) = components.next()
-        {
-            anchor.push(organization);
+    // whole chain from the workspace root. Affinity retain raises the stop
+    // to the shared workspace leaf so spool strip cannot delete it.
+    let anchor = if let Some(retain_relative) = retain_relative {
+        workspace_root.join(retain_relative)
+    } else {
+        let mut anchor = workspace_root.to_owned();
+        let mut components = relative_path.components();
+        if let Some(Component::Normal(first)) = components.next() {
+            anchor.push(first);
+            if first == AGENT_RESULT_DIRECTORY
+                && let Some(Component::Normal(organization)) = components.next()
+            {
+                anchor.push(organization);
+            }
         }
-    }
+        anchor
+    };
     changed.extend(
         prune_empty_directories(
             workspace_root,
@@ -357,4 +391,56 @@ async fn prune_empty_directories(
         }
     }
     Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[tokio::test]
+    async fn retaining_spool_strip_keeps_affinity_workspace() {
+        let root = tempfile::tempdir().expect("root");
+        let workspace = PathBuf::from("org/build/workspace");
+        let spool = workspace.join("spool");
+        fs::create_dir_all(root.path().join(&spool)).expect("spool");
+        fs::write(root.path().join(&spool).join("stdout.log"), b"log").expect("log");
+        fs::write(root.path().join(&workspace).join("checkout.txt"), b"tree").expect("tree");
+
+        remove_terminal_relative_path_retaining(root.path(), &spool, &workspace)
+            .await
+            .expect("strip spool");
+
+        assert!(
+            root.path().join(&workspace).is_dir(),
+            "retained affinity workspace must survive empty-dir prune"
+        );
+        assert!(
+            root.path().join(&workspace).join("checkout.txt").is_file(),
+            "workload content must remain"
+        );
+        assert!(
+            !root.path().join(&spool).exists(),
+            "spool must be removed for the next Reuse stage"
+        );
+    }
+
+    #[tokio::test]
+    async fn default_spool_strip_still_prunes_empty_workspace() {
+        let root = tempfile::tempdir().expect("root");
+        let workspace = PathBuf::from("org/build/workspace");
+        let spool = workspace.join("spool");
+        fs::create_dir_all(root.path().join(&spool)).expect("spool");
+        fs::write(root.path().join(&spool).join("stdout.log"), b"log").expect("log");
+
+        remove_terminal_relative_path(root.path(), &spool)
+            .await
+            .expect("strip spool");
+
+        assert!(
+            !root.path().join(&workspace).exists(),
+            "non-retain cleanup may prune an emptied workspace leaf"
+        );
+        assert!(root.path().join("org").is_dir());
+    }
 }

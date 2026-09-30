@@ -620,3 +620,72 @@ mod tests {
         assert_ne!(metadata_only, snapshot().receipt().unwrap());
     }
 }
+
+/// Product multi-stage builds pin later stages to the agent that ran the first
+/// stage and reuse that build's on-disk workspace (PAR-015). The bounded
+/// checkpoint transfer above keeps its caps for the contained sequential path;
+/// affinity is how a checkout in stage one is visible to stage two without
+/// re-acquiring it.
+pub const WORKSPACE_AFFINITY_FEATURE: &str = "build-workspace-affinity-v1";
+pub const WORKSPACE_AFFINITY_CAPABILITY: &str = "workspace-affinity-v1";
+
+/// Wire grant telling the agent how to open and retire one affinity workspace.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceAffinityGrant {
+    pub version: u32,
+    pub mode: WorkspaceAffinityMode,
+    /// When true, keep the build workspace after a successful attempt so a
+    /// later stage can reopen it. Create failures and cancellations remove
+    /// it; successful last-stage completion clears it when this flag is false.
+    pub retain_on_success: bool,
+    /// When true, keep after a Failed Reuse so a retry of this node (or a
+    /// sibling still counted in retain_on_success) can reopen the tree.
+    /// False when this attempt is already at max_attempts so a subsequent
+    /// dead-letter cannot leak the workspace forever.
+    #[serde(default = "default_retain_on_failure")]
+    pub retain_on_failure: bool,
+}
+
+fn default_retain_on_failure() -> bool {
+    true
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceAffinityMode {
+    Create,
+    Reuse,
+}
+
+impl WorkspaceAffinityGrant {
+    pub fn validate(&self) -> Result<(), WorkspaceError> {
+        if self.version != 1 {
+            return Err(invalid("unsupported workspace affinity version"));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod affinity_tests {
+    use super::*;
+
+    #[test]
+    fn workspace_affinity_grant_validates_version_one() {
+        let grant = WorkspaceAffinityGrant {
+            version: 1,
+            mode: WorkspaceAffinityMode::Create,
+            retain_on_success: true,
+            retain_on_failure: true,
+        };
+        grant.validate().unwrap();
+        let bad = WorkspaceAffinityGrant {
+            version: 2,
+            mode: WorkspaceAffinityMode::Reuse,
+            retain_on_success: false,
+            retain_on_failure: true,
+        };
+        assert!(bad.validate().is_err());
+    }
+}

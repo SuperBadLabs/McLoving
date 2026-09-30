@@ -5129,29 +5129,59 @@ async fn admit_pipeline_parameters(
             error.to_string(),
         )
     })?;
+    let multi_stage = pipeline.stages.len() > 1;
+    if multi_stage {
+        let has_connector = pipeline.stages.iter().any(|stage| {
+            stage
+                .steps
+                .iter()
+                .any(|step| matches!(step, Step::ConnectorIntent(_)))
+        });
+        if has_connector {
+            // Connector intents run on the controller-owned effect runtime, not
+            // a remote affinity agent. Pinning the build to a remote agent (or
+            // requiring affinity on the effect worker) queues the pipeline
+            // forever. Reject at admission until affinity routing can name
+            // controller-owned stages explicitly.
+            return Err(ApiError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "pipeline_rejected",
+                "multi-stage workspace affinity cannot include connector_intent stages",
+            ));
+        }
+    }
     let nodes = pipeline
         .stages
         .iter()
         .enumerate()
-        .map(|(index, stage)| NewDagNode {
-            node_key: stage.id.clone(),
-            kind: DagNodeKind::Work,
-            dependencies: index
-                .checked_sub(1)
-                .map(|previous| {
-                    vec![DagDependency {
-                        node_key: pipeline.stages[previous].id.clone(),
-                        condition: DependencyCondition::Succeeded,
-                    }]
-                })
-                .unwrap_or_default(),
-            required_capabilities: stage_required_capabilities(stage),
-            required_platform: required_platform.clone(),
-            required_trust_pool: required_trust_pool.clone(),
-            priority: 0,
-            execution_spec: execution_spec(stage),
-            fail_fast: true,
-            max_attempts: 1,
+        .map(|(index, stage)| {
+            let mut required_capabilities = stage_required_capabilities(stage);
+            // PAR-015: every stage of a multi-stage product build requires an
+            // agent that can pin and reuse the build workspace.
+            if multi_stage {
+                required_capabilities
+                    .push(mcloving_domain::workspace::WORKSPACE_AFFINITY_CAPABILITY.to_owned());
+            }
+            NewDagNode {
+                node_key: stage.id.clone(),
+                kind: DagNodeKind::Work,
+                dependencies: index
+                    .checked_sub(1)
+                    .map(|previous| {
+                        vec![DagDependency {
+                            node_key: pipeline.stages[previous].id.clone(),
+                            condition: DependencyCondition::Succeeded,
+                        }]
+                    })
+                    .unwrap_or_default(),
+                required_capabilities,
+                required_platform: required_platform.clone(),
+                required_trust_pool: required_trust_pool.clone(),
+                priority: 0,
+                execution_spec: execution_spec(stage),
+                fail_fast: true,
+                max_attempts: 1,
+            }
         })
         .collect();
     let dag = NewDagBuild {
@@ -5564,6 +5594,15 @@ fn execution_mode_wire_name(mode: ProcessMode) -> &'static str {
 
 fn validate_execution_platform(pipeline: &PipelineIr, platform: &str) -> Result<(), ApiError> {
     if platform == "windows" {
+        // PAR-015: workspace affinity is Linux-only in v1; a multi-stage
+        // Windows submission would queue forever waiting for the capability.
+        if pipeline.stages.len() > 1 {
+            return Err(ApiError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "unsupported_execution_spec",
+                "multi-stage pipelines require workspace affinity on platform linux only",
+            ));
+        }
         // The shipped Windows agent never advertises `multi-step-v1`, so a
         // multi-step node submitted for Windows would queue forever. Refuse it
         // here with the same actionable diagnostic as other unrunnable shapes.
@@ -9464,6 +9503,36 @@ stages:
         let error = compile_source_with_parameters(&multiline, BTreeMap::new())
             .expect_err("a multiline value in a container stage is refused");
         assert!(error.message.contains("single-line"), "{}", error.message);
+    }
+
+    #[test]
+    fn multi_stage_pipelines_are_linux_only_at_admission() {
+        let source = concat!(
+            "version: 1\n",
+            "name: two\n",
+            "stages:\n",
+            "  - id: one\n",
+            "    name: One\n",
+            "    steps:\n",
+            "      - process:\n",
+            "          program: /bin/true\n",
+            "  - id: two\n",
+            "    name: Two\n",
+            "    steps:\n",
+            "      - process:\n",
+            "          program: /bin/true\n",
+        );
+        let pipeline =
+            compile_source_with_parameters(source, BTreeMap::new()).expect("two stages validate");
+        validate_execution_platform(&pipeline, "linux").expect("Linux runs multi-stage");
+        let error = validate_execution_platform(&pipeline, "windows")
+            .expect_err("Windows lacks workspace affinity");
+        assert_eq!(error.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(error.code, "unsupported_execution_spec");
+        assert_eq!(
+            error.message,
+            "multi-stage pipelines require workspace affinity on platform linux only"
+        );
     }
 
     #[test]

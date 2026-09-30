@@ -180,6 +180,13 @@ impl Store {
         )
         .fetch_one(&mut *tx)
         .await?;
+        // Unfenced Store::claim_next callers never enroll agent_sessions; orphan
+        // detection would false-fail a pinned build whose claimant is present in
+        // the request. Session-fenced polls keep the check.
+        if session_epoch.is_some() {
+            crate::affinity::fail_orphaned_affinity_builds(&mut tx, request.organization_id)
+                .await?;
+        }
 
         let candidate = sqlx::query(
             "SELECT n.id AS node_id, n.build_id, a.id AS attempt_id
@@ -211,6 +218,93 @@ impl Store {
                AND n.cancellation_requested_at IS NULL
                AND n.required_capabilities <@ $2::text[]
                AND n.required_trust_pool = $4
+               AND (
+                   -- Pin only affinity work nodes. Join/post (and any non-work
+                   -- DAG node) must remain claimable by agents that cover their
+                   -- own requirements, or orphan scan fails a valid build.
+                   b.workspace_affinity_agent_id IS NULL
+                   OR b.workspace_affinity_agent_id = $5
+                   OR n.node_kind <> 'work'
+               )
+               AND (
+                   -- Once pinned, claim_next already restricts to that agent.
+                   -- Before the pin, only claim an affinity multi-stage build when
+                   -- this agent can satisfy every work node's required_capabilities,
+                   -- or a later stage can queue forever against an under-capable pin.
+                   -- Join/post candidates skip this gate: they are not the pin source
+                   -- and must stay claimable when work failed before establishing a pin.
+                   b.workspace_affinity_agent_id IS NOT NULL
+                   OR b.workspace_namespace IS NOT NULL
+                   OR n.node_kind <> 'work'
+                   OR NOT ($6 = ANY(n.required_capabilities))
+                   OR NOT (
+                       b.dag_mode
+                       AND (
+                           SELECT count(*)::int FROM nodes AS wn
+                           WHERE wn.organization_id = n.organization_id
+                             AND wn.build_id = n.build_id
+                             AND wn.node_kind = 'work'
+                       ) > 1
+                       AND NOT EXISTS (
+                           SELECT 1 FROM nodes AS wn
+                           WHERE wn.organization_id = n.organization_id
+                             AND wn.build_id = n.build_id
+                             AND wn.node_kind = 'work'
+                             AND NOT ($6 = ANY(wn.required_capabilities))
+                       )
+                   )
+                   OR (
+                       NOT EXISTS (
+                           SELECT 1 FROM nodes AS wn
+                           WHERE wn.organization_id = n.organization_id
+                             AND wn.build_id = n.build_id
+                             AND wn.node_kind = 'work'
+                             AND NOT (wn.required_capabilities <@ $2::text[])
+                       )
+                       AND NOT EXISTS (
+                           -- Mixed trust pools across affinity work nodes cannot share
+                           -- one pin: refuse the claim unless every affinity stage
+                           -- asks for this agent's pool.
+                           SELECT 1 FROM nodes AS wn
+                           WHERE wn.organization_id = n.organization_id
+                             AND wn.build_id = n.build_id
+                             AND wn.node_kind = 'work'
+                             AND $6 = ANY(wn.required_capabilities)
+                             AND wn.required_trust_pool <> $4
+                       )
+                   )
+               )
+               AND (
+                   -- Affinity multi-stage work is single-flight before and after the
+                   -- pin: parallel ready children would both receive Reuse grants for
+                   -- the same workspace and race shared spool/. Transfer namespaces
+                   -- keep their own isolation and bypass this gate.
+                   b.workspace_namespace IS NOT NULL
+                   OR NOT (
+                       b.dag_mode
+                       AND (
+                           SELECT count(*)::int FROM nodes AS wn
+                           WHERE wn.organization_id = n.organization_id
+                             AND wn.build_id = n.build_id
+                             AND wn.node_kind = 'work'
+                       ) > 1
+                       AND NOT EXISTS (
+                           SELECT 1 FROM nodes AS wn
+                           WHERE wn.organization_id = n.organization_id
+                             AND wn.build_id = n.build_id
+                             AND wn.node_kind = 'work'
+                             AND NOT ($6 = ANY(wn.required_capabilities))
+                       )
+                   )
+                   OR NOT EXISTS (
+                       SELECT 1 FROM nodes AS wn
+                       WHERE wn.organization_id = n.organization_id
+                         AND wn.build_id = n.build_id
+                         AND wn.node_kind = 'work'
+                         AND wn.id <> n.id
+                         AND wn.status IN ('offered', 'running')
+                   )
+               )
                AND NOT EXISTS (
                    SELECT 1
                    FROM node_dependencies AS dependency
@@ -246,6 +340,8 @@ impl Store {
         .bind(&request.capabilities)
         .bind(request.fairness_seed)
         .bind(&request.trust_pool)
+        .bind(&request.agent_id)
+        .bind(mcloving_domain::workspace::WORKSPACE_AFFINITY_CAPABILITY)
         .fetch_optional(&mut *tx)
         .await?;
 

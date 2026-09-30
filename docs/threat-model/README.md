@@ -611,6 +611,8 @@ had never claimed one.
 | PAR-014 | `docs/evidence/PAR-014_SECURITY_REVIEW.md` |
 | PAR-004 | `docs/evidence/PAR-004_SECURITY_REVIEW.md` |
 | PAR-003 | `docs/evidence/PAR-003_SECURITY_REVIEW.md` |
+| PAR-002 | `docs/evidence/PAR-002_SECURITY_REVIEW.md` |
+| PAR-015 | `docs/evidence/PAR-015_SECURITY_REVIEW.md` |
 | EXEC-005 | `docs/evidence/EXEC-005_SECURITY_REVIEW.md` |
 
 ## Residual-risk policy
@@ -1117,7 +1119,7 @@ ticket closes on ten consecutive matching verdicts recorded in
 reviewed merge, exact-main Foundation and native Windows runs, and a
 receipt in `docs/evidence/PAR-005_SECURITY_REVIEW.md`.
 
-## PAR-002 native cron schedules review, ticket ACTIVE
+## PAR-002 native cron schedules review (earned closure)
 
 Native schedule triggers materialize Jenkins-style calendars (including `H`
 fields under `jenkins-core-2.516.1:cron-hash-v1`) into the mutable
@@ -1128,9 +1130,26 @@ capture, watermark monotonicity, dual-controller exactly-once via
 `FOR UPDATE SKIP LOCKED`, post-downtime skip of older missed slots with only
 the latest missed slot firing, and reject of slots outside the materialized
 set). Mario TimerTrigger production authority remains ineligible while sealed
-hash inputs stay incomplete; native H resolution does not admit it. Ticket
-stays `ACTIVE` until protected merge and exact-main Foundation/Windows
-verification.
+hash inputs stay incomplete; native H resolution does not admit it. Closed on
+PR #168 squash `83e9efeb`; receipt `docs/evidence/PAR-002_SECURITY_REVIEW.md`.
+
+## PAR-015 build workspace affinity review (earned closure)
+
+Product multi-stage builds pin later stages to the agent that ran the first
+stage and reuse that build's on-disk workspace (`BUILD_WORKSPACE_AFFINITY_V1`).
+Boundaries touched: TM-003 / TM-011 (agent session fencing and trust-pool
+binding on every claim; affinity successors are offered only to the pinned
+`lease_owner` and never to a blind substitute); TM-006 (workspace path
+identity under the configured root; affinity uses
+`{organization}/{build}/workspace` with spool stripped on reuse and full
+removal when not retained). A ready successor whose pinned agent has no live
+affinity-capable `agent_sessions` row fails with
+`workspace_affinity_agent_gone` rather than being rescheduled to another
+agent. Bounded checkpoint transfer keeps its caps and stays mutually
+exclusive. Residual: a crashed agent that still holds a session row leaves
+successors waiting for that agent — sticky placement, not blind reschedule;
+`SEC-005` still owns hostile same-UID isolation. Receipt
+`docs/evidence/PAR-015_SECURITY_REVIEW.md`.
 
 ## PAR-003 human role grants review (earned closure)
 

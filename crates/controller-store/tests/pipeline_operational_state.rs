@@ -2,17 +2,17 @@ use std::str::FromStr;
 
 use mcloving_controller_store::{
     AGENT_SESSIONS_V7, ARTIFACT_METADATA_V12, ATTEMPT_CREDENTIALS_V10, ATTEMPT_READINESS_V18,
-    AUTHORIZATION_MAPPING_V24, CONTROLLER_SCHEMA_V1, CREDENTIAL_NAMESPACE_V22, ClaimRequest,
-    DURABLE_RETRY_V4, DagNodeKind, EXTERNAL_ADMIN_CLIENTS_V26, EXTERNAL_READ_CONSUMERS_V25,
-    EffectClass, EffectStatus, GLOBAL_LOG_ORDER_V16, IDENTITY_LIFECYCLE_V19,
-    IDENTITY_SESSION_LINEAGE_V21, IDENTITY_SESSION_REFRESH_V20, NODE_TRUST_POOL_V8,
-    NORMALIZED_TEST_RESULTS_V13, NewCredentialGrant, NewDagBuild, NewDagNode,
+    AUTHORIZATION_MAPPING_V24, BUILD_WORKSPACE_V36, CONTROLLER_SCHEMA_V1, CREDENTIAL_NAMESPACE_V22,
+    ClaimRequest, DURABLE_RETRY_V4, DagNodeKind, EXTERNAL_ADMIN_CLIENTS_V26,
+    EXTERNAL_READ_CONSUMERS_V25, EffectClass, EffectStatus, GLOBAL_LOG_ORDER_V16,
+    IDENTITY_LIFECYCLE_V19, IDENTITY_SESSION_LINEAGE_V21, IDENTITY_SESSION_REFRESH_V20,
+    NODE_TRUST_POOL_V8, NORMALIZED_TEST_RESULTS_V13, NewCredentialGrant, NewDagBuild, NewDagNode,
     NewEnvironmentApproval, OBJECT_PUBLICATION_FENCE_V14, OBJECT_REFERENCES_V5, PIPELINE_DAG_V9,
     PIPELINE_OPERATIONAL_STATE_V27, PRODUCT_SURFACE_V15, PUBLIC_API_V3, PipelineOperationalState,
     PipelineOperationalStateTransition, PipelineOperationalStateTransitionOutcome,
     PipelinePutOutcome, PipelineWrite, RECOVERY_OPERATIONS_V6, RUNTIME_FUNCTION_BOUNDARY_V23,
     RetryDecision, STATE_TRANSFER_V17, Store, StoreError, TENANT_AUDIT_V11, TENANT_SECURITY_V2,
-    TerminalOutcome, WaitReason,
+    TerminalOutcome, WORKSPACE_AFFINITY_V43, WaitReason,
 };
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -922,6 +922,33 @@ async fn migration_0027_backfills_existing_enabled_pipelines_and_freezes_unbound
     .await
     .expect("read historic build binding");
     assert_eq!(binding, (None, None, None, None));
+    // claim_next's affinity orphan check reads workspace_namespace (migration 36)
+    // and workspace_affinity_agent_id (migration 43). Apply those columns on top
+    // of the v27 schema so the current scheduler SQL can run while the
+    // unbound-build refusal under test stays.
+    let mut tx = pool
+        .begin()
+        .await
+        .expect("begin post-v27 scheduler columns");
+    sqlx::raw_sql(BUILD_WORKSPACE_V36)
+        .execute(&mut *tx)
+        .await
+        .expect("apply v36");
+    sqlx::query("INSERT INTO mcloving_schema_migrations (version) VALUES (36)")
+        .execute(&mut *tx)
+        .await
+        .expect("record v36");
+    sqlx::raw_sql(WORKSPACE_AFFINITY_V43)
+        .execute(&mut *tx)
+        .await
+        .expect("apply v43");
+    sqlx::query("INSERT INTO mcloving_schema_migrations (version) VALUES (43)")
+        .execute(&mut *tx)
+        .await
+        .expect("record v43");
+    tx.commit()
+        .await
+        .expect("commit post-v27 scheduler columns");
     let migrated_store = Store::new(pool.clone());
     assert!(
         migrated_store

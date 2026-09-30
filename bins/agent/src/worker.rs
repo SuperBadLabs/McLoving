@@ -24,6 +24,7 @@ use mcloving_agent_runtime::executor::{
 };
 use mcloving_agent_runtime::executor::{
     flush_terminal_cleanup, remove_terminal_relative_path as remove_runtime_terminal_path,
+    remove_terminal_relative_path_retaining as remove_runtime_terminal_path_retaining,
 };
 use mcloving_agent_runtime::{
     Acceptance, AttemptPhase, Finalization, Journal, LogReservation, MAX_ATTEMPT_OUTPUT_BYTES,
@@ -34,7 +35,9 @@ use mcloving_domain::artifacts::ArtifactSpec;
 use mcloving_domain::cache_intent::{CacheIntentSpec, CacheWorkContext, cache_assignment_digest};
 use mcloving_domain::input_intent::{InputIntentSpec, InputWorkContext, input_assignment_digest};
 use mcloving_domain::source_intent::CheckoutStepSpec;
-use mcloving_domain::workspace::{WorkspaceGrant, WorkspaceTransferResult};
+use mcloving_domain::workspace::{
+    WorkspaceAffinityGrant, WorkspaceAffinityMode, WorkspaceGrant, WorkspaceTransferResult,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -108,6 +111,9 @@ struct PersistedResult {
     #[serde(default = "default_completion_protocol")]
     completion_protocol: String,
     cancellation_outcome: Option<i32>,
+    /// Reclaim honor: false clears a leftover marker after final-stage success.
+    #[serde(default)]
+    affinity_retain: Option<bool>,
     #[serde(default)]
     steps: Vec<StepRecord>,
 }
@@ -191,6 +197,7 @@ struct ValidatedAssignment {
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     work_context: CacheWorkContext,
     workspace_grant: Option<WorkspaceGrant>,
+    workspace_affinity: Option<WorkspaceAffinityGrant>,
     authority: WorkAuthority,
     workspace: PathBuf,
     payload_digest: [u8; 32],
@@ -245,6 +252,10 @@ struct ProcesslessCompletion<'a> {
     session_epoch: u64,
     outcome: WorkOutcome,
     reason: String,
+    /// Affinity grant for this attempt, when the stage is pinned. Processless
+    /// failures on `Reuse` must retain the shared tree or a retry reopens a
+    /// workspace the previous failure already deleted.
+    workspace_affinity: Option<&'a WorkspaceAffinityGrant>,
     /// Per-step records of a multi-step attempt whose first step never
     /// spawned; empty for every single-step processless completion.
     steps: Vec<StepRecord>,
@@ -258,6 +269,7 @@ struct DurableResult<'a> {
     reason: Option<&'a str>,
     completion_protocol: &'a str,
     cancellation_outcome: Option<i32>,
+    affinity_retain: Option<bool>,
     /// Per-step outcomes of a multi-step attempt; empty for single-step work
     /// so the single-step result bytes are unchanged.
     steps: &'a [StepRecord],
@@ -424,6 +436,11 @@ pub(super) async fn poll_and_run_one(
     if !assignment.workspace_transfer_json.is_empty() && !features.workspace_transfer {
         return Err(AgentError::InvalidAssignment(
             "workspace transfer was not negotiated".to_owned(),
+        ));
+    }
+    if !assignment.workspace_affinity_json.is_empty() && !features.workspace_affinity {
+        return Err(AgentError::InvalidAssignment(
+            "workspace affinity was not negotiated".to_owned(),
         ));
     }
     match validate_assignment_with_features(config, session_epoch, assignment, features)? {
@@ -595,7 +612,7 @@ async fn commit_replayed_phase(
         attempt.process_id,
     )?;
     if phase.is_terminal() {
-        reclaim_attempt_spools(config, attempt).await?;
+        reclaim_attempt_spools(config, attempt, phase).await?;
     }
     Ok(())
 }
@@ -958,10 +975,37 @@ fn validate_assignment_with_features(
         }
         Some(grant)
     };
-    let workspace = PathBuf::from(format!(
-        "{}/{}/{}",
-        assignment.organization_id, assignment.attempt_id, assignment.fence_token
-    ));
+    let workspace_affinity = if assignment.workspace_affinity_json.is_empty() {
+        None
+    } else {
+        if !cfg!(target_os = "linux") || assignment.workspace_affinity_json.len() > 4_096 {
+            return Err(AgentError::InvalidAssignment(
+                "unsupported workspace affinity".to_owned(),
+            ));
+        }
+        if workspace_grant.is_some() {
+            return Err(AgentError::InvalidAssignment(
+                "workspace affinity and workspace transfer are mutually exclusive".to_owned(),
+            ));
+        }
+        let grant: WorkspaceAffinityGrant =
+            serde_json::from_slice(&assignment.workspace_affinity_json)?;
+        grant
+            .validate()
+            .map_err(|error| AgentError::InvalidAssignment(error.to_string()))?;
+        Some(grant)
+    };
+    let workspace = if workspace_affinity.is_some() {
+        PathBuf::from(format!(
+            "{}/{}/workspace",
+            assignment.organization_id, assignment.build_id
+        ))
+    } else {
+        PathBuf::from(format!(
+            "{}/{}/{}",
+            assignment.organization_id, assignment.attempt_id, assignment.fence_token
+        ))
+    };
     let authority = WorkAuthority {
         agent_id: config.agent_id.clone(),
         session_epoch,
@@ -988,6 +1032,7 @@ fn validate_assignment_with_features(
                     checkouts: Vec::new(),
                     work_context: cache_context,
                     workspace_grant,
+                    workspace_affinity: workspace_affinity.clone(),
                     authority,
                     workspace,
                     payload_digest,
@@ -1046,6 +1091,11 @@ fn validate_assignment_with_features(
                         "artifact work requires a session that negotiated artifact-upload-v1",
                     ));
                 }
+                if workspace_affinity.is_some() && !features.workspace_affinity {
+                    return Ok(AssignmentDisposition::ForAnotherRuntime(
+                        "workspace affinity requires a session that negotiated build-workspace-affinity-v1",
+                    ));
+                }
                 if workspace_grant.is_some() {
                     return Ok(AssignmentDisposition::Unsupported(UnsupportedAssignment {
                         authority,
@@ -1060,6 +1110,7 @@ fn validate_assignment_with_features(
                     checkouts,
                     work_context: cache_context,
                     workspace_grant: None,
+                    workspace_affinity: workspace_affinity.clone(),
                     authority,
                     workspace,
                     payload_digest,
@@ -1097,6 +1148,7 @@ fn validate_assignment_with_features(
                         checkouts: Vec::new(),
                         work_context: cache_context,
                         workspace_grant,
+                        workspace_affinity: workspace_affinity.clone(),
                         authority,
                         workspace,
                         payload_digest,
@@ -1135,6 +1187,7 @@ fn validate_assignment_with_features(
                         checkouts: Vec::new(),
                         work_context: cache_context,
                         workspace_grant,
+                        workspace_affinity: workspace_affinity.clone(),
                         authority,
                         workspace,
                         payload_digest,
@@ -1627,6 +1680,7 @@ async fn refuse_unsupported_assignment(
             session_epoch,
             outcome,
             reason,
+            workspace_affinity: None,
             steps: Vec::new(),
         },
         AuthorityRpcControl {
@@ -1672,6 +1726,24 @@ async fn run_assignment(
         payload_digest: assignment.payload_digest,
         workspace: assignment.workspace.clone(),
     })?;
+    // Bind Reuse mode immediately after durable acceptance so a crash during
+    // helper prep, credentials, or StartWork cannot leave an inherited Create
+    // marker that discharge reclaim would delete under the shared tree.
+    if matches!(
+        assignment
+            .workspace_affinity
+            .as_ref()
+            .map(|grant| grant.mode),
+        Some(WorkspaceAffinityMode::Reuse)
+    ) {
+        write_affinity_retain_marker(
+            &config.workspace_root,
+            &assignment.workspace,
+            None,
+            WorkspaceAffinityMode::Reuse,
+        )
+        .await?;
+    }
 
     let lease_window = Duration::from_secs(u64::from(config.lease_seconds));
     // Everything a pre-expiry cancellation must finish before the term ends:
@@ -1743,6 +1815,7 @@ async fn run_assignment(
                 session_epoch,
                 outcome: WorkOutcome::Aborted,
                 reason: "cancelled_before_process_spawn".to_owned(),
+                workspace_affinity: assignment.workspace_affinity.as_ref(),
                 steps: Vec::new(),
             },
             AuthorityRpcControl {
@@ -1815,6 +1888,7 @@ async fn run_assignment(
                         .as_ref()
                         .map_or("helper_binding_rejected", HelperIntent::binding_failure)
                         .to_owned(),
+                    workspace_affinity: assignment.workspace_affinity.as_ref(),
                     steps: Vec::new(),
                 },
                 AuthorityRpcControl {
@@ -1848,6 +1922,7 @@ async fn run_assignment(
                     session_epoch,
                     outcome: WorkOutcome::Failed,
                     reason: "source_binding_rejected".to_owned(),
+                    workspace_affinity: assignment.workspace_affinity.as_ref(),
                     steps: Vec::new(),
                 },
                 AuthorityRpcControl {
@@ -1944,6 +2019,7 @@ async fn run_assignment(
                         session_epoch,
                         outcome: WorkOutcome::Aborted,
                         reason: "cancelled_while_waiting_for_credentials".to_owned(),
+                        workspace_affinity: assignment.workspace_affinity.as_ref(),
                         steps: Vec::new(),
                     },
                     AuthorityRpcControl {
@@ -1990,6 +2066,7 @@ async fn run_assignment(
                     session_epoch,
                     outcome: WorkOutcome::Aborted,
                     reason: "cancelled_while_starting_work".to_owned(),
+                    workspace_affinity: assignment.workspace_affinity.as_ref(),
                     steps: Vec::new(),
                 },
                 AuthorityRpcControl {
@@ -2110,6 +2187,11 @@ async fn run_assignment(
                 } else {
                     None
                 },
+                reuse_existing_workspace: index == 0
+                    && matches!(
+                        assignment.workspace_affinity.as_ref().map(|g| g.mode),
+                        Some(WorkspaceAffinityMode::Reuse)
+                    ),
                 step_ordinal: multi_step.then_some(ordinal),
                 container: container_runtime.as_ref().zip(step_container.as_ref()).map(
                     |((runtime, image), name)| mcloving_agent_runtime::executor::ContainerSpec {
@@ -2358,6 +2440,7 @@ async fn run_assignment(
                                 session_epoch,
                                 outcome: spawn_outcome,
                                 reason: spawn_reason,
+                                workspace_affinity: assignment.workspace_affinity.as_ref(),
                                 steps: if multi_step {
                                     vec![spawn_record]
                                 } else {
@@ -2591,6 +2674,37 @@ async fn run_assignment(
             .filter(|cause| **cause != CONTROLLER_CANCELLATION_TRIGGER)
             .map(|cause| format!("lease_lost_during_execution:{cause}"));
         let step_failure = last_record.reason.clone();
+        // Establish or clear affinity retention before the durable terminal
+        // exists. Retain-intended marker failure fails closed (no publication).
+        // A planted symlink or directory at the marker name is replaced or
+        // refused; a rename-and-replace decoy fails the inode check.
+        let lease_loss_reuse_retain = lease_loss.is_some()
+            && matches!(
+                assignment
+                    .workspace_affinity
+                    .as_ref()
+                    .map(|grant| grant.mode),
+                Some(WorkspaceAffinityMode::Reuse)
+            );
+        let intend_retain =
+            affinity_should_retain_workspace(assignment.workspace_affinity.as_ref(), terminal)
+                || (terminal == WorkOutcome::Aborted && lease_loss_reuse_retain);
+        if intend_retain {
+            // Fail closed: plant retain before any durable terminal. Do not clear
+            // here — a crash before begin_finalization must keep the marker so a
+            // discharged Reuse retry can reopen the shared tree.
+            write_affinity_retain_marker(
+                &config.workspace_root,
+                &assignment.workspace,
+                Some(&outcome.workspace_dir_identity),
+                assignment
+                    .workspace_affinity
+                    .as_ref()
+                    .map(|grant| grant.mode)
+                    .expect("intend_retain requires an affinity grant"),
+            )
+            .await?;
+        }
         let result = write_result(
             &config.workspace_root,
             &assignment.workspace,
@@ -2613,6 +2727,12 @@ async fn run_assignment(
                     .or(step_failure.as_deref()),
                 completion_protocol: WORK_COMPLETION_PROTOCOL,
                 cancellation_outcome: None,
+                affinity_retain: assignment.workspace_affinity.as_ref().map(|_| {
+                    affinity_should_retain_workspace(
+                        assignment.workspace_affinity.as_ref(),
+                        terminal,
+                    ) || (terminal == WorkOutcome::Aborted && lease_loss_reuse_retain)
+                }),
                 steps: if multi_step { &step_records } else { &[] },
             },
         )
@@ -2694,6 +2814,12 @@ async fn run_assignment(
             published,
             Some(outcome.process_id),
         )?;
+        let retain_workspace =
+            affinity_should_retain_workspace(assignment.workspace_affinity.as_ref(), published)
+                || (published == WorkOutcome::Aborted && lease_loss_reuse_retain);
+        if assignment.workspace_affinity.is_some() && !retain_workspace {
+            clear_affinity_retain_marker(&config.workspace_root, &assignment.workspace).await?;
+        }
         reclaim_spool_entries(
             config,
             &organization,
@@ -2703,6 +2829,7 @@ async fn run_assignment(
             &logs,
             Some(&result),
             &assignment.workspace,
+            retain_workspace,
         )
         .await?;
         Ok(())
@@ -4187,15 +4314,124 @@ pub(super) async fn reclaim_terminal_spools(config: &AgentConfig) -> Result<(), 
         .terminal_spools()?
         .attempts;
     for attempt in &attempts {
-        reclaim_attempt_spools(config, attempt).await?;
+        reclaim_attempt_spools(config, attempt, attempt.phase).await?;
     }
     Ok(())
+}
+
+async fn attempt_result_is_lease_loss(
+    config: &AgentConfig,
+    attempt: &mcloving_agent_runtime::ReconciliationAttempt,
+) -> Result<bool, AgentError> {
+    // Unreadable or forged result bytes must not fail reclaim itself; treat as
+    // not lease-loss so ordinary Aborted cleanup can still proceed.
+    let Ok(Some(result)) = recovered_persisted_result(config, attempt).await else {
+        return Ok(false);
+    };
+    Ok(result
+        .reason
+        .as_deref()
+        .is_some_and(|reason| reason.starts_with("lease_lost_during_execution:")))
+}
+
+async fn attempt_result_is_work_cancel_override(
+    config: &AgentConfig,
+    attempt: &mcloving_agent_runtime::ReconciliationAttempt,
+) -> Result<bool, AgentError> {
+    let Ok(Some(result)) = recovered_persisted_result(config, attempt).await else {
+        return Ok(false);
+    };
+    // Controller cancel can override a published work terminal to Aborted while
+    // the durable result still names the original Failed/Succeeded outcome.
+    Ok(result.completion_protocol == WORK_COMPLETION_PROTOCOL
+        && result.outcome != outcome_name(WorkOutcome::Aborted))
+}
+
+async fn attempt_result_is_cancellation_protocol(
+    config: &AgentConfig,
+    attempt: &mcloving_agent_runtime::ReconciliationAttempt,
+) -> Result<bool, AgentError> {
+    let Ok(Some(result)) = recovered_persisted_result(config, attempt).await else {
+        return Ok(false);
+    };
+    Ok(result.completion_protocol == CANCELLATION_COMPLETION_PROTOCOL)
+}
+
+async fn attempt_result_affinity_retain(
+    config: &AgentConfig,
+    attempt: &mcloving_agent_runtime::ReconciliationAttempt,
+) -> Result<Option<bool>, AgentError> {
+    let Ok(Some(result)) = recovered_persisted_result(config, attempt).await else {
+        return Ok(None);
+    };
+    Ok(result.affinity_retain)
 }
 
 async fn reclaim_attempt_spools(
     config: &AgentConfig,
     attempt: &mcloving_agent_runtime::ReconciliationAttempt,
+    phase: AttemptPhase,
 ) -> Result<(), AgentError> {
+    let marker_present =
+        affinity_retain_marker_present(&config.workspace_root, &attempt.workspace).await?;
+    // Agent-owned retain intent survives Reuse execution. Keep the tree for a
+    // later stage or a pinned retry. Cancellation that overrode a work terminal
+    // journals Aborted while result bytes may still say failed; lease-loss
+    // aborts keep retain via durable reason. Operator DischargeRecovered plants
+    // a durable discharge marker before the journal becomes Aborted so reclaim
+    // can keep Reuse trees after journal reload (work_cancel_override alone is
+    // ambiguous). Marker content encodes Create vs Reuse for pre-result crashes.
+    let lease_loss_abort = attempt_result_is_lease_loss(config, attempt).await?;
+    let work_cancel_override = attempt_result_is_work_cancel_override(config, attempt).await?;
+    let cancellation_protocol = attempt_result_is_cancellation_protocol(config, attempt).await?;
+    let discharged = affinity_discharge_matches_attempt(
+        &config.workspace_root,
+        &attempt.workspace,
+        &attempt.attempt_id,
+    )
+    .await?;
+    // Finalizing alone is not cancellation provenance. A durable discharge
+    // marker (operator retry superseded this fence) must keep Reuse retain even
+    // when the journal has already been reloaded as Aborted with a work-protocol
+    // result that would otherwise look like a cancel override. Discharge is
+    // attempt-scoped so a replacement's later reclaim cannot inherit it.
+    // Pre-result recovery writes a cancellation-protocol Aborted with no
+    // affinity_retain; that is true cancellation and must clear, not the Reuse
+    // marker-mode fallback.
+    let cancelled_override = matches!(phase, AttemptPhase::Aborted)
+        && !lease_loss_abort
+        && !discharged
+        && (matches!(attempt.phase, AttemptPhase::Cancelling)
+            || (matches!(attempt.phase, AttemptPhase::Aborted)
+                && (work_cancel_override || cancellation_protocol)));
+    let durable_retain = attempt_result_affinity_retain(config, attempt).await?;
+    let marker_mode =
+        affinity_retain_marker_mode(&config.workspace_root, &attempt.workspace).await?;
+    let retain_workspace = if !marker_present || cancelled_override {
+        false
+    } else if discharged {
+        // Matching discharge of THIS attempt: mode decides. A superseded
+        // Reuse tree must stay for the pinned replacement even when this
+        // attempt had already persisted affinity_retain=false; a discharged
+        // Create must clear so an unpinned Create retry can recreate.
+        !matches!(marker_mode, Some(WorkspaceAffinityMode::Create))
+    } else if let Some(should_retain) = durable_retain {
+        should_retain
+    } else {
+        // Pre-result crash: marker exists, no affinity_retain in result yet.
+        // Create must clear so a retry can recreate; Reuse must keep the tree.
+        matches!(marker_mode, Some(WorkspaceAffinityMode::Reuse))
+    };
+    // A rename-and-replace decoy must not be kept after discharge merely
+    // because the marker still says Reuse: revalidate the recorded inode.
+    let retain_workspace = if retain_workspace {
+        affinity_retain_identity_still_matches(&config.workspace_root, &attempt.workspace).await?
+    } else {
+        false
+    };
+    if marker_present && !retain_workspace {
+        clear_affinity_retain_marker(&config.workspace_root, &attempt.workspace).await?;
+    }
     reclaim_spool_entries(
         config,
         &attempt.organization_id,
@@ -4205,6 +4441,7 @@ async fn reclaim_attempt_spools(
         &attempt.logs,
         attempt.result.as_ref(),
         &attempt.workspace,
+        retain_workspace,
     )
     .await
 }
@@ -4219,21 +4456,45 @@ async fn reclaim_spool_entries(
     logs: &[SpoolEntry],
     result: Option<&SpoolEntry>,
     workspace: &Path,
+    retain_workspace: bool,
 ) -> Result<(), AgentError> {
-    // Remove the attempt root first. Log entries live below it, and a workload
-    // may have replaced that root after containment. Cleanup must never follow
-    // such a replacement while trying to reach an individual log.
-    let mut changed = remove_attempt_workspace(&config.workspace_root, workspace).await?;
+    // Remove the attempt root first unless affinity asked to keep it for a
+    // later stage. Log entries live below it, and a workload may have replaced
+    // that root after containment. Cleanup must never follow such a replacement
+    // while trying to reach an individual log.
+    let mut changed = if retain_workspace {
+        Vec::new()
+    } else {
+        remove_attempt_workspace(&config.workspace_root, workspace).await?
+    };
     for entry in logs.iter().chain(result) {
-        changed.extend(remove_spool_file(&config.workspace_root, entry).await?);
+        // Result bytes live under `.agent-results/`; only paths under the
+        // retained workspace leaf need the raised prune stop.
+        changed.extend(
+            if retain_workspace && entry.relative_path.starts_with(workspace) {
+                remove_spool_file_retaining(&config.workspace_root, entry, workspace).await?
+            } else {
+                remove_spool_file(&config.workspace_root, entry).await?
+            },
+        );
     }
-    // The relocated step spools of a multi-step attempt sit in one fixed
-    // directory. Every journaled entry below it was acknowledged before this
-    // point, and anything the journal never learned about is exactly the
-    // crash-window orphan this removal exists for.
+    // The relocated step spools of a multi-step attempt sit under
+    // `.agent-results/` (not the affinity leaf). Strip them with the ordinary
+    // prune stop. When retaining the workload tree, also strip in-tree
+    // `workspace/spool` without pruning the retained affinity leaf itself.
     changed.extend(
         remove_terminal_relative_path(&config.workspace_root, &step_spool_area(workspace)).await?,
     );
+    if retain_workspace {
+        changed.extend(
+            remove_terminal_relative_path_retaining(
+                &config.workspace_root,
+                &workspace.join("spool"),
+                workspace,
+            )
+            .await?,
+        );
+    }
     flush_terminal_cleanup(&config.workspace_root, workspace, changed).await?;
     Journal::open(&config.journal_path)?.retire_terminal_spools(
         organization_id,
@@ -4241,6 +4502,690 @@ async fn reclaim_spool_entries(
         fence_token,
         session_epoch,
     )?;
+    Ok(())
+}
+
+const AFFINITY_RETAIN_MARKER: &str = ".mcloving-affinity-retain";
+const AFFINITY_DISCHARGE_MARKER: &str = ".mcloving-affinity-discharged";
+#[cfg(unix)]
+const AFFINITY_RETAIN_MARKER_TMP: &str = ".mcloving-affinity-retain.tmp";
+#[cfg(unix)]
+const AFFINITY_DISCHARGE_MARKER_TMP: &str = ".mcloving-affinity-discharged.tmp";
+/// Agent-owned retain intent lives outside the workload tree so `git clean`
+/// (or any stage cleanup) cannot erase it during a Reuse execution.
+const AFFINITY_RETAIN_AGENT_ROOT: &str = ".mcloving-agent/affinity-retain";
+
+async fn write_affinity_retain_marker(
+    workspace_root: &Path,
+    workspace: &Path,
+    expected: Option<&mcloving_agent_runtime::executor::WorkspaceDirIdentity>,
+    mode: WorkspaceAffinityMode,
+) -> Result<(), AgentError> {
+    #[cfg(unix)]
+    {
+        write_affinity_retain_marker_unix(workspace_root, workspace, expected, mode)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (workspace_root, workspace, expected, mode);
+        Err(AgentError::InvalidAssignment(
+            "workspace affinity retain is Linux-only".to_owned(),
+        ))
+    }
+}
+
+#[cfg(unix)]
+fn open_affinity_workspace_dir(
+    workspace_root: &Path,
+    workspace: &Path,
+) -> Result<std::os::fd::OwnedFd, AgentError> {
+    use nix::fcntl::{OFlag, open, openat};
+    use nix::sys::stat::Mode;
+    let mut dir = open(
+        workspace_root,
+        OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|error| {
+        AgentError::InvalidAssignment(format!(
+            "affinity retain refused at workspace root {}: {error}",
+            workspace_root.display()
+        ))
+    })?;
+    for component in workspace.components() {
+        let std::path::Component::Normal(name) = component else {
+            return Err(AgentError::InvalidAssignment(
+                "affinity retain workspace must be normalized and relative".to_owned(),
+            ));
+        };
+        let c_name = std::ffi::CString::new(name.as_encoded_bytes()).map_err(|_| {
+            AgentError::InvalidAssignment(
+                "affinity retain workspace component contains NUL".to_owned(),
+            )
+        })?;
+        dir = openat(
+            &dir,
+            c_name.as_c_str(),
+            OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|error| {
+            AgentError::InvalidAssignment(format!(
+                "affinity retain refused under {}: {error}",
+                workspace.display()
+            ))
+        })?;
+    }
+    Ok(dir)
+}
+
+#[cfg(unix)]
+fn open_or_create_affinity_agent_dir(
+    workspace_root: &Path,
+    relative: &Path,
+) -> Result<std::os::fd::OwnedFd, AgentError> {
+    use nix::fcntl::{OFlag, open, openat};
+    use nix::sys::stat::Mode;
+    use nix::unistd::fsync;
+    let mut dir = open(
+        workspace_root,
+        OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|error| {
+        AgentError::InvalidAssignment(format!(
+            "affinity retain refused at workspace root {}: {error}",
+            workspace_root.display()
+        ))
+    })?;
+    // Parents whose directory entries we create must be fsynced before the
+    // terminal publishes, or power loss can drop an unsynced ancestor and lose
+    // retention intent.
+    let mut created_parents: Vec<std::os::fd::OwnedFd> = Vec::new();
+    for component in relative.components() {
+        let std::path::Component::Normal(name) = component else {
+            return Err(AgentError::InvalidAssignment(
+                "affinity retain agent path must be normalized and relative".to_owned(),
+            ));
+        };
+        let c_name = std::ffi::CString::new(name.as_encoded_bytes()).map_err(|_| {
+            AgentError::InvalidAssignment(
+                "affinity retain agent path component contains NUL".to_owned(),
+            )
+        })?;
+        match openat(
+            &dir,
+            c_name.as_c_str(),
+            OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+            Mode::empty(),
+        ) {
+            Ok(next) => dir = next,
+            Err(nix::errno::Errno::ENOENT) => {
+                nix::sys::stat::mkdirat(&dir, c_name.as_c_str(), Mode::from_bits_truncate(0o700))
+                    .map_err(|error| {
+                    AgentError::InvalidAssignment(format!(
+                        "affinity retain agent mkdir refused: {error}"
+                    ))
+                })?;
+                created_parents.push(dir);
+                dir = openat(
+                    created_parents.last().expect("parent just pushed"),
+                    c_name.as_c_str(),
+                    OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+                    Mode::empty(),
+                )
+                .map_err(|error| {
+                    AgentError::InvalidAssignment(format!(
+                        "affinity retain agent open refused: {error}"
+                    ))
+                })?;
+            }
+            Err(error) => {
+                return Err(AgentError::InvalidAssignment(format!(
+                    "affinity retain agent path refused under {}: {error}",
+                    relative.display()
+                )));
+            }
+        }
+    }
+    for parent in created_parents.iter().rev() {
+        fsync(parent).map_err(std::io::Error::from)?;
+    }
+    Ok(dir)
+}
+
+#[cfg(unix)]
+fn write_affinity_retain_marker_unix(
+    workspace_root: &Path,
+    workspace: &Path,
+    expected: Option<&mcloving_agent_runtime::executor::WorkspaceDirIdentity>,
+    mode: WorkspaceAffinityMode,
+) -> Result<(), AgentError> {
+    use nix::fcntl::{OFlag, openat};
+    use nix::sys::stat::{Mode, fstat, fstatat};
+    use nix::unistd::{UnlinkatFlags, fsync, unlinkat, write as nix_write};
+    // Verify the workload path still names the executor-retained directory
+    // when it exists. A stage may have deleted the tree (`git clean -fdx`);
+    // agent-owned retention still records intent so a Reuse retry/stage can
+    // decide. A successful open that fails the inode check is refused.
+    match open_affinity_workspace_dir(workspace_root, workspace) {
+        Ok(workspace_dir) => {
+            if let Some(expected) = expected {
+                let stat = fstat(&workspace_dir).map_err(|error| {
+                    AgentError::InvalidAssignment(format!(
+                        "affinity retain workspace identity refused: {error}"
+                    ))
+                })?;
+                if (stat.st_dev as u64) != expected.dev || (stat.st_ino as u64) != expected.ino {
+                    return Err(AgentError::InvalidAssignment(
+                        "affinity retain refused: workspace path no longer names the executor-retained directory"
+                            .to_owned(),
+                    ));
+                }
+            }
+        }
+        Err(AgentError::InvalidAssignment(message))
+            if message.contains("No such file or directory") =>
+        {
+            // Processless paths pass expected=None and may retain intent after
+            // the workload deleted the tree. An executor-backed terminal that
+            // still carries an identity must refuse: there is no tree to reopen.
+            if expected.is_some() {
+                return Err(AgentError::InvalidAssignment(
+                    "affinity retain refused: executor workspace is missing".to_owned(),
+                ));
+            }
+        }
+        Err(error) => return Err(error),
+    }
+    let retain_rel = Path::new(AFFINITY_RETAIN_AGENT_ROOT).join(workspace);
+    let dir = open_or_create_affinity_agent_dir(workspace_root, &retain_rel)?;
+    let marker_name = std::ffi::CString::new(AFFINITY_RETAIN_MARKER).expect("marker name");
+    let tmp_name = std::ffi::CString::new(AFFINITY_RETAIN_MARKER_TMP).expect("tmp marker");
+    // Encode Create/Reuse plus the verified workspace inode so discharge reclaim
+    // cannot keep a renamed replacement directory that is no longer the tree.
+    let identity = match expected {
+        Some(id) => Some(mcloving_agent_runtime::executor::WorkspaceDirIdentity {
+            dev: id.dev,
+            ino: id.ino,
+        }),
+        None => affinity_workspace_dir_identity(workspace_root, workspace),
+    };
+    let payload_owned = match (mode, identity.as_ref()) {
+        (WorkspaceAffinityMode::Create, Some(id)) => {
+            format!(
+                "retain:create:{}:{}
+",
+                id.dev, id.ino
+            )
+        }
+        (WorkspaceAffinityMode::Reuse, Some(id)) => {
+            format!(
+                "retain:reuse:{}:{}
+",
+                id.dev, id.ino
+            )
+        }
+        (WorkspaceAffinityMode::Create, None) => "retain:create
+"
+        .to_owned(),
+        (WorkspaceAffinityMode::Reuse, None) => "retain:reuse
+"
+        .to_owned(),
+    };
+    let payload = payload_owned.as_bytes();
+    match fstatat(
+        &dir,
+        marker_name.as_c_str(),
+        nix::fcntl::AtFlags::AT_SYMLINK_NOFOLLOW,
+    ) {
+        Err(nix::errno::Errno::ENOENT) => {}
+        Err(error) => {
+            return Err(AgentError::InvalidAssignment(format!(
+                "affinity retain marker stat refused: {error}"
+            )));
+        }
+        Ok(stat) if stat.st_mode & nix::libc::S_IFMT == nix::libc::S_IFREG => {
+            // Keep the existing durable record when the mode is unchanged so a
+            // crash cannot open a window with no marker before the replacement.
+            match openat(
+                &dir,
+                marker_name.as_c_str(),
+                OFlag::O_RDONLY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+                Mode::empty(),
+            ) {
+                Ok(existing) => {
+                    let mut buf = vec![0_u8; payload.len() + 1];
+                    let read =
+                        nix::unistd::read(&existing, &mut buf).map_err(std::io::Error::from)?;
+                    if read == payload.len() && &buf[..read] == payload {
+                        fsync(&dir).map_err(std::io::Error::from)?;
+                        return Ok(());
+                    }
+                }
+                Err(error) => {
+                    return Err(AgentError::InvalidAssignment(format!(
+                        "affinity retain marker read refused: {error}"
+                    )));
+                }
+            }
+            // Wrong mode: replace atomically via temp+rename below (no unlink).
+        }
+        Ok(stat) if stat.st_mode & nix::libc::S_IFMT == nix::libc::S_IFLNK => {
+            unlinkat(&dir, marker_name.as_c_str(), UnlinkatFlags::NoRemoveDir).map_err(
+                |error| {
+                    AgentError::InvalidAssignment(format!(
+                        "affinity retain marker symlink refused: {error}"
+                    ))
+                },
+            )?;
+        }
+        Ok(stat) if stat.st_mode & nix::libc::S_IFMT == nix::libc::S_IFDIR => {
+            unlinkat(&dir, marker_name.as_c_str(), UnlinkatFlags::RemoveDir).map_err(|error| {
+                AgentError::InvalidAssignment(format!(
+                    "affinity retain marker directory refused: {error}"
+                ))
+            })?;
+        }
+        Ok(_) => {
+            unlinkat(&dir, marker_name.as_c_str(), UnlinkatFlags::NoRemoveDir).map_err(
+                |error| {
+                    AgentError::InvalidAssignment(format!(
+                        "affinity retain marker type refused: {error}"
+                    ))
+                },
+            )?;
+        }
+    }
+    // Write a temp file then rename over the marker so a crash never leaves the
+    // retained Reuse tree without a durable record between unlink and create.
+    let _ = unlinkat(&dir, tmp_name.as_c_str(), UnlinkatFlags::NoRemoveDir);
+    let file = openat(
+        &dir,
+        tmp_name.as_c_str(),
+        OFlag::O_WRONLY | OFlag::O_CREAT | OFlag::O_EXCL | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+        Mode::from_bits_truncate(0o600),
+    )
+    .map_err(|error| {
+        AgentError::InvalidAssignment(format!(
+            "affinity retain marker tmp refused under {}: {error}",
+            retain_rel.display()
+        ))
+    })?;
+    let written = nix_write(&file, payload).map_err(std::io::Error::from)?;
+    if written != payload.len() {
+        return Err(AgentError::InvalidAssignment(
+            "affinity retain marker write was short".to_owned(),
+        ));
+    }
+    fsync(&file).map_err(std::io::Error::from)?;
+    nix::fcntl::renameat(&dir, tmp_name.as_c_str(), &dir, marker_name.as_c_str()).map_err(
+        |error| {
+            AgentError::InvalidAssignment(format!("affinity retain marker rename refused: {error}"))
+        },
+    )?;
+    fsync(&dir).map_err(std::io::Error::from)?;
+    Ok(())
+}
+
+async fn clear_affinity_retain_marker(
+    workspace_root: &Path,
+    workspace: &Path,
+) -> Result<(), AgentError> {
+    #[cfg(unix)]
+    {
+        clear_affinity_retain_marker_unix(workspace_root, workspace)
+    }
+    #[cfg(not(unix))]
+    {
+        let path = workspace_root.join(workspace).join(AFFINITY_RETAIN_MARKER);
+        match tokio::fs::symlink_metadata(&path).await {
+            Ok(metadata) if metadata.is_file() => tokio::fs::remove_file(&path).await?,
+            Ok(_) => {
+                return Err(AgentError::InvalidAssignment(format!(
+                    "affinity retain marker at {} is not a regular file",
+                    path.display()
+                )));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+fn clear_affinity_retain_marker_unix(
+    workspace_root: &Path,
+    workspace: &Path,
+) -> Result<(), AgentError> {
+    use nix::sys::stat::fstatat;
+    use nix::unistd::{UnlinkatFlags, fsync, unlinkat};
+    // Agent-owned retain path; missing means already cleared (Create never
+    // retained, or a prior clear).
+    let retain_rel = Path::new(AFFINITY_RETAIN_AGENT_ROOT).join(workspace);
+    let dir = match open_affinity_workspace_dir(workspace_root, &retain_rel) {
+        Ok(dir) => dir,
+        Err(AgentError::InvalidAssignment(message))
+            if message.contains("No such file or directory") =>
+        {
+            return Ok(());
+        }
+        Err(error) => return Err(error),
+    };
+    let marker_name = std::ffi::CString::new(AFFINITY_RETAIN_MARKER).expect("marker name");
+    match fstatat(
+        &dir,
+        marker_name.as_c_str(),
+        nix::fcntl::AtFlags::AT_SYMLINK_NOFOLLOW,
+    ) {
+        Err(nix::errno::Errno::ENOENT) => {}
+        Err(error) => {
+            return Err(AgentError::InvalidAssignment(format!(
+                "affinity retain clear stat refused: {error}"
+            )));
+        }
+        Ok(stat) if stat.st_mode & nix::libc::S_IFMT == nix::libc::S_IFDIR => {
+            unlinkat(&dir, marker_name.as_c_str(), UnlinkatFlags::RemoveDir).map_err(|error| {
+                AgentError::InvalidAssignment(format!(
+                    "affinity retain clear directory refused: {error}"
+                ))
+            })?;
+        }
+        Ok(_) => {
+            unlinkat(&dir, marker_name.as_c_str(), UnlinkatFlags::NoRemoveDir).map_err(
+                |error| {
+                    AgentError::InvalidAssignment(format!("affinity retain clear refused: {error}"))
+                },
+            )?;
+        }
+    }
+    let discharge_name = std::ffi::CString::new(AFFINITY_DISCHARGE_MARKER).expect("discharge");
+    match unlinkat(&dir, discharge_name.as_c_str(), UnlinkatFlags::NoRemoveDir) {
+        Ok(()) | Err(nix::errno::Errno::ENOENT) => {}
+        Err(error) => {
+            return Err(AgentError::InvalidAssignment(format!(
+                "affinity discharge clear refused: {error}"
+            )));
+        }
+    }
+    for tmp in [AFFINITY_RETAIN_MARKER_TMP, AFFINITY_DISCHARGE_MARKER_TMP] {
+        let tmp_name = std::ffi::CString::new(tmp).expect("tmp name");
+        match unlinkat(&dir, tmp_name.as_c_str(), UnlinkatFlags::NoRemoveDir) {
+            Ok(()) | Err(nix::errno::Errno::ENOENT) => {}
+            Err(error) => {
+                return Err(AgentError::InvalidAssignment(format!(
+                    "affinity retain tmp clear refused: {error}"
+                )));
+            }
+        }
+    }
+    // Directory entry removal must reach stable storage before reclaim keys
+    // off absence, or recovery can observe a reappeared marker.
+    fsync(&dir).map_err(std::io::Error::from)?;
+    prune_empty_affinity_retain_dirs(workspace_root, workspace)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn prune_empty_affinity_retain_dirs(
+    workspace_root: &Path,
+    workspace: &Path,
+) -> Result<(), AgentError> {
+    use nix::fcntl::{OFlag, open};
+    use nix::sys::stat::Mode;
+    use nix::unistd::fsync;
+    let retain_root = workspace_root.join(AFFINITY_RETAIN_AGENT_ROOT);
+    let mut current = retain_root.join(workspace);
+    while current != retain_root && current.starts_with(&retain_root) {
+        let parent = current
+            .parent()
+            .ok_or_else(|| {
+                AgentError::InvalidAssignment(
+                    "affinity retain prune escaped workspace root".to_owned(),
+                )
+            })?
+            .to_owned();
+        match std::fs::remove_dir(&current) {
+            Ok(()) => {
+                let parent_fd = open(
+                    &parent,
+                    OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+                    Mode::empty(),
+                )
+                .map_err(|error| {
+                    AgentError::InvalidAssignment(format!(
+                        "affinity retain prune parent open refused: {error}"
+                    ))
+                })?;
+                fsync(&parent_fd).map_err(std::io::Error::from)?;
+                current = parent;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                current = parent;
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::DirectoryNotEmpty | std::io::ErrorKind::PermissionDenied
+                ) =>
+            {
+                break;
+            }
+            Err(error) => {
+                return Err(AgentError::InvalidAssignment(format!(
+                    "affinity retain prune refused: {error}"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn affinity_retain_marker_present(
+    workspace_root: &Path,
+    workspace: &Path,
+) -> Result<bool, AgentError> {
+    let path = workspace_root
+        .join(AFFINITY_RETAIN_AGENT_ROOT)
+        .join(workspace)
+        .join(AFFINITY_RETAIN_MARKER);
+    match tokio::fs::symlink_metadata(&path).await {
+        Ok(metadata) => Ok(metadata.is_file()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn affinity_retain_marker_path(workspace_root: &Path, workspace: &Path) -> PathBuf {
+    workspace_root
+        .join(AFFINITY_RETAIN_AGENT_ROOT)
+        .join(workspace)
+        .join(AFFINITY_RETAIN_MARKER)
+}
+
+fn affinity_discharge_marker_path(workspace_root: &Path, workspace: &Path) -> PathBuf {
+    workspace_root
+        .join(AFFINITY_RETAIN_AGENT_ROOT)
+        .join(workspace)
+        .join(AFFINITY_DISCHARGE_MARKER)
+}
+
+/// Read Create/Reuse mode from the agent-owned retain marker. Legacy `retain\n`
+/// (no mode suffix) is treated as Reuse so pre-existing markers keep the tree.
+fn parse_affinity_retain_marker(bytes: &[u8]) -> (WorkspaceAffinityMode, Option<(u64, u64)>) {
+    let text = std::str::from_utf8(bytes)
+        .unwrap_or("")
+        .trim_end_matches('\n');
+    let mut parts = text.split(':');
+    let _ = parts.next(); // "retain"
+    let mode = match parts.next() {
+        Some("create") => WorkspaceAffinityMode::Create,
+        _ => WorkspaceAffinityMode::Reuse,
+    };
+    let identity = match (parts.next(), parts.next()) {
+        (Some(dev), Some(ino)) => match (dev.parse::<u64>(), ino.parse::<u64>()) {
+            (Ok(dev), Ok(ino)) => Some((dev, ino)),
+            _ => None,
+        },
+        _ => None,
+    };
+    (mode, identity)
+}
+
+async fn affinity_retain_marker_mode(
+    workspace_root: &Path,
+    workspace: &Path,
+) -> Result<Option<WorkspaceAffinityMode>, AgentError> {
+    let path = affinity_retain_marker_path(workspace_root, workspace);
+    match tokio::fs::read(&path).await {
+        Ok(bytes) => Ok(Some(parse_affinity_retain_marker(&bytes).0)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+async fn affinity_retain_marker_identity(
+    workspace_root: &Path,
+    workspace: &Path,
+) -> Result<Option<(u64, u64)>, AgentError> {
+    let path = affinity_retain_marker_path(workspace_root, workspace);
+    match tokio::fs::read(&path).await {
+        Ok(bytes) => Ok(parse_affinity_retain_marker(&bytes).1),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+#[cfg(unix)]
+fn affinity_workspace_dir_identity(
+    workspace_root: &Path,
+    workspace: &Path,
+) -> Option<mcloving_agent_runtime::executor::WorkspaceDirIdentity> {
+    use nix::sys::stat::fstat;
+    let dir = open_affinity_workspace_dir(workspace_root, workspace).ok()?;
+    let stat = fstat(&dir).ok()?;
+    Some(mcloving_agent_runtime::executor::WorkspaceDirIdentity {
+        dev: stat.st_dev as u64,
+        ino: stat.st_ino as u64,
+    })
+}
+
+#[cfg(not(unix))]
+fn affinity_workspace_dir_identity(
+    _workspace_root: &Path,
+    _workspace: &Path,
+) -> Option<mcloving_agent_runtime::executor::WorkspaceDirIdentity> {
+    None
+}
+
+async fn affinity_retain_identity_still_matches(
+    workspace_root: &Path,
+    workspace: &Path,
+) -> Result<bool, AgentError> {
+    let Some((dev, ino)) = affinity_retain_marker_identity(workspace_root, workspace).await? else {
+        return Ok(true);
+    };
+    let Some(current) = affinity_workspace_dir_identity(workspace_root, workspace) else {
+        return Ok(false);
+    };
+    Ok(current.dev == dev && current.ino == ino)
+}
+
+async fn affinity_discharge_matches_attempt(
+    workspace_root: &Path,
+    workspace: &Path,
+    attempt_id: &str,
+) -> Result<bool, AgentError> {
+    let path = affinity_discharge_marker_path(workspace_root, workspace);
+    match tokio::fs::read(&path).await {
+        Ok(bytes) => {
+            let expected = format!(
+                "discharged:{attempt_id}
+"
+            );
+            Ok(bytes == expected.as_bytes())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// Record that the controller discharged this fenced authority (operator retry
+/// superseded the attempt). Reclaim must keep a Reuse tree for the replacement.
+pub(super) async fn record_affinity_authority_discharged(
+    config: &AgentConfig,
+    attempt: &mcloving_agent_runtime::ReconciliationAttempt,
+) -> Result<(), AgentError> {
+    if !affinity_retain_marker_present(&config.workspace_root, &attempt.workspace).await? {
+        return Ok(());
+    }
+    write_affinity_discharge_marker(
+        &config.workspace_root,
+        &attempt.workspace,
+        &attempt.attempt_id,
+    )
+    .await
+}
+
+async fn write_affinity_discharge_marker(
+    workspace_root: &Path,
+    workspace: &Path,
+    attempt_id: &str,
+) -> Result<(), AgentError> {
+    #[cfg(unix)]
+    {
+        write_affinity_discharge_marker_unix(workspace_root, workspace, attempt_id)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (workspace_root, workspace, attempt_id);
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+fn write_affinity_discharge_marker_unix(
+    workspace_root: &Path,
+    workspace: &Path,
+    attempt_id: &str,
+) -> Result<(), AgentError> {
+    use nix::fcntl::{OFlag, openat};
+    use nix::sys::stat::Mode;
+    use nix::unistd::{UnlinkatFlags, fsync, unlinkat, write as nix_write};
+    let retain_rel = Path::new(AFFINITY_RETAIN_AGENT_ROOT).join(workspace);
+    let dir = open_or_create_affinity_agent_dir(workspace_root, &retain_rel)?;
+    let marker_name = std::ffi::CString::new(AFFINITY_DISCHARGE_MARKER).expect("discharge name");
+    let tmp_name = std::ffi::CString::new(AFFINITY_DISCHARGE_MARKER_TMP).expect("discharge tmp");
+    let payload = format!("discharged:{attempt_id}\n");
+    let payload = payload.as_bytes();
+    // Atomic temp+rename so a crash never leaves a blank or half-written discharge
+    // record, and so a replacement attempt can overwrite a stale prior discharge.
+    let _ = unlinkat(&dir, tmp_name.as_c_str(), UnlinkatFlags::NoRemoveDir);
+    let file = openat(
+        &dir,
+        tmp_name.as_c_str(),
+        OFlag::O_WRONLY | OFlag::O_CREAT | OFlag::O_EXCL | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+        Mode::from_bits_truncate(0o600),
+    )
+    .map_err(|error| {
+        AgentError::InvalidAssignment(format!("affinity discharge marker tmp refused: {error}"))
+    })?;
+    let written = nix_write(&file, payload).map_err(std::io::Error::from)?;
+    if written != payload.len() {
+        return Err(AgentError::InvalidAssignment(
+            "affinity discharge marker write was short".to_owned(),
+        ));
+    }
+    fsync(&file).map_err(std::io::Error::from)?;
+    nix::fcntl::renameat(&dir, tmp_name.as_c_str(), &dir, marker_name.as_c_str()).map_err(
+        |error| {
+            AgentError::InvalidAssignment(format!(
+                "affinity discharge marker rename refused: {error}"
+            ))
+        },
+    )?;
+    fsync(&dir).map_err(std::io::Error::from)?;
     Ok(())
 }
 
@@ -4278,6 +5223,25 @@ async fn remove_spool_file(
     remove_terminal_relative_path(workspace_root, &entry.relative_path).await
 }
 
+async fn remove_spool_file_retaining(
+    workspace_root: &Path,
+    entry: &SpoolEntry,
+    retain_workspace: &Path,
+) -> Result<Vec<PathBuf>, AgentError> {
+    if entry.relative_path.is_absolute()
+        || entry
+            .relative_path
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err(AgentError::InvalidAssignment(
+            "terminal spool path must be normalized and relative".to_owned(),
+        ));
+    }
+    remove_terminal_relative_path_retaining(workspace_root, &entry.relative_path, retain_workspace)
+        .await
+}
+
 /// Removes one terminal path, returning the directories whose entry lists
 /// changed and that still exist — the durability boundaries its caller
 /// flushes once, before retiring the descriptors that referenced the path.
@@ -4286,6 +5250,16 @@ async fn remove_terminal_relative_path(
     relative_path: &Path,
 ) -> Result<Vec<PathBuf>, AgentError> {
     remove_runtime_terminal_path(workspace_root, relative_path)
+        .await
+        .map_err(Into::into)
+}
+
+async fn remove_terminal_relative_path_retaining(
+    workspace_root: &Path,
+    relative_path: &Path,
+    retain_relative: &Path,
+) -> Result<Vec<PathBuf>, AgentError> {
+    remove_runtime_terminal_path_retaining(workspace_root, relative_path, retain_relative)
         .await
         .map_err(Into::into)
 }
@@ -4406,6 +5380,7 @@ async fn write_result(
         reason,
         completion_protocol,
         cancellation_outcome,
+        affinity_retain,
         steps,
     } = result;
     let relative_parent = PathBuf::from(AGENT_RESULT_DIRECTORY)
@@ -4422,6 +5397,7 @@ async fn write_result(
         "reason": reason,
         "completion_protocol": completion_protocol,
         "cancellation_outcome": cancellation_outcome,
+        "affinity_retain": affinity_retain,
     });
     if !steps.is_empty() {
         value["steps"] = serde_json::to_value(steps)?;
@@ -4621,6 +5597,7 @@ pub(super) async fn persist_recovered_cancellation(
             reason: interrupted_step.as_deref(),
             completion_protocol: CANCELLATION_COMPLETION_PROTOCOL,
             cancellation_outcome: Some(cancellation_outcome),
+            affinity_retain: None,
             steps: &[],
         },
     )
@@ -4690,6 +5667,30 @@ async fn recovered_persisted_result(
     Ok(Some(serde_json::from_slice(&content)?))
 }
 
+/// Keep the affinity workspace when a later stage or a retry must reopen it:
+/// success when `retain_on_success` is set; Failed Reuse when `retain_on_failure`
+/// or `retain_on_success` (siblings still need the tree). Create failures clear
+/// the tree so a retry does not hit WorkspaceAlreadyExists. Final Failed Reuse
+/// with both flags false clears so a subsequent dead-letter cannot leak the tree.
+fn affinity_should_retain_workspace(
+    grant: Option<&WorkspaceAffinityGrant>,
+    outcome: WorkOutcome,
+) -> bool {
+    match grant {
+        Some(grant) => match outcome {
+            WorkOutcome::Succeeded if grant.retain_on_success => true,
+            WorkOutcome::Failed
+                if matches!(grant.mode, WorkspaceAffinityMode::Reuse)
+                    && (grant.retain_on_failure || grant.retain_on_success) =>
+            {
+                true
+            }
+            _ => false,
+        },
+        None => false,
+    }
+}
+
 async fn finalize_without_process(
     config: &AgentConfig,
     client: &mut AgentControlClient<Channel>,
@@ -4703,8 +5704,31 @@ async fn finalize_without_process(
         session_epoch,
         outcome,
         reason,
+        workspace_affinity,
         steps,
     } = completion;
+    // Plant retain before begin_finalization when needed. Clear only after the
+    // durable published terminal so a crash in this window keeps Reuse intent.
+    let termination = reason;
+    let lease_loss_reuse_retain = matches!(
+        workspace_affinity.map(|grant| grant.mode),
+        Some(WorkspaceAffinityMode::Reuse)
+    ) && termination.starts_with("lease_lost_during_execution:");
+    let intend_retain = affinity_should_retain_workspace(workspace_affinity, outcome)
+        || (outcome == WorkOutcome::Aborted && lease_loss_reuse_retain);
+    if intend_retain {
+        // Processless paths have no executor-retained handle; still require a
+        // durable marker before publication so recovery cannot scrub a Reuse tree.
+        write_affinity_retain_marker(
+            &config.workspace_root,
+            workspace,
+            None,
+            workspace_affinity
+                .map(|grant| grant.mode)
+                .expect("intend_retain requires an affinity grant"),
+        )
+        .await?;
+    }
     let result = write_result(
         &config.workspace_root,
         workspace,
@@ -4712,10 +5736,14 @@ async fn finalize_without_process(
             workspace_transfer: None,
             outcome,
             exit_code: None,
-            termination: &reason,
-            reason: Some(&reason),
+            termination: &termination,
+            reason: Some(&termination),
             completion_protocol: WORK_COMPLETION_PROTOCOL,
             cancellation_outcome: None,
+            affinity_retain: workspace_affinity.map(|_| {
+                affinity_should_retain_workspace(workspace_affinity, outcome)
+                    || (outcome == WorkOutcome::Aborted && lease_loss_reuse_retain)
+            }),
             steps: &steps,
         },
     )
@@ -4765,6 +5793,11 @@ async fn finalize_without_process(
         published,
         None,
     )?;
+    let retain_workspace = affinity_should_retain_workspace(workspace_affinity, published)
+        || (published == WorkOutcome::Aborted && lease_loss_reuse_retain);
+    if workspace_affinity.is_some() && !retain_workspace {
+        clear_affinity_retain_marker(&config.workspace_root, workspace).await?;
+    }
     reclaim_spool_entries(
         config,
         &authority.organization_id,
@@ -4774,6 +5807,7 @@ async fn finalize_without_process(
         &[],
         Some(&result),
         workspace,
+        retain_workspace,
     )
     .await?;
     Ok(())
@@ -5000,6 +6034,7 @@ mod tests {
             project_id: String::new(),
             pipeline_id: String::new(),
             workspace_transfer_json: Vec::new(),
+            workspace_affinity_json: Vec::new(),
             organization_id: "00000000-0000-0000-0000-000000000123".to_owned(),
             build_id: "00000000-0000-0000-0000-000000000124".to_owned(),
             node_id: "00000000-0000-0000-0000-000000000125".to_owned(),
@@ -5234,6 +6269,7 @@ mod tests {
             reason: None,
             completion_protocol: WORK_COMPLETION_PROTOCOL.to_owned(),
             cancellation_outcome: None,
+            affinity_retain: None,
             steps: vec![
                 StepRecord {
                     ordinal: 0,
@@ -6173,6 +7209,7 @@ mod tests {
                 reason: Some("process_spawn_failed: refused"),
                 completion_protocol: WORK_COMPLETION_PROTOCOL,
                 cancellation_outcome: None,
+                affinity_retain: None,
                 steps: &[],
             },
         )
@@ -6189,6 +7226,7 @@ mod tests {
                 reason: Some("process_spawn_failed: refused"),
                 completion_protocol: WORK_COMPLETION_PROTOCOL,
                 cancellation_outcome: None,
+                affinity_retain: None,
                 steps: &[],
             },
         )
@@ -6235,6 +7273,7 @@ mod tests {
                 reason: None,
                 completion_protocol: CANCELLATION_COMPLETION_PROTOCOL,
                 cancellation_outcome: Some(CancellationOutcome::Terminated as i32),
+                affinity_retain: None,
                 steps: &[],
             },
         )
@@ -6280,6 +7319,7 @@ mod tests {
                     reason: Some("refused"),
                     completion_protocol: WORK_COMPLETION_PROTOCOL,
                     cancellation_outcome: None,
+                    affinity_retain: None,
                     steps: &[],
                 },
             )
@@ -6327,6 +7367,7 @@ mod tests {
                     reason: Some("refused"),
                     completion_protocol: WORK_COMPLETION_PROTOCOL,
                     cancellation_outcome: None,
+                    affinity_retain: None,
                     steps: &[],
                 },
             )
@@ -6361,6 +7402,7 @@ mod tests {
                 reason: Some("restored"),
                 completion_protocol: WORK_COMPLETION_PROTOCOL,
                 cancellation_outcome: None,
+                affinity_retain: None,
                 steps: &[],
             },
         )
@@ -6394,6 +7436,7 @@ mod tests {
                 reason: None,
                 completion_protocol: WORK_COMPLETION_PROTOCOL,
                 cancellation_outcome: None,
+                affinity_retain: None,
                 steps: &[],
             },
         )
@@ -6442,6 +7485,7 @@ mod tests {
                 reason: None,
                 completion_protocol: CANCELLATION_COMPLETION_PROTOCOL,
                 cancellation_outcome: Some(CancellationOutcome::Terminated as i32),
+                affinity_retain: None,
                 steps: &[],
             },
         )
@@ -6522,6 +7566,7 @@ mod tests {
                 reason: None,
                 completion_protocol: WORK_COMPLETION_PROTOCOL,
                 cancellation_outcome: None,
+                affinity_retain: None,
                 steps: &[],
             },
         )
@@ -6857,6 +7902,230 @@ mod tests {
             verify_spool_file(&path, &entry, "log").await,
             Err(AgentError::InvalidAssignment(_))
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn affinity_retain_marker_replaces_a_symlink_without_following_it() {
+        let root =
+            std::env::temp_dir().join(format!("mcloving-affinity-symlink-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let workspace = PathBuf::from("org/build/workspace");
+        std::fs::create_dir_all(root.join(&workspace)).unwrap();
+        let outside = root.join("outside-target");
+        std::fs::write(&outside, b"secret").unwrap();
+        let marker = root
+            .join(AFFINITY_RETAIN_AGENT_ROOT)
+            .join(&workspace)
+            .join(AFFINITY_RETAIN_MARKER);
+        std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&outside, &marker).unwrap();
+        write_affinity_retain_marker_unix(&root, &workspace, None, WorkspaceAffinityMode::Reuse)
+            .unwrap();
+        assert_eq!(std::fs::read(&outside).unwrap(), b"secret");
+        assert!(std::fs::symlink_metadata(&marker).unwrap().is_file());
+        let marker_bytes = std::fs::read(&marker).unwrap();
+        assert!(
+            marker_bytes.starts_with(b"retain:reuse"),
+            "{marker_bytes:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn affinity_retain_refuses_workspace_inode_mismatch() {
+        use std::os::unix::fs::MetadataExt;
+        let root =
+            std::env::temp_dir().join(format!("mcloving-affinity-inode-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let workspace = PathBuf::from("org/build/workspace");
+        std::fs::create_dir_all(root.join(&workspace)).unwrap();
+        let meta = std::fs::metadata(root.join(&workspace)).unwrap();
+        let expected = mcloving_agent_runtime::executor::WorkspaceDirIdentity {
+            dev: meta.dev(),
+            ino: meta.ino(),
+        };
+        let relocated = root.join("org/build/relocated");
+        std::fs::rename(root.join(&workspace), &relocated).unwrap();
+        std::fs::create_dir_all(root.join(&workspace)).unwrap();
+        let error = write_affinity_retain_marker_unix(
+            &root,
+            &workspace,
+            Some(&expected),
+            WorkspaceAffinityMode::Reuse,
+        )
+        .expect_err("decoy workspace must be refused");
+        assert!(error.to_string().contains("executor-retained"), "{error}");
+        let agent_marker = root
+            .join(AFFINITY_RETAIN_AGENT_ROOT)
+            .join(&workspace)
+            .join(AFFINITY_RETAIN_MARKER);
+        assert!(!agent_marker.exists());
+        write_affinity_retain_marker_unix(
+            &root,
+            Path::new("org/build/relocated"),
+            Some(&expected),
+            WorkspaceAffinityMode::Reuse,
+        )
+        .unwrap();
+        let relocated_marker = root
+            .join(AFFINITY_RETAIN_AGENT_ROOT)
+            .join("org/build/relocated")
+            .join(AFFINITY_RETAIN_MARKER);
+        assert!(relocated_marker.is_file());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn affinity_retain_replaces_hard_linked_regular_marker() {
+        let root =
+            std::env::temp_dir().join(format!("mcloving-affinity-hardlink-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let workspace = PathBuf::from("org/build/workspace");
+        std::fs::create_dir_all(root.join(&workspace)).unwrap();
+        let outside = root.join("linked-target");
+        std::fs::write(&outside, b"secret-payload").unwrap();
+        let marker = root
+            .join(AFFINITY_RETAIN_AGENT_ROOT)
+            .join(&workspace)
+            .join(AFFINITY_RETAIN_MARKER);
+        std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+        std::fs::hard_link(&outside, &marker).unwrap();
+        write_affinity_retain_marker_unix(&root, &workspace, None, WorkspaceAffinityMode::Reuse)
+            .unwrap();
+        assert_eq!(std::fs::read(&outside).unwrap(), b"secret-payload");
+        let marker_bytes = std::fs::read(&marker).unwrap();
+        assert!(
+            marker_bytes.starts_with(b"retain:reuse"),
+            "{marker_bytes:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn affinity_retain_clear_tolerates_missing_create_workspace() {
+        let root =
+            std::env::temp_dir().join(format!("mcloving-affinity-missing-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let workspace = PathBuf::from("org/build/workspace");
+        clear_affinity_retain_marker_unix(&root, &workspace).unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn affinity_retain_clear_unlinks_and_prunes_empty_retain_dirs() {
+        let root =
+            std::env::temp_dir().join(format!("mcloving-affinity-clear-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let workspace = PathBuf::from("org/build/workspace");
+        std::fs::create_dir_all(root.join(&workspace)).unwrap();
+        write_affinity_retain_marker_unix(&root, &workspace, None, WorkspaceAffinityMode::Reuse)
+            .unwrap();
+        clear_affinity_retain_marker_unix(&root, &workspace).unwrap();
+        let retain_leaf = root.join(AFFINITY_RETAIN_AGENT_ROOT).join(&workspace);
+        assert!(std::fs::symlink_metadata(&retain_leaf).is_err());
+        assert!(
+            !root.join(AFFINITY_RETAIN_AGENT_ROOT).join("org").exists()
+                || root
+                    .join(AFFINITY_RETAIN_AGENT_ROOT)
+                    .read_dir()
+                    .map(|entries| entries.count() == 0)
+                    .unwrap_or(true)
+        );
+        assert!(root.join(&workspace).is_dir());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn affinity_retain_refuses_a_nonempty_directory_marker() {
+        let root =
+            std::env::temp_dir().join(format!("mcloving-affinity-dir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let workspace = PathBuf::from("org/build/workspace");
+        std::fs::create_dir_all(root.join(&workspace)).unwrap();
+        let marker = root
+            .join(AFFINITY_RETAIN_AGENT_ROOT)
+            .join(&workspace)
+            .join(AFFINITY_RETAIN_MARKER);
+        std::fs::create_dir_all(marker.join("child")).unwrap();
+        let error = write_affinity_retain_marker_unix(
+            &root,
+            &workspace,
+            None,
+            WorkspaceAffinityMode::Reuse,
+        )
+        .expect_err("non-empty directory marker is refused");
+        let rendered = error.to_string();
+        assert!(rendered.contains("directory"), "{rendered}");
+        assert!(marker.join("child").is_dir());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn processless_reuse_failure_retains_affinity_workspace() {
+        let reuse = WorkspaceAffinityGrant {
+            version: 1,
+            mode: WorkspaceAffinityMode::Reuse,
+            retain_on_success: true,
+            retain_on_failure: true,
+        };
+        let reuse_final = WorkspaceAffinityGrant {
+            version: 1,
+            mode: WorkspaceAffinityMode::Reuse,
+            retain_on_success: false,
+            retain_on_failure: true,
+        };
+        let reuse_dead = WorkspaceAffinityGrant {
+            version: 1,
+            mode: WorkspaceAffinityMode::Reuse,
+            retain_on_success: false,
+            retain_on_failure: false,
+        };
+        let create = WorkspaceAffinityGrant {
+            version: 1,
+            mode: WorkspaceAffinityMode::Create,
+            retain_on_success: true,
+            retain_on_failure: true,
+        };
+        assert!(affinity_should_retain_workspace(
+            Some(&reuse),
+            WorkOutcome::Failed
+        ));
+        assert!(affinity_should_retain_workspace(
+            Some(&reuse_final),
+            WorkOutcome::Failed
+        ));
+        assert!(!affinity_should_retain_workspace(
+            Some(&reuse_dead),
+            WorkOutcome::Failed
+        ));
+        assert!(!affinity_should_retain_workspace(
+            Some(&reuse_final),
+            WorkOutcome::Succeeded
+        ));
+        assert!(affinity_should_retain_workspace(
+            Some(&reuse),
+            WorkOutcome::Succeeded
+        ));
+        assert!(!affinity_should_retain_workspace(
+            Some(&reuse),
+            WorkOutcome::Aborted
+        ));
+        assert!(!affinity_should_retain_workspace(
+            Some(&create),
+            WorkOutcome::Failed
+        ));
+        assert!(affinity_should_retain_workspace(
+            Some(&create),
+            WorkOutcome::Succeeded
+        ));
+        assert!(!affinity_should_retain_workspace(None, WorkOutcome::Failed));
     }
 }
 

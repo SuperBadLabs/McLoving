@@ -84,6 +84,11 @@ where
             "the Windows agent runs no containers",
         ));
     }
+    if request.reuse_existing_workspace {
+        return Err(ExecutionError::WorkspaceTransfer(
+            "workspace affinity reuse is not supported on Windows".to_owned(),
+        ));
+    }
     let workspace_root_control = open_workspace_root(&request.workspace_root)?;
     ensure_original_workspace_root(&workspace_root_control, &request.workspace_root)?;
 
@@ -239,9 +244,13 @@ where
     sync_directory(&spool)?;
     sync_directory(&workspace)?;
 
+    let _ = &workspace;
+    // Affinity retain is Linux-only; Windows fills a placeholder identity.
+    let workspace_dir_identity = super::WorkspaceDirIdentity { dev: 0, ino: 0 };
     Ok(ExecutionOutcome {
         private_response_accepted: None,
         workspace_snapshot: None,
+        workspace_dir_identity,
         termination,
         exit_code: status.code(),
         process_id,
@@ -552,6 +561,7 @@ mod tests {
     ) -> ExecutionRequest {
         ExecutionRequest {
             workspace_seed: None,
+            reuse_existing_workspace: false,
             step_ordinal: None,
             container: None,
             workspace_root: root.to_owned(),

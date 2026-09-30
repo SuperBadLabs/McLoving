@@ -124,12 +124,14 @@ where
     ensure_original_workspace_root(&workspace_root_control, &request.workspace_root)?;
 
     // A later step of a multi-step attempt re-enters the workspace its first
-    // step created; every other execution gets a fresh one.
-    let workspace = match request.step_ordinal {
-        Some(ordinal) if ordinal > 0 => {
-            super::open_step_workspace(&request.workspace_root, &request.workspace)?
-        }
-        _ => create_workspace(&request.workspace_root, &request.workspace)?,
+    // step created; affinity reuse (PAR-015) opens a prior stage's workspace;
+    // every other execution gets a fresh one.
+    let workspace = if request.reuse_existing_workspace
+        || matches!(request.step_ordinal, Some(ordinal) if ordinal > 0)
+    {
+        super::open_step_workspace(&request.workspace_root, &request.workspace)?
+    } else {
+        create_workspace(&request.workspace_root, &request.workspace)?
     };
     let workspace_control = File::open(&workspace)?;
     if let Some(seed) = &request.workspace_seed {
@@ -137,7 +139,17 @@ where
             .map_err(ExecutionError::WorkspaceTransfer)?;
     }
     let attempt_spool = workspace.join("spool");
-    if !matches!(request.step_ordinal, Some(ordinal) if ordinal > 0) {
+    if request.reuse_existing_workspace
+        && !matches!(request.step_ordinal, Some(ordinal) if ordinal > 0)
+    {
+        // Prior stage left its spool. Strip only the spool so checkout content
+        // stays. Retention intent is agent-owned outside this tree, so a stage
+        // cleanup cannot erase it. The next stage strips spool again.
+        if attempt_spool.exists() {
+            tokio::fs::remove_dir_all(&attempt_spool).await?;
+        }
+        tokio::fs::create_dir(&attempt_spool).await?;
+    } else if !matches!(request.step_ordinal, Some(ordinal) if ordinal > 0) {
         tokio::fs::create_dir(&attempt_spool).await?;
     }
     let (spool, spool_suffix) = match request.step_ordinal {
@@ -518,9 +530,15 @@ where
         }
         super::workspace_transfer::capture(&workspace, &workspace_control)
     });
+    let workspace_meta = workspace_control.metadata()?;
+    let workspace_dir_identity = super::WorkspaceDirIdentity {
+        dev: std::os::unix::fs::MetadataExt::dev(&workspace_meta),
+        ino: std::os::unix::fs::MetadataExt::ino(&workspace_meta),
+    };
     Ok(ExecutionOutcome {
         private_response_accepted,
         workspace_snapshot,
+        workspace_dir_identity,
         termination: termination.0,
         exit_code: termination.1.code(),
         process_id,
@@ -1233,6 +1251,7 @@ mod tests {
     fn request(root: &Path, workspace: &str, timeout: Duration) -> ExecutionRequest {
         ExecutionRequest {
             workspace_seed: None,
+            reuse_existing_workspace: false,
             step_ordinal: None,
             container: None,
             workspace_root: root.to_owned(),
@@ -1254,6 +1273,7 @@ mod tests {
     fn resistant_request(root: &Path, workspace: &str) -> ExecutionRequest {
         ExecutionRequest {
             workspace_seed: None,
+            reuse_existing_workspace: false,
             step_ordinal: None,
             container: None,
             workspace_root: root.to_owned(),
@@ -1486,6 +1506,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let request = ExecutionRequest {
             workspace_seed: None,
+            reuse_existing_workspace: false,
             step_ordinal: None,
             container: None,
             workspace_root: root.path().to_owned(),
@@ -1514,6 +1535,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let request = ExecutionRequest {
             workspace_seed: None,
+            reuse_existing_workspace: false,
             step_ordinal: None,
             container: None,
             workspace_root: root.path().to_owned(),
@@ -1547,6 +1569,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let request = ExecutionRequest {
             workspace_seed: None,
+            reuse_existing_workspace: false,
             step_ordinal: None,
             container: None,
             workspace_root: root.path().to_owned(),
@@ -1581,6 +1604,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let request = ExecutionRequest {
             workspace_seed: None,
+            reuse_existing_workspace: false,
             step_ordinal: None,
             container: None,
             workspace_root: root.path().to_owned(),
@@ -1618,6 +1642,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let request = ExecutionRequest {
             workspace_seed: None,
+            reuse_existing_workspace: false,
             step_ordinal: None,
             container: None,
             workspace_root: root.path().to_owned(),
@@ -1698,6 +1723,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let request = ExecutionRequest {
             workspace_seed: None,
+            reuse_existing_workspace: false,
             step_ordinal: None,
             container: None,
             workspace_root: root.path().to_owned(),
@@ -1725,6 +1751,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let request = ExecutionRequest {
             workspace_seed: None,
+            reuse_existing_workspace: false,
             step_ordinal: None,
             container: None,
             workspace_root: root.path().to_owned(),
@@ -1768,6 +1795,7 @@ mod tests {
         std::fs::create_dir(root.path().join("existing")).unwrap();
         let existing = ExecutionRequest {
             workspace_seed: None,
+            reuse_existing_workspace: false,
             step_ordinal: None,
             container: None,
             workspace_root: root.path().to_owned(),
@@ -1789,6 +1817,7 @@ mod tests {
         std::os::unix::fs::symlink("/tmp", root.path().join("linked")).unwrap();
         let linked = ExecutionRequest {
             workspace_seed: None,
+            reuse_existing_workspace: false,
             step_ordinal: None,
             container: None,
             workspace: PathBuf::from("linked/escape"),
@@ -1812,6 +1841,7 @@ mod tests {
 
         let request = ExecutionRequest {
             workspace_seed: None,
+            reuse_existing_workspace: false,
             step_ordinal: None,
             container: None,
             workspace_root: workspace_root.clone(),
@@ -1872,6 +1902,7 @@ mod private_io_tests {
     fn request(root: &Path, script: &str) -> ExecutionRequest {
         ExecutionRequest {
             workspace_seed: None,
+            reuse_existing_workspace: false,
             step_ordinal: None,
             container: None,
             workspace_root: root.to_owned(),
