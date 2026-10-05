@@ -1,8 +1,8 @@
-# CTRL-006 sequential artifact refusal: candidate evidence
+# CTRL-006 sequential artifact refusal: implementation and closure evidence
 
-This is a candidate implementation and review record, not a closure receipt.
-Independent review, protected merge, and exact-main Foundation and native
-Windows verification remain required. `CTRL-006` remains unclosed.
+The implementation and test observations below record the candidate phase.
+The subsequent earned-closure observation records its independent review,
+protected merge, and successful exact-main Foundation and native Windows runs.
 
 ## Acceptance and scope
 
@@ -90,3 +90,29 @@ independent review of the actual candidate before becoming a reviewed
 no-change receipt. There is no production, canary, migration or release
 authority claim. Hostile same-UID isolation remains SEC-005; stage-level
 artifact collection in sequential nodes remains unsupported.
+
+## Subsequent earned closure observation
+
+At 2026-10-05T19:10:16.410833+00:00, the complete candidate had passed independent review of
+the planner, valid-IR refusal and positive controls, and all affected threat
+boundaries. The root and M2 coordinator reviews covered the final guard-before-
+container ordering and stage-name diagnostic; the rebase to its protected base
+preserved the reviewed source and tests byte-for-byte.
+
+PR [#171](https://github.com/SuperBadLabs/McLoving/pull/171) completed a normal
+protected squash merge as `663124621e37dd2a5387cec3aedbfa452f20c2c4` after all eight
+required contexts succeeded on candidate `dea09f0473cee87a813441ee616b19c56aa9eda6`
+under GitHub Actions App 15368 and zero unresolved review threads.
+The first hosted source-acquirer timeout on the earlier candidate was retained;
+the fresh final candidate completed that suite without a waiver.
+
+Exact-merge Foundation [37358396885](https://github.com/SuperBadLabs/McLoving/actions/runs/37358396885)
+and Windows Agent [37358396922](https://github.com/SuperBadLabs/McLoving/actions/runs/37358396922)
+both completed successfully as push-triggered attempt 1. The actual native
+Windows job [111926589336](https://github.com/SuperBadLabs/McLoving/actions/runs/37358396922/job/111926589336)
+succeeded, including debug and release service/crash-recovery gates; this is
+actual execution rather than an impact-classifier skip. This subsequent closure
+update marks the bounded stage-refusal acceptance earned. The implementation
+still performs no stage-level artifact collection and grants no production,
+canary, migration or release authority. Earlier candidate-phase pending-gate
+statements describe those observations, before the checks and merge above.
