@@ -148,3 +148,13 @@ correction. Fresh checks must describe its subsequent committed head.
   main commit; baseline runs above are not substitutes.
 - Replace this candidate record with factual earned review/merge/run receipts
   and only then perform the subsequent board closure update.
+
+## Protected merge and earned closure observation
+
+On 2026-10-05, reviewed candidate `b417d8a040ae210edec9f540425ee45f3c45d731` completed all eight required GitHub Actions app `15368` checks with no unresolved review threads. Root independently reviewed the complete credential/timestamp/evidence implementation; M2 independently reviewed the root-authored runner dependency and workflow oracle correction, including failing removal controls. PR #170 then completed its normal protected squash merge as `178693dbb59b062739e6404c72017ebbf73727e4` on 2026-10-05.
+
+Push-triggered exact-main Foundation [37353894530](https://github.com/SuperBadLabs/McLoving/actions/runs/37353894530), attempt 1, completed successfully at 2026-10-05T18:32:35Z. Exact-main Windows Agent [37353894444](https://github.com/SuperBadLabs/McLoving/actions/runs/37353894444), attempt 1, also completed successfully; actual native job `111911376132` ran rather than being skipped, including its debug/release service gates. These observations apply to the named merge commit. They do not discharge the standing successor-head gate for later changes.
+
+The ten consecutive historical first-parent protected-main pushes retain matching Foundation-lane, published-status, durable controller, checkout, node and attempt-log verdict bindings as recorded in the byte-preserved table and selected readback. Timestamp display corrections leave that denominator unchanged. The accepted owner-user debug deployment, signed bridge, missing contemporaneous binary/config attestations, same-UID and SIGKILL cleanup limits remain explicit above; this closure grants no production or workload-isolation authority.
+
+This subsequent bookkeeping update records the completed implementation review, protected merge and post-merge gates, marks PAR-005 DONE, adds its factual review attribution and advances the existing selected slot to AGENT-013. The AGENT-013 and DOGFOOD-001 follow-ups retain their complete acceptance and independent closure obligations. Earlier candidate-stage pending lists and failed hosted observations above are historical; the successful merge/run observations here satisfy those implementation gates.

@@ -613,6 +613,7 @@ had never claimed one.
 | PAR-003 | `docs/evidence/PAR-003_SECURITY_REVIEW.md` |
 | PAR-002 | `docs/evidence/PAR-002_SECURITY_REVIEW.md` |
 | PAR-015 | `docs/evidence/PAR-015_SECURITY_REVIEW.md` |
+| PAR-005 | `docs/evidence/PAR-005_SECURITY_REVIEW.md` |
 | EXEC-005 | `docs/evidence/EXEC-005_SECURITY_REVIEW.md` |
 
 ## Residual-risk policy
