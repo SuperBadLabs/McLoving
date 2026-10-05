@@ -54,6 +54,15 @@ pub fn plan_sequential_build(
                 "sequential stage must contain a shell step".to_owned(),
             ));
         }
+        // Per-step nodes have no stage-level collection boundary. Preserve the
+        // declared pipeline semantics by refusing artifacts instead of dropping
+        // them from the execution envelope.
+        if !stage.artifacts.is_empty() {
+            return Err(StoreError::InvalidDag(format!(
+                "sequential planning does not admit artifacts in stage {:?}",
+                stage.id
+            )));
+        }
         // Sequential planning lowers every step to a version-1 host process
         // with no capability requirement. A stage that asked for containment
         // (PAR-011) must not silently run on the agent account instead.
