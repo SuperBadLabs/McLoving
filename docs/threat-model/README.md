@@ -1119,6 +1119,40 @@ ticket closes on ten consecutive matching verdicts recorded in
 reviewed merge, exact-main Foundation and native Windows runs, and a
 receipt in `docs/evidence/PAR-005_SECURITY_REVIEW.md`.
 
+The pending timestamp correction preserves the controller's full
+millisecond creation time when `verdicts.sh` serializes evidence: a
+remainder of 5 must become `.005`, not `.500`. This is TM-052 evidence
+integrity work, not a changed push denominator or a fresh execution claim.
+`scripts/test-dogfood-verdicts.py` exercises the complete shipped recorder
+against isolated GitHub and controller readbacks, proving exact timestamps
+and accepted chronological appends at 000, 005, 040, 074, 087, 100 and 999 ms, plus
+continued refusal of a genuinely out-of-order build. Both the Foundation
+architecture job and its dogfood mirror run the regression. Historical table
+readback from an isolated copy of the stopped dogfood database confirmed two
+historical timestamp errors (087 recorded as 870 and 040 as 400); the original
+table is preserved with a dated erratum. All ten stored build verdicts still
+match Foundation. The candidate review receipt records the limited review scope
+and outstanding closure gates; PAR-005 remains ACTIVE.
+
+The pending credential correction also addresses TM-013 and TM-039:
+owner-private request files replace bearer-token and replayable signature
+headers in `curl` arguments, and public-hook registration reads its secret
+from a private JSON request file rather than `jq --argjson`. The bridge
+signer loads the key inside Python and signs the exact payload bytes; no
+private key is passed to `openssl -hmac`. The controller's cleared-environment
+launch loads its API/artifact tokens through shell builtins from the existing
+private identities file before executing the same controller PID, instead of
+putting them in `env` arguments. Missing or empty handoff credentials refuse
+startup. Credential request files are removed after success, transport/signer
+failures, and handled INT/TERM exits; an uncatchable SIGKILL may leave a private
+file. `scripts/test-dogfood-credentials.py` exercises the complete scripts with
+synthetic credentials and command spies, including exact signatures, actual
+`/proc` arguments, file modes, POST/PATCH bodies, cleared child environment,
+startup refusals and interrupted requests. Its local process check is not a
+cross-UID isolation claim. The owner's service environment and private files
+remain accessible to the same UID; the outstanding SEC-005 workload boundary
+and the full ticket's independent committed-head review remain required.
+
 ## PAR-002 native cron schedules review (earned closure)
 
 Native schedule triggers materialize Jenkins-style calendars (including `H`

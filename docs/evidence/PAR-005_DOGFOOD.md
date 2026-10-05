@@ -157,3 +157,31 @@ as `revision_mismatch` and counted as a mismatch.
 | 8 | `cf85367ccea2` | 2026-09-28T04:11:19.605Z | 36376562417 | success | `a7f61824-2a76-4291-9f5a-5d17627f3498` | succeeded | yes |
 | 9 | `326e03fe0024` | 2026-09-28T04:54:39.659Z | 36379650992 | success | `69db9334-0f9e-4bb5-ac92-f3059ce40de6` | succeeded | yes |
 | 10 | `9a3468c687fa` | 2026-09-28T05:43:00.400Z | 36383073183 | success | `ad6a8ae9-b40e-406b-bde7-6d5376fbd685` | succeeded | yes |
+
+## Timestamp erratum and independent readback (2026-10-05)
+
+The original verdict table above is preserved. Independent hosted readbacks
+confirm all ten Foundation runs succeeded on their recorded full main SHAs,
+and each commit's successful `mcloving/foundation` status targets its recorded
+build UUID. An isolated copy of the stopped original dogfood PostgreSQL volume
+was queried with network disabled and read-only transactions; all ten stored
+builds are `succeeded`.
+
+The recorder's unpadded millisecond remainder caused two creation timestamps
+to be written incorrectly. The API-equivalent timestamp is
+`(EXTRACT(EPOCH FROM created_at) * 1000)::bigint`, matching the controller
+store's rounded integer conversion, rather than truncating database precision.
+
+| Row | Build | Original recorded creation time (UTC) | Correct API creation time (UTC) |
+|---|---|---|---|
+| 7 | `6992c76b-7e18-4ad5-a0b4-82b0a2bb6ec0` | 2026-09-28T02:23:25.870Z | 2026-09-28T02:23:25.087Z |
+| 10 | `ad6a8ae9-b40e-406b-bde7-6d5376fbd685` | 2026-09-28T05:43:00.400Z | 2026-09-28T05:43:00.040Z |
+
+All original table timestamps are reproduced by the old recorder. These two
+corrections preserve build order, the ten-push denominator and all verdicts;
+they do not constitute fresh pipeline executions. Selected nonsecret raw
+readback fields and provenance are in
+[`PAR-005_VERDICT_READBACK.json`](PAR-005_VERDICT_READBACK.json). The pending
+recorder correction preserves three fractional digits, and its full-path
+regression covers both observed remainders and refusal of genuinely older
+builds. PAR-005 remains ACTIVE pending its review, merge and verification gates.

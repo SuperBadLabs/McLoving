@@ -169,8 +169,7 @@ umask 022
 echo "== controller on 127.0.0.1:${api_port}"
 env -i HOME="${HOME}" PATH=/usr/local/bin:/usr/bin:/bin TMPDIR="${state}" \
   MCLOVING_MIGRATION_DATABASE_URL="${migration_url}" MCLOVING_DATABASE_URL="${runtime_url}" \
-  MCLOVING_API_TOKEN="${api_token}" MCLOVING_API_TOKEN_GENERATION=1 \
-  MCLOVING_ARTIFACT_AGENT_TOKEN="${artifact_token}" \
+  MCLOVING_API_TOKEN_GENERATION=1 \
   MCLOVING_LISTEN="127.0.0.1:${api_port}" MCLOVING_AGENT_LISTEN="127.0.0.1:${agent_port}" \
   MCLOVING_AGENT_SERVER_CERT_PATH="${pki}/server.pem" MCLOVING_AGENT_SERVER_KEY_PATH="${pki}/server-key.pem" \
   MCLOVING_AGENT_CLIENT_CA_PATH="${pki}/ca.pem" MCLOVING_AGENT_IDENTITY_BINDINGS_PATH="${pki}/identity-bindings.txt" \
@@ -188,7 +187,8 @@ env -i HOME="${HOME}" PATH=/usr/local/bin:/usr/bin:/bin TMPDIR="${state}" \
   MCLOVING_NOTIFICATION_KEY_FILE="${state}/notification.key" \
   MCLOVING_WEBHOOK_KEY_FILE="${state}/webhook.key" \
   MCLOVING_PUBLIC_BASE_URL="${MCLOVING_DOGFOOD_PUBLIC_BASE_URL:-http://127.0.0.1:${api_port}}" \
-  nohup "${controller}" >>"${state}/controller.log" 2>&1 &
+  nohup /bin/bash -c 'set -euo pipefail; . "$1"; export MCLOVING_API_TOKEN="${api_token:?missing API token}" MCLOVING_ARTIFACT_AGENT_TOKEN="${artifact_token:?missing artifact token}"; exec "$2"' \
+    dogfood-controller "${ids}" "${controller}" >>"${state}/controller.log" 2>&1 &
 echo $! >"${state}/controller.pid"
 
 export MCLOVING_URL="http://127.0.0.1:${api_port}" MCLOVING_API_TOKEN="${api_token}"
@@ -249,20 +249,35 @@ PY
 # restart with another MCLOVING_DOGFOOD_REPOSITORY re-PUTs the trigger at
 # its current generation with a new source generation rather than leaving
 # it filtering every delivery for the old repository.
-existing="$(curl -sS -o "${state}/trigger-current.json" -w '%{http_code}' "${base}" -H "Authorization: Bearer ${api_token}")"
+# Credential-bearing command arguments are readable by other host users.
+# mktemp creates these request files atomically with mode 0600 inside the
+# owner-private state directory. Normal, failure and handled signal exits
+# remove tracked files; an uncatchable SIGKILL cannot run cleanup.
+api_header_file=""
+hook_request_file=""
+cleanup_request_credentials() {
+  [ -z "${api_header_file}" ] || rm -f -- "${api_header_file}"
+  [ -z "${hook_request_file}" ] || rm -f -- "${hook_request_file}"
+}
+trap cleanup_request_credentials EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+api_header_file="$(mktemp "${state}/.api-auth.XXXXXX")"
+printf 'Authorization: Bearer %s\n' "${api_token}" >"${api_header_file}"
+existing="$(curl -sS -o "${state}/trigger-current.json" -w '%{http_code}' "${base}" --header "@${api_header_file}")"
 if [ "${existing}" != "200" ]; then
   curl -sS -o "${state}/trigger.json" -w 'trigger PUT %{http_code}\n' -X PUT "${base}" \
-    -H "Authorization: Bearer ${api_token}" -H 'Content-Type: application/json' \
+    --header "@${api_header_file}" -H 'Content-Type: application/json' \
     -H 'If-Match: "0"' -H 'Idempotency-Key: dogfood-trigger' --data "${trigger_body}"
 elif [ "$(jq -r .configuration.repository_identity "${state}/trigger-current.json")" != "${repository}" ]; then
   generation="$(jq -r .generation "${state}/trigger-current.json")"
   trigger_body="$(printf '%s' "${trigger_body}" | jq -c --arg g "dogfood-$((generation + 1))" '.source_generation = $g')"
   curl -sS -o "${state}/trigger.json" -w 'trigger PUT (reconcile) %{http_code}\n' -X PUT "${base}" \
-    -H "Authorization: Bearer ${api_token}" -H 'Content-Type: application/json' \
+    --header "@${api_header_file}" -H 'Content-Type: application/json' \
     -H "If-Match: \"${generation}\"" -H "Idempotency-Key: dogfood-trigger-${generation}" --data "${trigger_body}"
 fi
 umask 077
-curl -sS "${base}/webhook" -H "Authorization: Bearer ${api_token}" >"${state}/hook.json"
+curl -sS "${base}/webhook" --header "@${api_header_file}" >"${state}/hook.json"
 chmod 0600 "${state}/hook.json"
 umask 022
 jq '{path, provider}' "${state}/hook.json"
@@ -292,15 +307,26 @@ else
   # is found again by its URL on the next run, so the registration is
   # idempotent and a rotated secret (a re-PUT trigger) is re-registered.
   hook_url="${MCLOVING_DOGFOOD_PUBLIC_BASE_URL:?public base url for the hook}$(jq -r .path "${state}/hook.json")"
-  hook_config="$(jq -c --arg url "${hook_url}" '{url: $url, content_type: "json", secret: .secret, insecure_ssl: "0"}' "${state}/hook.json")"
   hook_id="$(gh api "repos/${repository}/hooks" --paginate --jq ".[] | select(.config.url == \"${hook_url}\") | .id" | head -1)"
+  hook_request_file="$(mktemp "${state}/.hook-request.XXXXXX")"
+  python3 - "${state}/hook.json" "${hook_url}" "${hook_id}" "${hook_request_file}" <<'PY'
+import json, sys
+hook_path, hook_url, hook_id, request_path = sys.argv[1:]
+with open(hook_path, encoding="utf-8") as source:
+    secret = json.load(source)["secret"]
+request = {"active": True, "events": ["push"], "config": {
+    "url": hook_url, "content_type": "json", "secret": secret, "insecure_ssl": "0",
+}}
+if not hook_id:
+    request["name"] = "web"
+with open(request_path, "w", encoding="utf-8") as output:
+    json.dump(request, output)
+PY
   if [ -z "${hook_id}" ]; then
-    hook_id="$(jq -n --argjson config "${hook_config}" '{name: "web", active: true, events: ["push"], config: $config}' \
-      | gh api -X POST "repos/${repository}/hooks" --input - --jq .id)"
+    hook_id="$(gh api -X POST "repos/${repository}/hooks" --input "${hook_request_file}" --jq .id)"
     echo "== hook ${hook_id} registered at GitHub for ${hook_url}"
   else
-    jq -n --argjson config "${hook_config}" '{active: true, events: ["push"], config: $config}' \
-      | gh api -X PATCH "repos/${repository}/hooks/${hook_id}" --input - --jq .id >/dev/null
+    gh api -X PATCH "repos/${repository}/hooks/${hook_id}" --input "${hook_request_file}" --jq .id >/dev/null
     echo "== hook ${hook_id} at GitHub updated for ${hook_url}"
   fi
 fi

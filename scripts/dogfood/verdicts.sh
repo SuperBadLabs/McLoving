@@ -110,7 +110,8 @@ created_ms="$("${cli}" --output json builds | jq -r --arg id "${build}" '.items[
 if [ -z "${created_ms}" ] || [ "${created_ms}" = "null" ]; then
   echo "build ${build} is not in the controller's build list" >&2; exit 1
 fi
-created="$(date -u -d "@$((created_ms / 1000)).$((created_ms % 1000))" +%Y-%m-%dT%H:%M:%S.%3NZ)"
+created_epoch="$(printf '%s.%03d' "$((created_ms / 1000))" "$((created_ms % 1000))")"
+created="$(date -u -d "@${created_epoch}" +%Y-%m-%dT%H:%M:%S.%3NZ)"
 case "${foundation}:${status}" in
   success:succeeded|failure:failed) match=yes ;;
   *) match=no ;;

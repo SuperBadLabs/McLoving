@@ -1,0 +1,516 @@
+{
+  "observed_at_utc": "2026-10-05T14:26:59.840940+00:00",
+  "provenance": {
+    "github": "Independent milestone coordinator /root/milestone_m1 native gh readbacks on 2026-10-05; selected original run and commit-status fields.",
+    "database": "isolated filesystem copy of stopped original dogfood database volume; PostgreSQL default_transaction_read_only=on, --network none",
+    "database_reader": "Root coordinator /root; isolated filesystem copy; original deployment not started or modified.",
+    "api_timestamp_conversion": "(EXTRACT(EPOCH FROM created_at) * 1000)::bigint",
+    "limits": "Selected readback fields are observations, not fresh execution, an independently attested deployment freeze, or protected merge approval."
+  },
+  "timestamp_errata_rows": [
+    7,
+    10
+  ],
+  "records": [
+    {
+      "row": 1,
+      "commit": "4a234c6f7f1f4e4db7f5dbb7a7b8050eb0afbb37",
+      "foundation": {
+        "databaseId": 36218738244,
+        "event": "push",
+        "headBranch": "main",
+        "headSha": "4a234c6f7f1f4e4db7f5dbb7a7b8050eb0afbb37",
+        "createdAt": "2026-09-26T04:44:46Z",
+        "conclusion": "success",
+        "url": "https://github.com/SuperBadLabs/McLoving/actions/runs/36218738244"
+      },
+      "github_commit_status": {
+        "id": 54988240569,
+        "state": "success",
+        "context": "mcloving/foundation",
+        "target_url": "http://127.0.0.1:41721/?organization=4e90d786-6e7e-40a6-958b-9cd3d43464d0&project=bce05b35-e3b1-42f7-b96d-8dfb3f0ebd20&build=b26d79f5-64f2-4625-8314-69189ecc3e37",
+        "created_at": "2026-09-26T09:29:03Z"
+      },
+      "controller_build": {
+        "build_id": "b26d79f5-64f2-4625-8314-69189ecc3e37",
+        "status": "succeeded",
+        "created_at_unix_ms": 1790413671317,
+        "created_at_database": "2026-09-26T09:07:51.316643+00:00",
+        "completed_at_database": "2026-09-26T09:29:02.612028+00:00"
+      },
+      "original_recorded_timestamp": "2026-09-26T09:07:51.317Z",
+      "execution_binding": {
+        "build_id": "b26d79f5-64f2-4625-8314-69189ecc3e37",
+        "pipeline_id": "66fa09e7-2c55-4021-a374-d94779cae6e7",
+        "pipeline_revision": 11,
+        "pipeline_digest": "50a6fa1679e17c2d38f703e25671b1c21ab80cc62fa306b0018a474093e41380",
+        "node_key": "foundation",
+        "node_status": "succeeded",
+        "checkout_commit": "4a234c6f7f1f4e4db7f5dbb7a7b8050eb0afbb37",
+        "attempt_status": "succeeded",
+        "committed_log_chunks": 216
+      },
+      "controller_execution_binding": {
+        "build_id": "b26d79f5-64f2-4625-8314-69189ecc3e37",
+        "pipeline_id": "66fa09e7-2c55-4021-a374-d94779cae6e7",
+        "pipeline_revision": 11,
+        "pipeline_digest": "50a6fa1679e17c2d38f703e25671b1c21ab80cc62fa306b0018a474093e41380",
+        "node_key": "foundation",
+        "node_status": "succeeded",
+        "checkout_commit": "4a234c6f7f1f4e4db7f5dbb7a7b8050eb0afbb37",
+        "attempt_status": "succeeded",
+        "committed_log_chunks": 216
+      }
+    },
+    {
+      "row": 2,
+      "commit": "0220759a6669444f15f0807b9b3c6ed9b34a753c",
+      "foundation": {
+        "databaseId": 36298039770,
+        "event": "push",
+        "headBranch": "main",
+        "headSha": "0220759a6669444f15f0807b9b3c6ed9b34a753c",
+        "createdAt": "2026-09-27T05:43:50Z",
+        "conclusion": "success",
+        "url": "https://github.com/SuperBadLabs/McLoving/actions/runs/36298039770"
+      },
+      "github_commit_status": {
+        "id": 55016646556,
+        "state": "success",
+        "context": "mcloving/foundation",
+        "target_url": "http://127.0.0.1:41721/?organization=4e90d786-6e7e-40a6-958b-9cd3d43464d0&project=bce05b35-e3b1-42f7-b96d-8dfb3f0ebd20&build=b8e6055b-0e34-452e-9183-6ff147c4c928",
+        "created_at": "2026-09-27T05:59:56Z"
+      },
+      "controller_build": {
+        "build_id": "b8e6055b-0e34-452e-9183-6ff147c4c928",
+        "status": "succeeded",
+        "created_at_unix_ms": 1790488369348,
+        "created_at_database": "2026-09-27T05:52:49.348263+00:00",
+        "completed_at_database": "2026-09-27T05:59:56.193178+00:00"
+      },
+      "original_recorded_timestamp": "2026-09-27T05:52:49.348Z",
+      "execution_binding": {
+        "build_id": "b8e6055b-0e34-452e-9183-6ff147c4c928",
+        "pipeline_id": "66fa09e7-2c55-4021-a374-d94779cae6e7",
+        "pipeline_revision": 13,
+        "pipeline_digest": "71caf343c8be605336c83dbd9de05d3cc6c871549289144d9d06b4ddcd768274",
+        "node_key": "foundation",
+        "node_status": "succeeded",
+        "checkout_commit": "0220759a6669444f15f0807b9b3c6ed9b34a753c",
+        "attempt_status": "succeeded",
+        "committed_log_chunks": 214
+      },
+      "controller_execution_binding": {
+        "build_id": "b8e6055b-0e34-452e-9183-6ff147c4c928",
+        "pipeline_id": "66fa09e7-2c55-4021-a374-d94779cae6e7",
+        "pipeline_revision": 13,
+        "pipeline_digest": "71caf343c8be605336c83dbd9de05d3cc6c871549289144d9d06b4ddcd768274",
+        "node_key": "foundation",
+        "node_status": "succeeded",
+        "checkout_commit": "0220759a6669444f15f0807b9b3c6ed9b34a753c",
+        "attempt_status": "succeeded",
+        "committed_log_chunks": 214
+      }
+    },
+    {
+      "row": 3,
+      "commit": "4f65905a27b561c08af05ce09c8b1a5de47662bd",
+      "foundation": {
+        "databaseId": 36336956714,
+        "event": "push",
+        "headBranch": "main",
+        "headSha": "4f65905a27b561c08af05ce09c8b1a5de47662bd",
+        "createdAt": "2026-09-27T17:26:43Z",
+        "conclusion": "success",
+        "url": "https://github.com/SuperBadLabs/McLoving/actions/runs/36336956714"
+      },
+      "github_commit_status": {
+        "id": 55033179965,
+        "state": "success",
+        "context": "mcloving/foundation",
+        "target_url": "http://127.0.0.1:41721/?organization=4e90d786-6e7e-40a6-958b-9cd3d43464d0&project=bce05b35-e3b1-42f7-b96d-8dfb3f0ebd20&build=cf3af674-d6a1-4fe3-96a0-5050497f5622",
+        "created_at": "2026-09-27T17:34:00Z"
+      },
+      "controller_build": {
+        "build_id": "cf3af674-d6a1-4fe3-96a0-5050497f5622",
+        "status": "succeeded",
+        "created_at_unix_ms": 1790530024724,
+        "created_at_database": "2026-09-27T17:27:04.724147+00:00",
+        "completed_at_database": "2026-09-27T17:33:59.841272+00:00"
+      },
+      "original_recorded_timestamp": "2026-09-27T17:27:04.724Z",
+      "execution_binding": {
+        "build_id": "cf3af674-d6a1-4fe3-96a0-5050497f5622",
+        "pipeline_id": "66fa09e7-2c55-4021-a374-d94779cae6e7",
+        "pipeline_revision": 13,
+        "pipeline_digest": "ea93207c717e5a11a05273cf8849562eef08f604b0ed15c69878ef9ef502d55d",
+        "node_key": "foundation",
+        "node_status": "succeeded",
+        "checkout_commit": "4f65905a27b561c08af05ce09c8b1a5de47662bd",
+        "attempt_status": "succeeded",
+        "committed_log_chunks": 210
+      },
+      "controller_execution_binding": {
+        "build_id": "cf3af674-d6a1-4fe3-96a0-5050497f5622",
+        "pipeline_id": "66fa09e7-2c55-4021-a374-d94779cae6e7",
+        "pipeline_revision": 13,
+        "pipeline_digest": "ea93207c717e5a11a05273cf8849562eef08f604b0ed15c69878ef9ef502d55d",
+        "node_key": "foundation",
+        "node_status": "succeeded",
+        "checkout_commit": "4f65905a27b561c08af05ce09c8b1a5de47662bd",
+        "attempt_status": "succeeded",
+        "committed_log_chunks": 210
+      }
+    },
+    {
+      "row": 4,
+      "commit": "e9b29a690a19f6cac5057bb64cd9f10c1bdc85fc",
+      "foundation": {
+        "databaseId": 36341612189,
+        "event": "push",
+        "headBranch": "main",
+        "headSha": "e9b29a690a19f6cac5057bb64cd9f10c1bdc85fc",
+        "createdAt": "2026-09-27T18:42:03Z",
+        "conclusion": "success",
+        "url": "https://github.com/SuperBadLabs/McLoving/actions/runs/36341612189"
+      },
+      "github_commit_status": {
+        "id": 55042923115,
+        "state": "success",
+        "context": "mcloving/foundation",
+        "target_url": "http://127.0.0.1:41721/?organization=4e90d786-6e7e-40a6-958b-9cd3d43464d0&project=bce05b35-e3b1-42f7-b96d-8dfb3f0ebd20&build=efceadff-e962-4ebe-be05-8faaf9d19e67",
+        "created_at": "2026-09-27T23:28:49Z"
+      },
+      "controller_build": {
+        "build_id": "efceadff-e962-4ebe-be05-8faaf9d19e67",
+        "status": "succeeded",
+        "created_at_unix_ms": 1790551308587,
+        "created_at_database": "2026-09-27T23:21:48.587195+00:00",
+        "completed_at_database": "2026-09-27T23:28:49.148032+00:00"
+      },
+      "original_recorded_timestamp": "2026-09-27T23:21:48.587Z",
+      "execution_binding": {
+        "build_id": "efceadff-e962-4ebe-be05-8faaf9d19e67",
+        "pipeline_id": "66fa09e7-2c55-4021-a374-d94779cae6e7",
+        "pipeline_revision": 13,
+        "pipeline_digest": "7766231010bd55b0d106605718998791f77bc1dcfe834f2c390e6b9446d47f54",
+        "node_key": "foundation",
+        "node_status": "succeeded",
+        "checkout_commit": "e9b29a690a19f6cac5057bb64cd9f10c1bdc85fc",
+        "attempt_status": "succeeded",
+        "committed_log_chunks": 213
+      },
+      "controller_execution_binding": {
+        "build_id": "efceadff-e962-4ebe-be05-8faaf9d19e67",
+        "pipeline_id": "66fa09e7-2c55-4021-a374-d94779cae6e7",
+        "pipeline_revision": 13,
+        "pipeline_digest": "7766231010bd55b0d106605718998791f77bc1dcfe834f2c390e6b9446d47f54",
+        "node_key": "foundation",
+        "node_status": "succeeded",
+        "checkout_commit": "e9b29a690a19f6cac5057bb64cd9f10c1bdc85fc",
+        "attempt_status": "succeeded",
+        "committed_log_chunks": 213
+      }
+    },
+    {
+      "row": 5,
+      "commit": "99c42814756ba5803980f81f5ce1a1d5e4e624ab",
+      "foundation": {
+        "databaseId": 36360102505,
+        "event": "push",
+        "headBranch": "main",
+        "headSha": "99c42814756ba5803980f81f5ce1a1d5e4e624ab",
+        "createdAt": "2026-09-27T23:51:44Z",
+        "conclusion": "success",
+        "url": "https://github.com/SuperBadLabs/McLoving/actions/runs/36360102505"
+      },
+      "github_commit_status": {
+        "id": 55043698116,
+        "state": "success",
+        "context": "mcloving/foundation",
+        "target_url": "http://127.0.0.1:41721/?organization=4e90d786-6e7e-40a6-958b-9cd3d43464d0&project=bce05b35-e3b1-42f7-b96d-8dfb3f0ebd20&build=eb314375-49de-4b72-aaf3-4b7de3079b53",
+        "created_at": "2026-09-27T23:58:53Z"
+      },
+      "controller_build": {
+        "build_id": "eb314375-49de-4b72-aaf3-4b7de3079b53",
+        "status": "succeeded",
+        "created_at_unix_ms": 1790553115588,
+        "created_at_database": "2026-09-27T23:51:55.588437+00:00",
+        "completed_at_database": "2026-09-27T23:58:52.979771+00:00"
+      },
+      "original_recorded_timestamp": "2026-09-27T23:51:55.588Z",
+      "execution_binding": {
+        "build_id": "eb314375-49de-4b72-aaf3-4b7de3079b53",
+        "pipeline_id": "66fa09e7-2c55-4021-a374-d94779cae6e7",
+        "pipeline_revision": 13,
+        "pipeline_digest": "34afa4d41cd6197c9d8a56c4cbfb949d9202cfce94ae75a5ea78bfc110fe8b6e",
+        "node_key": "foundation",
+        "node_status": "succeeded",
+        "checkout_commit": "99c42814756ba5803980f81f5ce1a1d5e4e624ab",
+        "attempt_status": "succeeded",
+        "committed_log_chunks": 212
+      },
+      "controller_execution_binding": {
+        "build_id": "eb314375-49de-4b72-aaf3-4b7de3079b53",
+        "pipeline_id": "66fa09e7-2c55-4021-a374-d94779cae6e7",
+        "pipeline_revision": 13,
+        "pipeline_digest": "34afa4d41cd6197c9d8a56c4cbfb949d9202cfce94ae75a5ea78bfc110fe8b6e",
+        "node_key": "foundation",
+        "node_status": "succeeded",
+        "checkout_commit": "99c42814756ba5803980f81f5ce1a1d5e4e624ab",
+        "attempt_status": "succeeded",
+        "committed_log_chunks": 212
+      }
+    },
+    {
+      "row": 6,
+      "commit": "83d2cb0b1df00f3a2ec76b3c3c8b1d32b963738b",
+      "foundation": {
+        "databaseId": 36364876716,
+        "event": "push",
+        "headBranch": "main",
+        "headSha": "83d2cb0b1df00f3a2ec76b3c3c8b1d32b963738b",
+        "createdAt": "2026-09-28T01:09:12Z",
+        "conclusion": "success",
+        "url": "https://github.com/SuperBadLabs/McLoving/actions/runs/36364876716"
+      },
+      "github_commit_status": {
+        "id": 55045984706,
+        "state": "success",
+        "context": "mcloving/foundation",
+        "target_url": "http://127.0.0.1:41721/?organization=4e90d786-6e7e-40a6-958b-9cd3d43464d0&project=bce05b35-e3b1-42f7-b96d-8dfb3f0ebd20&build=35e0ed35-61a9-45ea-b705-f25e28bc2033",
+        "created_at": "2026-09-28T01:16:10Z"
+      },
+      "controller_build": {
+        "build_id": "35e0ed35-61a9-45ea-b705-f25e28bc2033",
+        "status": "succeeded",
+        "created_at_unix_ms": 1790557754701,
+        "created_at_database": "2026-09-28T01:09:14.700658+00:00",
+        "completed_at_database": "2026-09-28T01:16:09.353854+00:00"
+      },
+      "original_recorded_timestamp": "2026-09-28T01:09:14.701Z",
+      "execution_binding": {
+        "build_id": "35e0ed35-61a9-45ea-b705-f25e28bc2033",
+        "pipeline_id": "66fa09e7-2c55-4021-a374-d94779cae6e7",
+        "pipeline_revision": 13,
+        "pipeline_digest": "2513ef81771157d8173317ff4a6ebad5c6b74c18e3a84ca9f87a3e2dc8d7fb13",
+        "node_key": "foundation",
+        "node_status": "succeeded",
+        "checkout_commit": "83d2cb0b1df00f3a2ec76b3c3c8b1d32b963738b",
+        "attempt_status": "succeeded",
+        "committed_log_chunks": 211
+      },
+      "controller_execution_binding": {
+        "build_id": "35e0ed35-61a9-45ea-b705-f25e28bc2033",
+        "pipeline_id": "66fa09e7-2c55-4021-a374-d94779cae6e7",
+        "pipeline_revision": 13,
+        "pipeline_digest": "2513ef81771157d8173317ff4a6ebad5c6b74c18e3a84ca9f87a3e2dc8d7fb13",
+        "node_key": "foundation",
+        "node_status": "succeeded",
+        "checkout_commit": "83d2cb0b1df00f3a2ec76b3c3c8b1d32b963738b",
+        "attempt_status": "succeeded",
+        "committed_log_chunks": 211
+      }
+    },
+    {
+      "row": 7,
+      "commit": "6824c8cb1ed0a97d7acb553a544c610180124349",
+      "foundation": {
+        "databaseId": 36369627296,
+        "event": "push",
+        "headBranch": "main",
+        "headSha": "6824c8cb1ed0a97d7acb553a544c610180124349",
+        "createdAt": "2026-09-28T02:23:23Z",
+        "conclusion": "success",
+        "url": "https://github.com/SuperBadLabs/McLoving/actions/runs/36369627296"
+      },
+      "github_commit_status": {
+        "id": 55048286196,
+        "state": "success",
+        "context": "mcloving/foundation",
+        "target_url": "http://127.0.0.1:41721/?organization=4e90d786-6e7e-40a6-958b-9cd3d43464d0&project=bce05b35-e3b1-42f7-b96d-8dfb3f0ebd20&build=6992c76b-7e18-4ad5-a0b4-82b0a2bb6ec0",
+        "created_at": "2026-09-28T02:30:40Z"
+      },
+      "controller_build": {
+        "build_id": "6992c76b-7e18-4ad5-a0b4-82b0a2bb6ec0",
+        "status": "succeeded",
+        "created_at_unix_ms": 1790562205087,
+        "created_at_database": "2026-09-28T02:23:25.086743+00:00",
+        "completed_at_database": "2026-09-28T02:30:40.084693+00:00"
+      },
+      "original_recorded_timestamp": "2026-09-28T02:23:25.870Z",
+      "execution_binding": {
+        "build_id": "6992c76b-7e18-4ad5-a0b4-82b0a2bb6ec0",
+        "pipeline_id": "66fa09e7-2c55-4021-a374-d94779cae6e7",
+        "pipeline_revision": 13,
+        "pipeline_digest": "b31b243ec330f2566bba330ff23f07ae573f90aa5fc884869cb1b94f3bb38991",
+        "node_key": "foundation",
+        "node_status": "succeeded",
+        "checkout_commit": "6824c8cb1ed0a97d7acb553a544c610180124349",
+        "attempt_status": "succeeded",
+        "committed_log_chunks": 217
+      },
+      "controller_execution_binding": {
+        "build_id": "6992c76b-7e18-4ad5-a0b4-82b0a2bb6ec0",
+        "pipeline_id": "66fa09e7-2c55-4021-a374-d94779cae6e7",
+        "pipeline_revision": 13,
+        "pipeline_digest": "b31b243ec330f2566bba330ff23f07ae573f90aa5fc884869cb1b94f3bb38991",
+        "node_key": "foundation",
+        "node_status": "succeeded",
+        "checkout_commit": "6824c8cb1ed0a97d7acb553a544c610180124349",
+        "attempt_status": "succeeded",
+        "committed_log_chunks": 217
+      }
+    },
+    {
+      "row": 8,
+      "commit": "cf85367ccea25773b5f1d2759e03716e05440d76",
+      "foundation": {
+        "databaseId": 36376562417,
+        "event": "push",
+        "headBranch": "main",
+        "headSha": "cf85367ccea25773b5f1d2759e03716e05440d76",
+        "createdAt": "2026-09-28T04:10:15Z",
+        "conclusion": "success",
+        "url": "https://github.com/SuperBadLabs/McLoving/actions/runs/36376562417"
+      },
+      "github_commit_status": {
+        "id": 55051668343,
+        "state": "success",
+        "context": "mcloving/foundation",
+        "target_url": "http://127.0.0.1:41721/?organization=4e90d786-6e7e-40a6-958b-9cd3d43464d0&project=bce05b35-e3b1-42f7-b96d-8dfb3f0ebd20&build=a7f61824-2a76-4291-9f5a-5d17627f3498",
+        "created_at": "2026-09-28T04:18:26Z"
+      },
+      "controller_build": {
+        "build_id": "a7f61824-2a76-4291-9f5a-5d17627f3498",
+        "status": "succeeded",
+        "created_at_unix_ms": 1790568679605,
+        "created_at_database": "2026-09-28T04:11:19.605462+00:00",
+        "completed_at_database": "2026-09-28T04:18:26.181084+00:00"
+      },
+      "original_recorded_timestamp": "2026-09-28T04:11:19.605Z",
+      "execution_binding": {
+        "build_id": "a7f61824-2a76-4291-9f5a-5d17627f3498",
+        "pipeline_id": "66fa09e7-2c55-4021-a374-d94779cae6e7",
+        "pipeline_revision": 13,
+        "pipeline_digest": "0087f2ea2847b4078d267f2d8154d81c55d0c9301e0a6ed900c94d74c5beed59",
+        "node_key": "foundation",
+        "node_status": "succeeded",
+        "checkout_commit": "cf85367ccea25773b5f1d2759e03716e05440d76",
+        "attempt_status": "succeeded",
+        "committed_log_chunks": 212
+      },
+      "controller_execution_binding": {
+        "build_id": "a7f61824-2a76-4291-9f5a-5d17627f3498",
+        "pipeline_id": "66fa09e7-2c55-4021-a374-d94779cae6e7",
+        "pipeline_revision": 13,
+        "pipeline_digest": "0087f2ea2847b4078d267f2d8154d81c55d0c9301e0a6ed900c94d74c5beed59",
+        "node_key": "foundation",
+        "node_status": "succeeded",
+        "checkout_commit": "cf85367ccea25773b5f1d2759e03716e05440d76",
+        "attempt_status": "succeeded",
+        "committed_log_chunks": 212
+      }
+    },
+    {
+      "row": 9,
+      "commit": "326e03fe00245672d89e471f81573e1f1e8f163c",
+      "foundation": {
+        "databaseId": 36379650992,
+        "event": "push",
+        "headBranch": "main",
+        "headSha": "326e03fe00245672d89e471f81573e1f1e8f163c",
+        "createdAt": "2026-09-28T04:54:32Z",
+        "conclusion": "success",
+        "url": "https://github.com/SuperBadLabs/McLoving/actions/runs/36379650992"
+      },
+      "github_commit_status": {
+        "id": 55053109101,
+        "state": "success",
+        "context": "mcloving/foundation",
+        "target_url": "http://127.0.0.1:41721/?organization=4e90d786-6e7e-40a6-958b-9cd3d43464d0&project=bce05b35-e3b1-42f7-b96d-8dfb3f0ebd20&build=69db9334-0f9e-4bb5-ac92-f3059ce40de6",
+        "created_at": "2026-09-28T05:01:45Z"
+      },
+      "controller_build": {
+        "build_id": "69db9334-0f9e-4bb5-ac92-f3059ce40de6",
+        "status": "succeeded",
+        "created_at_unix_ms": 1790571279659,
+        "created_at_database": "2026-09-28T04:54:39.65868+00:00",
+        "completed_at_database": "2026-09-28T05:01:43.856483+00:00"
+      },
+      "original_recorded_timestamp": "2026-09-28T04:54:39.659Z",
+      "execution_binding": {
+        "build_id": "69db9334-0f9e-4bb5-ac92-f3059ce40de6",
+        "pipeline_id": "66fa09e7-2c55-4021-a374-d94779cae6e7",
+        "pipeline_revision": 13,
+        "pipeline_digest": "63ad70db045f60da909c0382d93feccb33599d119aab2b26c65aa41bc435ed0f",
+        "node_key": "foundation",
+        "node_status": "succeeded",
+        "checkout_commit": "326e03fe00245672d89e471f81573e1f1e8f163c",
+        "attempt_status": "succeeded",
+        "committed_log_chunks": 213
+      },
+      "controller_execution_binding": {
+        "build_id": "69db9334-0f9e-4bb5-ac92-f3059ce40de6",
+        "pipeline_id": "66fa09e7-2c55-4021-a374-d94779cae6e7",
+        "pipeline_revision": 13,
+        "pipeline_digest": "63ad70db045f60da909c0382d93feccb33599d119aab2b26c65aa41bc435ed0f",
+        "node_key": "foundation",
+        "node_status": "succeeded",
+        "checkout_commit": "326e03fe00245672d89e471f81573e1f1e8f163c",
+        "attempt_status": "succeeded",
+        "committed_log_chunks": 213
+      }
+    },
+    {
+      "row": 10,
+      "commit": "9a3468c687fa661654d1241e823da1f2bfb82fb0",
+      "foundation": {
+        "databaseId": 36383073183,
+        "event": "push",
+        "headBranch": "main",
+        "headSha": "9a3468c687fa661654d1241e823da1f2bfb82fb0",
+        "createdAt": "2026-09-28T05:42:28Z",
+        "conclusion": "success",
+        "url": "https://github.com/SuperBadLabs/McLoving/actions/runs/36383073183"
+      },
+      "github_commit_status": {
+        "id": 55054862273,
+        "state": "success",
+        "context": "mcloving/foundation",
+        "target_url": "http://127.0.0.1:41721/?organization=4e90d786-6e7e-40a6-958b-9cd3d43464d0&project=bce05b35-e3b1-42f7-b96d-8dfb3f0ebd20&build=ad6a8ae9-b40e-406b-bde7-6d5376fbd685",
+        "created_at": "2026-09-28T05:49:57Z"
+      },
+      "controller_build": {
+        "build_id": "ad6a8ae9-b40e-406b-bde7-6d5376fbd685",
+        "status": "succeeded",
+        "created_at_unix_ms": 1790574180040,
+        "created_at_database": "2026-09-28T05:43:00.039765+00:00",
+        "completed_at_database": "2026-09-28T05:49:55.943673+00:00"
+      },
+      "original_recorded_timestamp": "2026-09-28T05:43:00.400Z",
+      "execution_binding": {
+        "build_id": "ad6a8ae9-b40e-406b-bde7-6d5376fbd685",
+        "pipeline_id": "66fa09e7-2c55-4021-a374-d94779cae6e7",
+        "pipeline_revision": 13,
+        "pipeline_digest": "5041fbbbb54142c0f22679009f9f2fb7a144d648a6d277bc314649b6775c0b6a",
+        "node_key": "foundation",
+        "node_status": "succeeded",
+        "checkout_commit": "9a3468c687fa661654d1241e823da1f2bfb82fb0",
+        "attempt_status": "succeeded",
+        "committed_log_chunks": 211
+      },
+      "controller_execution_binding": {
+        "build_id": "ad6a8ae9-b40e-406b-bde7-6d5376fbd685",
+        "pipeline_id": "66fa09e7-2c55-4021-a374-d94779cae6e7",
+        "pipeline_revision": 13,
+        "pipeline_digest": "5041fbbbb54142c0f22679009f9f2fb7a144d648a6d277bc314649b6775c0b6a",
+        "node_key": "foundation",
+        "node_status": "succeeded",
+        "checkout_commit": "9a3468c687fa661654d1241e823da1f2bfb82fb0",
+        "attempt_status": "succeeded",
+        "committed_log_chunks": 211
+      }
+    }
+  ]
+}

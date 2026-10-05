@@ -22,16 +22,27 @@ interval="${2:-60}"
 repository="${MCLOVING_DOGFOOD_REPOSITORY:?owner/name}"
 branch="${MCLOVING_DOGFOOD_BRANCH:-main}"
 hook_path="$(jq -r .path "${state}/hook.json")"
-secret="$(jq -r .secret "${state}/hook.json")"
 # The watermark and the delivery record are the repository's and branch's
 # own, so a state directory restarted against another repository (a fork
 # sharing commit ids, say) starts that repository's record afresh.
 scope="${repository//\//__}.${branch//\//__}"
 last_file="${state}/last-delivered-event.${scope}"
 ledger="${state}/deliveries.${scope}.tsv"
+delivery_header_file=""
+cleanup_delivery_credentials() {
+  [ -z "${delivery_header_file}" ] || rm -f -- "${delivery_header_file}"
+  delivery_header_file=""
+}
+trap cleanup_delivery_credentials EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 log() { printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
 
-sign() { printf 'sha256=%s' "$(openssl dgst -sha256 -hmac "${secret}" <"$1" | sed 's/^.* //')"; }
+sign() {
+  # Read the owner-private key inside the signer. A key supplied through
+  # openssl -hmac would be visible in /proc/<pid>/cmdline to other host users.
+  python3 "$(dirname "${BASH_SOURCE[0]}")/sign-hook.py" "${state}/hook.json" "$1"
+}
 
 # Delivers one push: event id, head and the time GitHub recorded the push
 # (`-` for a branch-head fallback). Answers non-zero unless the route
@@ -39,7 +50,7 @@ sign() { printf 'sha256=%s' "$(openssl dgst -sha256 -hmac "${secret}" <"$1" | se
 # retried on the next pass and never recorded as done.
 deliver() {
   local event="$1" sha="$2" pushed_at="${3:--}"
-  local body="${state}/delivery-${event}.json" answer="${state}/answer-${event}.json" commit="${state}/commit-${sha}.json" code
+  local body="${state}/delivery-${event}.json" answer="${state}/answer-${event}.json" commit="${state}/commit-${sha}.json" code signature
   gh api "repos/${repository}/commits/${sha}" \
     --jq '{sha, message: .commit.message, timestamp: .commit.committer.date, files: [.files[]?.filename]}' \
     >"${commit}"
@@ -60,9 +71,19 @@ body = {
 }
 open(out, "w").write(json.dumps(body, separators=(",", ":")))
 PY
-  code="$(curl -sS -o "${answer}" -w '%{http_code}' -X POST "${MCLOVING_URL}${hook_path}" \
+  delivery_header_file="$(mktemp "${state}/.delivery-auth.XXXXXX")" || return 1
+  if ! signature="$(sign "${body}")"; then
+    cleanup_delivery_credentials
+    return 1
+  fi
+  printf 'X-Hub-Signature-256: %s\n' "${signature}" >"${delivery_header_file}"
+  if ! code="$(curl -sS -o "${answer}" -w '%{http_code}' -X POST "${MCLOVING_URL}${hook_path}" \
     -H 'Content-Type: application/json' -H "X-GitHub-Delivery: ${event}" \
-    -H 'X-GitHub-Event: push' -H "X-Hub-Signature-256: $(sign "${body}")" --data-binary "@${body}")"
+    -H 'X-GitHub-Event: push' --header "@${delivery_header_file}" --data-binary "@${body}")"; then
+    cleanup_delivery_credentials
+    return 1
+  fi
+  cleanup_delivery_credentials
   # The bridge's own record of which build each push got, for verdicts.sh:
   # one line per push event (time, event, commit, build, push time), so a
   # commit pushed twice keeps both builds, and an event delivered again
