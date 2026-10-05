@@ -738,7 +738,7 @@ printf '%s\\n' "${workflow_files[@]}"
             ("name: Architecture records", "runs-on: ubuntu-24.04", "steps:"),
         )
         architecture_steps = step_blocks(architecture)
-        self.assertEqual(len(architecture_steps), 8)
+        self.assertEqual(len(architecture_steps), 9)
         self.assertEqual(architecture_steps[0], SOURCE_CHECKOUT_STEP +
                          "        with:\n"
                          "          fetch-depth: 0 # Offline retained-source bundle verification needs base ancestry.\n")
@@ -756,6 +756,13 @@ printf '%s\\n' "${workflow_files[@]}"
                          "      - name: Test sequential runtime gate controls\n"
                          "        run: /usr/bin/python3 -I scripts/test-sequential-runtime-gate.py\n")
         self.assertEqual(architecture_steps[4], ACTIONLINT_STEP)
+        self.assertEqual(
+            architecture_steps[6],
+            "      - name: Install dogfood script dependencies\n"
+            "        run: |\n"
+            "          sudo apt-get update\n"
+            "          sudo apt-get install --yes --no-install-recommends jq ripgrep\n",
+        )
         assert_exact_command(self, local, local_command)
         self.assertEqual(local.count(LOCAL_ACTIONLINT_RUN), 1)
 

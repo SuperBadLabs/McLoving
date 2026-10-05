@@ -101,6 +101,8 @@ python3 scripts/verify-execution-board.py
 python3 scripts/test-ticket-closure-receipts.py
 python3 scripts/verify-ticket-closure-receipts.py
 python3 scripts/test-verify-rust-test-execution.py
+python3 scripts/test-dogfood-verdicts.py
+python3 scripts/test-dogfood-credentials.py
 python3 scripts/verify-ui-browser-gate.py
 test "$(find docs/adr -maxdepth 1 -name '[0-9][0-9][0-9][0-9]-*.md' | wc -l)" -eq 16
 test -s docs/architecture/CHARTER.md
