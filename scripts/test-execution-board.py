@@ -5,16 +5,21 @@ from __future__ import annotations
 
 import importlib.util
 import io
+import json
 import sys
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from typing import Callable
+from unittest.mock import patch
+
+from stale_claims import document_defects, governance_defects, head_claim_defects, normalize_prose
 
 
 REPOSITORY = Path(__file__).resolve().parents[1]
 SCRIPT = Path(__file__).with_name("verify-execution-board.py")
+HISTORY = json.loads((SCRIPT.parent / "fixtures/stale-claims.json").read_text(encoding="utf-8"))
 sys.dont_write_bytecode = True
 SPEC = importlib.util.spec_from_file_location("verify_execution_board", SCRIPT)
 assert SPEC and SPEC.loader
@@ -37,10 +42,16 @@ class VerifierHarness(unittest.TestCase):
         self,
         board_transform: BoardTransform = lambda text: text,
         readme_transform: ReadmeTransform = lambda text: text,
+        handoffs: dict[str, str] | None = None,
+        today: VERIFY.date | None = None,
     ) -> tuple[int, str, str]:
         board_text = board_transform(
             (REPOSITORY / "docs" / "EXECUTION_BOARD.md").read_text(encoding="utf-8")
         )
+        if today is not None:
+            # Date the synthetic board at the injected observation time, so
+            # unrelated later board updates do not age historical controls.
+            board_text = VERIFY.UPDATED_ROW.sub("Updated: " + today.isoformat(), board_text)
         readme_text = readme_transform(
             (REPOSITORY / "README.md").read_text(encoding="utf-8")
         )
@@ -55,6 +66,10 @@ class VerifierHarness(unittest.TestCase):
             synthetic_script.write_text("# verifier fixture\n", encoding="utf-8")
             (docs / "EXECUTION_BOARD.md").write_text(board_text, encoding="utf-8")
             (root / "README.md").write_text(readme_text, encoding="utf-8")
+            if handoffs:
+                (docs / "handoffs").mkdir()
+                for name, content in handoffs.items():
+                    (docs / "handoffs" / name).write_text(content, encoding="utf-8")
 
             original_file = VERIFY.__file__
             stdout = io.StringIO()
@@ -63,7 +78,7 @@ class VerifierHarness(unittest.TestCase):
                 VERIFY.__file__ = str(synthetic_script)
                 with redirect_stdout(stdout), redirect_stderr(stderr):
                     try:
-                        VERIFY.main()
+                        VERIFY.main(today=today)
                     except SystemExit as error:
                         code = int(error.code or 0)
                     else:
@@ -74,11 +89,246 @@ class VerifierHarness(unittest.TestCase):
         return code, stdout.getvalue(), stderr.getvalue()
 
 
+class StaleClaimBoundaryTests(VerifierHarness):
+    def test_merged_correct_receipts_pass_real_entry_point(self) -> None:
+        code, _, stderr = self.run_verifier(handoffs={
+            "CURRENT.md": HISTORY["merged_current"]["text"],
+            "2026-09-06-freeze-thaw.md": HISTORY["merged_thaw"]["text"],
+        })
+        self.assertEqual(code, 0, stderr)
+
+    def test_observation_keyword_does_not_excuse_live_assertion(self) -> None:
+        text = "On 2026-09-06 we observed an audit; the current head a5ffdb5 is verified now."
+        code, _, stderr = self.run_verifier(handoffs={"2026-09-06-audit.md": text})
+        self.assertEqual(code, 1)
+        self.assertIn("current head", stderr)
+
+    def test_dated_observation_and_current_assertion_in_same_sentence_fails(self) -> None:
+        text = ("On 2026-09-06 the current protected-main head a5ffdb5 was observed green "
+                "and a5ffdb5 is now the current head.")
+        code, _, stderr = self.run_verifier(handoffs={"2026-09-06-audit.md": text})
+        self.assertEqual(code, 1)
+        self.assertIn("current head", stderr)
+
+    def test_timed_observation_passes(self) -> None:
+        text = "On 2026-09-06 the current protected-main head a5ffdb5 was observed green."
+        code, _, stderr = self.run_verifier(handoffs={"CURRENT.md": text})
+        self.assertEqual(code, 0, stderr)
+
+    def test_invalid_observation_date_cannot_excuse_head_assertion(self) -> None:
+        code, _, stderr = self.run_verifier(handoffs={"CURRENT.md":
+            "On 2026-99-99 the current protected-main head a5ffdb5 was observed green."})
+        self.assertEqual(code, 1)
+        self.assertIn("current head", stderr)
+
+    def test_invalid_observation_timestamp_cannot_excuse_head_assertion(self) -> None:
+        code, _, stderr = self.run_verifier(handoffs={"CURRENT.md":
+            "On 2026-09-06T99:99Z the current protected-main head a5ffdb5 was observed green."})
+        self.assertEqual(code, 1)
+        self.assertIn("current head", stderr)
+
+    def test_invalid_dated_filename_cannot_excuse_audit_head_assertion(self) -> None:
+        code, _, stderr = self.run_verifier(handoffs={
+            "2026-99-99-audit.md": HISTORY["merged_thaw"]["text"]})
+        self.assertEqual(code, 1)
+        self.assertIn("current head", stderr)
+
+    def test_valid_timestamp_observation_passes(self) -> None:
+        code, _, stderr = self.run_verifier(handoffs={"CURRENT.md":
+            "On 2026-09-06T12:30:01Z the current protected-main head a5ffdb5 was observed green."})
+        self.assertEqual(code, 0, stderr)
+
+    def test_emphasized_live_head_assertion_is_refused(self) -> None:
+        code, _, stderr = self.run_verifier(handoffs={"CURRENT.md": "main is *a5ffdb5*."})
+        self.assertEqual(code, 1)
+        self.assertIn("current head", stderr)
+
+    def test_emphasized_current_word_is_refused(self) -> None:
+        code, _, stderr = self.run_verifier(handoffs={"CURRENT.md": "*current* head a5ffdb5."})
+        self.assertEqual(code, 1)
+        self.assertIn("current head", stderr)
+
+    def test_emphasized_observation_preserves_identifier_underscores(self) -> None:
+        text = ("On 2026-09-06 the _current_ protected-main head *a5ffdb5* "
+                "was observed **green** by the EXPECTED_TABLES audit.")
+        self.assertIn("EXPECTED_TABLES", normalize_prose(text))
+        code, _, stderr = self.run_verifier(handoffs={"CURRENT.md": text})
+        self.assertEqual(code, 0, stderr)
+
+    def test_future_window_with_unrelated_september_history_passes(self) -> None:
+        code, _, stderr = self.run_verifier(
+            handoffs={
+                "CURRENT.md": ("McLoving is governed by the October contract through 2026-10-31. "
+                               "The old September contract is recorded in SEPTEMBER_2026_CODE_FREEZE.md."),
+                "2026-09-06-freeze-thaw.md": "The owner lifted the freeze.",
+            },
+            today=VERIFY.date(2026, 10, 5),
+        )
+        self.assertEqual(code, 0, stderr)
+
+    def test_retained_audit_cannot_excuse_appended_assertion(self) -> None:
+        text = HISTORY["merged_thaw"]["text"].replace(
+            "Release Builder` run at all.**",
+            "Release Builder` run at all.** d534a1b is verified now.",
+        )
+        self.assertNotEqual(text, HISTORY["merged_thaw"]["text"])
+        code, _, stderr = self.run_verifier(handoffs={"2026-09-06-freeze-thaw.md": text})
+        self.assertEqual(code, 1)
+        self.assertIn("current head", stderr)
+
+    def test_expired_window_in_governance_handoff_fails_real_entry_point(self) -> None:
+        code, _, stderr = self.run_verifier(
+            handoffs={"GOVERNANCE.md": "McLoving remains governed by its contract through 2026-09-30."},
+            today=VERIFY.date(2026, 10, 5),
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("window that has ended", stderr)
+
+    def test_open_governance_window_passes_on_end_date(self) -> None:
+        code, _, stderr = self.run_verifier(
+            handoffs={"GOVERNANCE.md": "McLoving is governed by its contract through 2026-10-05."},
+            today=VERIFY.date(2026, 10, 5),
+        )
+        self.assertEqual(code, 0, stderr)
+
+    def test_expired_window_in_board_fails_real_entry_point(self) -> None:
+        code, _, stderr = self.run_verifier(
+            board_transform=lambda text: text + "\nMcLoving is governed by its contract through 2026-09-30.\n",
+            today=VERIFY.date(2026, 10, 5),
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("window that has ended", stderr)
+
+    def test_live_gate_assertion_in_table_is_refused(self) -> None:
+        code, _, stderr = self.run_verifier(
+            handoffs={"CURRENT.md": "| Verification | The head gate is discharged at a5ffdb5 |\n"},
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("head-dependent gate discharged", stderr)
+
+    def test_later_expired_governance_window_in_paragraph_is_refused(self) -> None:
+        code, _, stderr = self.run_verifier(
+            handoffs={"GOVERNANCE.md": (
+                "McLoving is governed by the new contract through 2030-01-01. "
+                "McLoving is governed by the stale contract through 2020-01-01."
+            )},
+            today=VERIFY.date(2026, 10, 5),
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("window that has ended", stderr)
+
+    def test_invalid_governance_date_is_refused(self) -> None:
+        code, _, stderr = self.run_verifier(
+            handoffs={"GOVERNANCE.md": "McLoving is governed by its contract through 2026-99-05."},
+            today=VERIFY.date(2026, 10, 5),
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("invalid end date", stderr)
+
+    def test_named_commit_current_assertions_fail_in_board_and_handoffs(self) -> None:
+        for claim in (
+            "Commit a5ffdb5 is current.",
+            "a5ffdb5 is currently the main head.",
+            "Commit a5ffdb5 is verified now.",
+            "a5ffdb5 is now verified.",
+            "The current head is a5ffdb5.",
+            "Main is currently at a5ffdb5.",
+        ):
+            for target in ("board", "handoff"):
+                with self.subTest(claim=claim, target=target):
+                    args = ({"board_transform": lambda text: text + "\n" + claim + "\n"}
+                            if target == "board" else {"handoffs": {"CURRENT.md": claim}})
+                    code, _, stderr = self.run_verifier(**args)
+                    self.assertEqual(code, 1)
+                    self.assertIn("current head", stderr)
+
+
 class ExecutionBoardVerifierTests(VerifierHarness):
     def test_current_repository_passes(self) -> None:
         code, stdout, stderr = self.run_verifier()
         self.assertEqual(code, 0, stderr)
         self.assertIn("execution-board-ok", stdout)
+        board = (REPOSITORY / "docs" / "EXECUTION_BOARD.md").read_text(encoding="utf-8")
+        self.assertEqual(document_defects(REPOSITORY, board), [])
+
+    def test_first_discharge_draft_fails(self) -> None:
+        # 1b88a885:docs/handoffs/CURRENT.md, before the #120 review correction.
+        historical = HISTORY["first_discharge"]["text"]
+        code, _, stderr = self.run_verifier(handoffs={"CURRENT.md": historical})
+        self.assertEqual(code, 1)
+        self.assertIn("declares work startable", stderr)
+
+    def test_second_discharge_draft_fails(self) -> None:
+        # f039d414:docs/handoffs/CURRENT.md, before the #121 review correction.
+        historical = HISTORY["second_discharge"]["text"]
+        code, _, stderr = self.run_verifier(handoffs={"CURRENT.md": historical})
+        self.assertEqual(code, 1)
+        self.assertIn("declares a head-dependent gate discharged", stderr)
+
+    def test_dated_observation_of_old_head_passes(self) -> None:
+        # 2026-09-06-freeze-thaw.md records a past audit; the live gate must
+        # leave this and the merged CURRENT.md observation readable.
+        historical = HISTORY["merged_thaw"]["text"]
+        self.assertEqual(
+            head_claim_defects(Path("docs/handoffs/2026-09-06-freeze-thaw.md"), historical),
+            [],
+        )
+
+    def test_named_head_verified_now_fails(self) -> None:
+        text = "The successor head `a5ffdb5` is now verified.\n"
+        defects = head_claim_defects(Path("docs/handoffs/CURRENT.md"), text)
+        self.assertEqual(len(defects), 1)
+        self.assertIn("current head", defects[0])
+
+    def test_pre_thaw_governance_claim_fails_after_recorded_lift(self) -> None:
+        # d534a1b5:docs/handoffs/CURRENT.md; the window had not expired on
+        # September 6, but the owner had already lifted it.
+        historical = HISTORY["pre_thaw"]["text"]
+        thaw_text = (
+            REPOSITORY / "docs" / "handoffs" / "2026-09-06-freeze-thaw.md"
+        ).read_text(encoding="utf-8")
+        class AfterExpiry(VERIFY.date):
+            @classmethod
+            def today(cls) -> VERIFY.date:
+                return cls(2026, 10, 5)
+
+        # A contrasting ambient date proves the root passes the supplied clock,
+        # even if this test or its removal mutation runs on September 24 itself.
+        with patch("stale_claims.date", AfterExpiry):
+            code, _, stderr = self.run_verifier(
+                handoffs={"CURRENT.md": historical, "2026-09-06-freeze-thaw.md": thaw_text},
+                today=VERIFY.date(2026, 9, 24),
+            )
+        self.assertEqual(code, 1)
+        self.assertIn("recorded early lift", stderr)
+        with tempfile.TemporaryDirectory() as root_text:
+            current = Path(root_text) / "CURRENT.md"
+            thaw = Path(root_text) / "2026-09-06-freeze-thaw.md"
+            current.write_text(historical, encoding="utf-8")
+            thaw.write_text(thaw_text, encoding="utf-8")
+            defects = governance_defects(current, thaw, today=VERIFY.date(2026, 9, 24))
+        self.assertEqual(len(defects), 1)
+        self.assertIn("recorded early lift", defects[0])
+
+    def test_expired_window_fails_even_without_lift_receipt(self) -> None:
+        code, _, stderr = self.run_verifier(
+            handoffs={"CURRENT.md": "McLoving is governed by the October contract through 2026-10-31.\n"},
+            today=VERIFY.date(2026, 11, 1),
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("window that has ended", stderr)
+
+    def test_handoff_symlink_is_refused_without_reading_target(self) -> None:
+        with tempfile.TemporaryDirectory() as root_text:
+            root = Path(root_text)
+            handoffs = root / "docs" / "handoffs"
+            handoffs.mkdir(parents=True)
+            target = root / "outside.md"
+            target.write_text("The current head is `aaaaaaaa`.\n", encoding="utf-8")
+            (handoffs / "linked.md").symlink_to(target)
+            defects = document_defects(root, "# Board\n")
+        self.assertEqual(len(defects), 1)
+        self.assertIn("handoff symlink", defects[0])
 
     def test_stale_current_slot_status_fails(self) -> None:
         expected_message = ""
@@ -236,7 +486,7 @@ class ExecutionBoardVerifierTests(VerifierHarness):
 
         code, _, stderr = self.run_verifier(board_transform=pin_head)
         self.assertEqual(code, 1)
-        self.assertIn("pins protected main to a commit", stderr)
+        self.assertIn("asserts that a named commit is the current head", stderr)
 
     def test_invalid_updated_date_fails(self) -> None:
         def invalidate_date(text: str) -> str:

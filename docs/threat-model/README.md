@@ -1480,3 +1480,26 @@ Independent review of those determinations and protected merge/exact-main
 verification remain outstanding. Sequential artifact collection remains
 unsupported and hostile same-UID isolation remains SEC-005. No ticket
 closure, production, canary, migration or release authority is claimed.
+## HYG-003 candidate no-change assessment
+
+This hygiene change reviews the documentation side of TM-052's merge-authority
+boundary. A stale statement that a prior commit is still the current verified
+head can cause a custodian to skip the required exact-main Foundation and
+Windows observation. The mitigation is a bounded repository text check
+for live-head and discharged-gate assertions, expired governance windows, and
+counts repeated beside their verifier constants. Observation exemptions require
+valid date/time syntax and apply only to the particular recorded head span, so
+a neighboring standing assertion does not inherit them. Markdown emphasis does
+not bypass a recognized claim, and the recorded early lift is bound to the
+matched governance declaration rather than unrelated paragraph history. This
+validates neither
+the observation's truth nor external GitHub state. Written conventions cover
+external run-set completeness, unstructured ledger arithmetic, unrecorded owner
+decisions, and post-publication successor workflows. Historical dated
+observations are retained. Real-history red/green controls, removal mutations,
+and a current-tree false-alarm check provide candidate verification in
+`docs/evidence/HYG-003_SECURITY_REVIEW.md`. The technical branch-protection and
+workflow mitigations in TM-052 do not change. Residual risk remains differently
+phrased prose and external state changing after the local check; the live
+exact-head readback is still mandatory. HYG-003 is `ACTIVE`; this section is not
+a closure attribution or independent review receipt.

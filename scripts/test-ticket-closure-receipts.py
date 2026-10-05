@@ -20,6 +20,7 @@ from __future__ import annotations
 import contextlib
 import importlib.util
 import io
+import json
 import subprocess
 import sys
 import textwrap
@@ -27,8 +28,11 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+from stale_claims import expected_tables_comment_defects
+
 SCRIPTS = Path(__file__).resolve().parent
 REPOSITORY = SCRIPTS.parent
+HISTORY = json.loads((SCRIPTS / "fixtures/stale-claims.json").read_text(encoding="utf-8"))
 # Importing the verifier by path would otherwise drop a version-specific
 # .pyc into scripts/__pycache__ and dirty the worktree.
 sys.dont_write_bytecode = True
@@ -39,6 +43,58 @@ _spec = importlib.util.spec_from_file_location(
 VERIFY = importlib.util.module_from_spec(_spec)
 assert _spec.loader is not None
 _spec.loader.exec_module(VERIFY)
+
+
+class StaleCountCommentTests(unittest.TestCase):
+    def test_pre_hyg003_comment_is_refused(self) -> None:
+        # d534a1b5:scripts/verify-ticket-closure-receipts.py, immediately
+        # above EXPECTED_TABLES before the first ratchet raise made it stale.
+        historical = HISTORY["pre_count"]["text"]
+        defects = expected_tables_comment_defects(historical)
+        self.assertEqual(len(defects), 1)
+        self.assertIn("restates a table or format count", defects[0])
+
+    def test_current_comment_has_no_repeated_count(self) -> None:
+        source = (SCRIPTS / "verify-ticket-closure-receipts.py").read_text(encoding="utf-8")
+        self.assertEqual(expected_tables_comment_defects(source), [])
+
+    def test_duplicate_count_at_each_constant_edge_is_refused(self) -> None:
+        for source in (
+            '# Eleven tables\nTICKET_TABLE_HEADER = "Ticket"\nEXPECTED_TABLES = {TICKET_TABLE_HEADER: 11}\n',
+            'TICKET_TABLE_HEADER = "Ticket"\n# Eleven tables\nEXPECTED_TABLES = {TICKET_TABLE_HEADER: 11}\n',
+            'TICKET_TABLE_HEADER = "Ticket"\nEXPECTED_TABLES = {\n# Eleven tables\nTICKET_TABLE_HEADER: 11\n}\n',
+            'TICKET_TABLE_HEADER = "Ticket"\nEXPECTED_TABLES = {TICKET_TABLE_HEADER: 11} # Eleven entries\n',
+            'TICKET_TABLE_HEADER = "Ticket"\nEXPECTED_TABLES = {TICKET_TABLE_HEADER: 11}\n\n# Eleven tables\n',
+        ):
+            with self.subTest(source=source):
+                self.assertEqual(len(expected_tables_comment_defects(source)), 1)
+
+    def test_missing_constant_declarations_fail_closed(self) -> None:
+        self.assertTrue(expected_tables_comment_defects('TICKET_TABLE_HEADER = "Ticket"\n'))
+
+    def test_invalid_source_cannot_bypass_count_check(self) -> None:
+        self.assertTrue(expected_tables_comment_defects('EXPECTED_TABLES = {\n'))
+
+    def test_count_predicate_beside_constant_is_refused(self) -> None:
+        self.assertTrue(expected_tables_comment_defects(
+            'TICKET_TABLE_HEADER = "Ticket"\n# The count is thirteen\nEXPECTED_TABLES = {TICKET_TABLE_HEADER: 13}\n'
+        ))
+
+    def test_production_verifier_checks_its_count_comment(self) -> None:
+        source = (SCRIPTS / "verify-ticket-closure-receipts.py").read_text(encoding="utf-8")
+        source = source.replace("EXPECTED_TABLES = {", "# Eleven tables\nEXPECTED_TABLES = {", 1)
+        with TemporaryDirectory() as directory:
+            copied = Path(directory) / "verify-ticket-closure-receipts.py"
+            copied.write_text(source, encoding="utf-8")
+            original = VERIFY.__file__
+            try:
+                VERIFY.__file__ = str(copied)
+                with build() as fixture, synthetic():
+                    errors, _, _ = VERIFY.verify(Path(fixture), strict=False)
+            finally:
+                VERIFY.__file__ = original
+        self.assertTrue(any("comment beside EXPECTED_TABLES" in error for error in errors))
+
 
 
 BOARD = """\

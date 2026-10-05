@@ -9,6 +9,8 @@ import sys
 from datetime import date
 from pathlib import Path
 
+from stale_claims import document_defects
+
 
 TICKET_STATUSES = ("PENDING", "ACTIVE", "BLOCKED", "DONE", "DEFERRED")
 TICKET_STATUS_PATTERN = "|".join(TICKET_STATUSES)
@@ -322,7 +324,7 @@ def fail(messages: list[str]) -> None:
     raise SystemExit(1)
 
 
-def main() -> None:
+def main(today: date | None = None) -> None:
     repository = Path(__file__).resolve().parents[1]
     board = repository / "docs" / "EXECUTION_BOARD.md"
     readme = repository / "README.md"
@@ -334,6 +336,7 @@ def main() -> None:
         readme_text = readme.read_text(encoding="utf-8")
     except (OSError, UnicodeError) as error:
         fail([f"cannot read {readme}: {error}"])
+    today = today or date.today()
     errors: list[str] = []
 
     updated_matches = UPDATED_ROW.findall(text)
@@ -345,14 +348,10 @@ def main() -> None:
         except ValueError:
             errors.append(f"execution board has invalid Updated date: {updated_matches[0]}")
         else:
-            if updated > date.today():
+            if updated > today:
                 errors.append(f"execution board Updated date is in the future: {updated}")
 
-    if re.search(r"Protected `main` is `[0-9a-f]{40}`", text):
-        errors.append(
-            "current-state prose pins protected main to a commit; use ticket and "
-            "batch status instead"
-        )
+    errors += document_defects(repository, text, today=today)
     for marker in OBSOLETE_README_MARKERS:
         if marker in readme_text:
             errors.append(f"README contains obsolete implementation claim: {marker}")
