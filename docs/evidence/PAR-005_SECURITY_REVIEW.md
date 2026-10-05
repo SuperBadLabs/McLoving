@@ -126,6 +126,18 @@ whole-run verdict remain explicit. Public-webhook lifecycle and bidirectional
 lane comparison belong to DOGFOOD-001; hostile workload isolation belongs
 to SEC-005. This change grants no production or credential authority.
 
+## Hosted runner dependency correction
+
+Foundation pull-request run `37348516184` at candidate
+`bc37f32557b279bfcb1ba046e308440c4f987153` failed Architecture records
+job `111893150176`: the actual verdict regression could not find `rg` on
+the runner. The failure is retained. Root added an architecture-only
+provisioning step for `jq` and `ripgrep`; the existing lane classifier is
+unchanged and both new regression commands remain required. The workflow
+aggregate oracle now requires the additional step and its exact body.
+Milestone M2 independently reviews this root-authored workflow/oracle
+correction. Fresh checks must describe its subsequent committed head.
+
 ## Gates still required before closure
 
 - Complete independent exact-head review across PAR-005's affected boundaries
