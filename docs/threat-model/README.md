@@ -1455,3 +1455,27 @@ checkout path above; no new residual trust in the job, credential, or network
 endpoint selection. Proof: contained reclaim and mid-materialization kill
 tests in `crates/source-acquirer/tests/contained_source.rs`.
 
+## CTRL-006 sequential artifact admission (candidate)
+
+The candidate in `docs/evidence/CTRL-006_SECURITY_REVIEW.md` addresses TM-009
+at the authority-free sequential planner: a valid IR v1.8 stage declaring
+artifacts is refused with its stage ID before its steps are lowered. The
+per-step nodes have no stage-level collection boundary and must not return a
+successful plan with the saved pipeline's artifact semantics discarded.
+First-stage, later-stage and combined container/artifact regression inputs
+enter through the real strict YAML compiler and IR validator; artifact-free
+controls retain all steps and the semantic digest. Native test-only execution
+reproduced both original regressions' failures
+against the unchanged planner. Corrected-source and mutation outcomes are
+recorded separately in the candidate evidence as they are earned.
+
+Existing TM-014 artifact provenance and TM-020/TM-026 compile-only admission
+controls are unchanged: this correction neither publishes artifacts nor
+adds Jenkinsfile syntax, mappings or execution authority. The candidate
+receipt identifies the existing sequential tenant, fencing, durability,
+recovery, cancellation, bounds, pool, supply-chain, restore, quota, audit,
+rendering, migration and protected-check controls proposed unchanged.
+Independent review of those determinations and protected merge/exact-main
+verification remain outstanding. Sequential artifact collection remains
+unsupported and hostile same-UID isolation remains SEC-005. No ticket
+closure, production, canary, migration or release authority is claimed.

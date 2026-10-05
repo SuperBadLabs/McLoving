@@ -1,6 +1,8 @@
 use mcloving_controller_api::sequential::{SequentialBuildBinding, plan_sequential_build};
 use mcloving_controller_store::SequentialDagBuild;
-use mcloving_pipeline_ir::{ParseLimits, PipelineIr, ProcessMode, Step, compile_strict_yaml};
+use mcloving_pipeline_ir::{
+    IR_V1_8, ParseLimits, PipelineIr, ProcessMode, Step, compile_strict_yaml, validate_pipeline,
+};
 use serde_json::json;
 use uuid::Uuid;
 
@@ -72,6 +74,83 @@ fn container_stages_are_refused_rather_than_lowered_to_host_processes() {
         error.to_string().contains("container stages"),
         "unexpected refusal: {error}"
     );
+}
+
+fn artifact_pipeline(artifact_stage: Option<usize>, container_stage: Option<usize>) -> PipelineIr {
+    let mut source = json!({"version": 1, "name": "sequential-artifacts", "stages": [
+        {"id": "prepare", "name": "Prepare", "steps": [
+            {"process": {"program": "/bin/sh", "args": ["-xe", "-c", "printf prepare"]}}
+        ]},
+        {"id": "publish", "name": "Publish", "steps": [
+            {"process": {"program": "/bin/sh", "args": ["-xe", "-c", "printf publish"]}},
+            {"process": {"program": "/bin/sh", "args": ["-xe", "-c", "printf done"]}}
+        ]}
+    ]});
+    if let Some(index) = artifact_stage {
+        source["stages"][index]["artifacts"] = json!([
+            {"name": "reports", "paths": ["out/**/*.xml"]}
+        ]);
+    }
+    if let Some(index) = container_stage {
+        source["stages"][index]["image"] = json!(
+            "docker.io/library/alpine@sha256:c64c687cbea9300178b30c95835354e34c4e4febc4badfe27102879de0483b5e"
+        );
+    }
+    let ir = compile_strict_yaml(
+        "test:saved-sequential-artifacts",
+        &source.to_string(),
+        ParseLimits::default(),
+    )
+    .unwrap();
+    validate_pipeline(&ir).unwrap();
+    if artifact_stage.is_some() {
+        assert_eq!(ir.schema, IR_V1_8);
+    }
+    ir
+}
+
+fn assert_artifact_stage_refused(stage_index: usize, stage_id: &str) {
+    // The same valid pipeline without declarations still preserves every step
+    // and its saved semantic digest. A blanket sequential refusal fails here.
+    let plain = artifact_pipeline(None, None);
+    let plan = plan_sequential_build(&plain, binding()).unwrap();
+    assert_eq!(plan.dag().pipeline_digest, plain.semantic_digest().unwrap());
+    assert_eq!(plan.layout().len(), 3);
+    assert_eq!(plan.layout()[0].stage_id, "prepare");
+    assert_eq!(plan.layout()[1].stage_id, "publish");
+    assert_eq!(plan.layout()[2].step_ordinal, 2);
+
+    // Compilation and validation above establish that refusal belongs to the
+    // shipped planner, rather than an invalid artifact declaration or old IR.
+    let ir = artifact_pipeline(Some(stage_index), None);
+    assert_artifact_refusal(&ir, stage_id);
+}
+
+fn assert_artifact_refusal(ir: &PipelineIr, stage_id: &str) {
+    let error = plan_sequential_build(ir, binding()).unwrap_err();
+    assert!(
+        matches!(error, mcloving_controller_store::StoreError::InvalidDag(_)),
+        "unexpected refusal kind: {error}"
+    );
+    let diagnostic = error.to_string();
+    assert!(diagnostic.contains("artifact"), "{diagnostic}");
+    assert!(diagnostic.contains(stage_id), "{diagnostic}");
+}
+
+#[test]
+fn first_artifact_stage_is_refused_by_name() {
+    assert_artifact_stage_refused(0, "prepare");
+}
+
+#[test]
+fn later_artifact_stage_is_refused_without_returning_a_partial_plan() {
+    assert_artifact_stage_refused(1, "publish");
+}
+
+#[test]
+fn container_and_artifact_stage_is_refused_with_the_artifact_stage_name() {
+    let ir = artifact_pipeline(Some(1), Some(1));
+    assert_artifact_refusal(&ir, "publish");
 }
 
 #[test]
