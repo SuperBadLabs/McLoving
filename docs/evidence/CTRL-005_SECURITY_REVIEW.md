@@ -231,3 +231,58 @@ CTRL-005 section; its composed SHA-256 is
 table binds the measured candidate phase, rather than this composed document.
 This follow-up qualifies custody only; it changes no executable, schema or
 test bytes and supplies no hosted-check, merge, native-Windows or closure result.
+
+## Subsequent earned closure observation
+
+At 2026-10-06T23:51:52.677347+00:00, root verified the complete reviewed implementation had
+completed normal protected squash merge in PR
+[#174](https://github.com/SuperBadLabs/McLoving/pull/174) as
+`7ff63e54f70ea5d1110b72037e84fe6011f50d01`. Candidate
+`588417516e8e9f2de6bee6ae763206220719124e` had all eight required
+checks succeed under GitHub Actions App 15368, with zero unresolved review
+threads. No administrative override or direct main push was used. The final
+four runtime source/test/migration files match the measured byte hashes above;
+protected-base composition preserved all reviewed topic additions and removals.
+
+Push-triggered exact-merge Foundation
+[37546395911](https://github.com/SuperBadLabs/McLoving/actions/runs/37546395911)
+and Windows Agent
+[37546396018](https://github.com/SuperBadLabs/McLoving/actions/runs/37546396018)
+both completed successfully on attempt 1. Actual native Windows job
+[112551378721](https://github.com/SuperBadLabs/McLoving/actions/runs/37546396018/job/112551378721)
+executed all 23 steps, including debug and release service/crash-recovery gates.
+The Foundation PostgreSQL job
+[112552924712](https://github.com/SuperBadLabs/McLoving/actions/runs/37546395911/job/112552924712)
+passed 68 store tests (two ignored), 30 real-spine tests, and both explicitly
+executed shipped-controller credential/startup tests. The complete Foundation
+aggregate passed after the deployment lane completed; an aggregate or
+classifier result alone was not substituted for native execution.
+
+M2 independently reviewed the complete source/schema/threat boundaries, the
+actual complete append/nested-plan evidence and backup/restore, the five
+baseline-specific mutation failures and restored nine-control result, and the
+final measured-source/base composition. Root separately inspected those
+results and executed the qualified native controls. This subsequent closure
+records the original acceptance: transactional durable exact-fence committed
+bytes with migration backfill, read-based quota enforcement, identical replay
+without double charging, quota refusal with unchanged count, and measured
+3,000-chunk append plans with zero prior-chunk work outside the two exact
+own-conflict statements.
+
+The recorded 3,000-row physical conflict scans and 2,076-block historical lookup
+remain unresolved residual costs; whole-append constant cost is not claimed.
+The original proof expressly permits the own-conflict check. No index rebuild,
+planner override, tracing production grant, broader authority or acceptance
+waiver was introduced. Earlier failed infrastructure/test observations and
+candidate-phase pending statements remain historical records, rather than
+claims about this exact successful merge. The earlier hosted source stall's
+cause remains unproven.
+
+TM-018, TM-003/TM-011, TM-013 and TM-005/TM-017 determinations above were
+independently reviewed. Authentication, external authorization, secrets, agent
+execution, compiler, connectors, pool enrollment, supply-chain, deployment
+contracts, migration and decommission authority receive no capability or
+protocol change. Privileged database mutation, operator compromise and
+PostgreSQL/host failures remain existing trusted operational boundaries.
+This bounded ticket closure grants no production, canary, migration or release
+authority. The full original forty-ticket goal remains incomplete.

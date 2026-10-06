@@ -614,6 +614,7 @@ had never claimed one.
 | PAR-002 | `docs/evidence/PAR-002_SECURITY_REVIEW.md` |
 | PAR-015 | `docs/evidence/PAR-015_SECURITY_REVIEW.md` |
 | PAR-005 | `docs/evidence/PAR-005_SECURITY_REVIEW.md` |
+| CTRL-005 | `docs/evidence/CTRL-005_SECURITY_REVIEW.md` |
 | CTRL-006 | `docs/evidence/CTRL-006_SECURITY_REVIEW.md` |
 | EXEC-005 | `docs/evidence/EXEC-005_SECURITY_REVIEW.md` |
 
@@ -1512,7 +1513,7 @@ exact-head readback is still mandatory. HYG-003 is `ACTIVE`; this section is not
 a closure attribution or independent review receipt.
 
 
-## CTRL-005 incremental log accounting (implementation candidate)
+## CTRL-005 incremental log accounting
 
 This candidate changes controller persistence and resource accounting. It does
 not close CTRL-005 or grant production authority. The ticket's local tests,
@@ -1577,3 +1578,20 @@ Privileged database access can still corrupt counters as it can corrupt the
 ledger; same-account operator compromise, storage loss, and kernel/database
 failures remain existing operational risks. No owner, reviewer, merge, or CI
 receipt is fabricated here.
+
+### CTRL-005 subsequent reviewed closure observation
+
+Observed at 2026-10-06T23:51:52.677347+00:00: the implementation and all determinations in
+the preceding candidate-phase assessment were independently reviewed. PR #174
+completed normal protected squash merge `7ff63e54f70ea5d1110b72037e84fe6011f50d01`;
+exact-merge push Foundation `37546395911` and Windows Agent `37546396018` both
+succeeded on attempt 1, including actual native Windows job `112551378721`
+and PostgreSQL job `112552924712`. The subsequent observation in
+`docs/evidence/CTRL-005_SECURITY_REVIEW.md` binds the measured native, complete
+append/nested-plan, backup/restore and five specific mutation controls to the
+unchanged runtime bytes and earns the original bounded accounting acceptance.
+The preceding pending-verification language describes the earlier candidate
+phase. The own-conflict physical scan residual remains explicit and unresolved;
+this closure makes no universal constant-cost append claim. The no-change
+capability/protocol conclusions and privileged database/host residuals above
+remain in force. No production, canary, migration or release authority is granted.
