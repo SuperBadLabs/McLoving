@@ -614,6 +614,7 @@ had never claimed one.
 | PAR-002 | `docs/evidence/PAR-002_SECURITY_REVIEW.md` |
 | PAR-015 | `docs/evidence/PAR-015_SECURITY_REVIEW.md` |
 | PAR-005 | `docs/evidence/PAR-005_SECURITY_REVIEW.md` |
+| CTRL-006 | `docs/evidence/CTRL-006_SECURITY_REVIEW.md` |
 | EXEC-005 | `docs/evidence/EXEC-005_SECURITY_REVIEW.md` |
 
 ## Residual-risk policy
@@ -1456,7 +1457,7 @@ checkout path above; no new residual trust in the job, credential, or network
 endpoint selection. Proof: contained reclaim and mid-materialization kill
 tests in `crates/source-acquirer/tests/contained_source.rs`.
 
-## CTRL-006 sequential artifact admission (candidate)
+## CTRL-006 sequential artifact admission
 
 The candidate in `docs/evidence/CTRL-006_SECURITY_REVIEW.md` addresses TM-009
 at the authority-free sequential planner: a valid IR v1.8 stage declaring
@@ -1476,10 +1477,16 @@ adds Jenkinsfile syntax, mappings or execution authority. The candidate
 receipt identifies the existing sequential tenant, fencing, durability,
 recovery, cancellation, bounds, pool, supply-chain, restore, quota, audit,
 rendering, migration and protected-check controls proposed unchanged.
-Independent review of those determinations and protected merge/exact-main
-verification remain outstanding. Sequential artifact collection remains
-unsupported and hostile same-UID isolation remains SEC-005. No ticket
-closure, production, canary, migration or release authority is claimed.
+Those determinations were independently reviewed for the final candidate.
+PR #171 completed protected squash merge
+`663124621e37dd2a5387cec3aedbfa452f20c2c4`; push-triggered exact-merge
+Foundation `37358396885` and Windows Agent `37358396922` both succeeded
+on attempt 1, including actual native Windows job `111926589336`. The
+subsequent observation in the receipt records the bounded stage-refusal
+closure. Sequential artifact collection remains unsupported and hostile
+same-UID isolation remains SEC-005. This closure grants no production,
+canary, migration or release authority.
+
 ## HYG-003 candidate no-change assessment
 
 This hygiene change reviews the documentation side of TM-052's merge-authority
