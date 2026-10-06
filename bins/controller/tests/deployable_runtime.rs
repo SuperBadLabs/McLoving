@@ -594,6 +594,60 @@ async fn failed_runtime_preflight_does_not_rotate_the_active_api_credential() {
     .await
     .expect("restore tenant policy");
 
+    sqlx::query("DROP POLICY attempt_log_accounting_tenant_policy ON attempt_log_accounting")
+        .execute(&pool)
+        .await
+        .expect("remove accounting tenant policy");
+    let missing_policy = assert_runtime_preflight_rejected(
+        &migration_url,
+        &runtime_url,
+        organization_id,
+        root.path(),
+        "missing accounting tenant policy must fail preflight",
+    )
+    .await;
+    assert!(
+        String::from_utf8_lossy(&missing_policy.stderr)
+            .contains("required tenant tables must enforce row-level security"),
+        "missing accounting policy must fail the forced-RLS inventory"
+    );
+    sqlx::query(
+        "CREATE POLICY attempt_log_accounting_tenant_policy ON attempt_log_accounting
+         USING (
+             organization_id =
+             NULLIF(current_setting('mcloving.organization_id', true), '')::uuid
+         )
+         WITH CHECK (
+             organization_id =
+             NULLIF(current_setting('mcloving.organization_id', true), '')::uuid
+         )",
+    )
+    .execute(&pool)
+    .await
+    .expect("restore accounting tenant policy");
+
+    sqlx::query("ALTER TABLE attempt_log_accounting NO FORCE ROW LEVEL SECURITY")
+        .execute(&pool)
+        .await
+        .expect("remove forced RLS from accounting");
+    let unforced_accounting = assert_runtime_preflight_rejected(
+        &migration_url,
+        &runtime_url,
+        organization_id,
+        root.path(),
+        "accounting without forced RLS must fail preflight",
+    )
+    .await;
+    assert!(
+        String::from_utf8_lossy(&unforced_accounting.stderr)
+            .contains("required tenant tables must enforce row-level security"),
+        "unforced accounting must fail the forced-RLS inventory"
+    );
+    sqlx::query("ALTER TABLE attempt_log_accounting FORCE ROW LEVEL SECURITY")
+        .execute(&pool)
+        .await
+        .expect("restore forced RLS on accounting");
+
     let restore_function_owner = sqlx::query_scalar::<_, String>(
         "SELECT format(
              'ALTER FUNCTION public.mcloving_state_transfer_holds_valid(jsonb) OWNER TO %I',
@@ -810,7 +864,7 @@ async fn assert_runtime_preflight_rejected(
     organization_id: Uuid,
     root: &std::path::Path,
     expectation: &str,
-) {
+) -> std::process::Output {
     let output = preflight_controller_command(
         migration_url,
         runtime_url,
@@ -824,6 +878,7 @@ async fn assert_runtime_preflight_rejected(
     .await
     .expect("run rejected runtime preflight");
     assert!(!output.status.success(), "{expectation}");
+    output
 }
 
 async fn enable_test_runtime_login(pool: &sqlx::PgPool) {

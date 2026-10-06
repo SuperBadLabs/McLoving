@@ -215,6 +215,7 @@ pub const PROJECT_ROLE_GRANTS_V41: &str =
 /// Mutable generation-bound native schedule slots (PAR-002).
 pub const SCHEDULE_SLOTS_V42: &str = include_str!("../migrations/0042_trigger_schedule_slots.sql");
 pub const WORKSPACE_AFFINITY_V43: &str = include_str!("../migrations/0043_workspace_affinity.sql");
+pub const LOG_ACCOUNTING_V44: &str = include_str!("../migrations/0044_log_accounting.sql");
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AgentReconciliationDisposition {
@@ -959,6 +960,8 @@ impl Store {
                    ('outbox', 'UPDATE'), ('outbox', 'DELETE'),
                    ('attempt_log_chunks', 'SELECT'), ('attempt_log_chunks', 'INSERT'),
                    ('attempt_log_chunks', 'UPDATE'), ('attempt_log_chunks', 'DELETE'),
+                   ('attempt_log_accounting', 'SELECT'), ('attempt_log_accounting', 'INSERT'),
+                   ('attempt_log_accounting', 'UPDATE'), ('attempt_log_accounting', 'DELETE'),
                    ('attempt_effects', 'SELECT'), ('attempt_effects', 'INSERT'),
                    ('attempt_effects', 'UPDATE'),
                    ('dead_letters', 'SELECT'), ('dead_letters', 'INSERT'),
@@ -1354,7 +1357,7 @@ impl Store {
                    ('discovery_parent_versions'), ('discovery_scans'),
                    ('discovery_scan_results'), ('discovery_child_identities'),
                    ('discovery_observations'), ('discovery_children'),
-                   ('component_packages'), ('attempt_log_chunks'),
+                   ('component_packages'), ('attempt_log_chunks'), ('attempt_log_accounting'),
                    ('attempt_effects'), ('dead_letters'), ('attempt_objects'),
                    ('state_transfer_receipts'), ('state_transfer_records'),
                    ('state_transfer_scm_evidence'), ('state_transfer_protections'),
@@ -1396,7 +1399,7 @@ impl Store {
                    FROM relations AS relation
                    JOIN pg_policy AS policy ON policy.polrelid = relation.oid
              )
-             SELECT COUNT(*) = 64
+             SELECT COUNT(*) = (SELECT COUNT(*) FROM expected)
                     AND BOOL_AND(
                         relrowsecurity
                         AND relforcerowsecurity
@@ -1425,7 +1428,7 @@ impl Store {
                                 relation.tenant_column
                             )
                     )
-                    AND (SELECT COUNT(*) FROM policies) = 64
+                    AND (SELECT COUNT(*) FROM policies) = (SELECT COUNT(*) FROM expected)
                FROM relations",
         )
         .fetch_one(&mut *tx)
@@ -1549,6 +1552,7 @@ impl Store {
         apply_migration(&mut tx, 41, PROJECT_ROLE_GRANTS_V41).await?;
         apply_migration(&mut tx, 42, SCHEDULE_SLOTS_V42).await?;
         apply_migration(&mut tx, 43, WORKSPACE_AFFINITY_V43).await?;
+        apply_migration(&mut tx, 44, LOG_ACCOUNTING_V44).await?;
         tx.commit().await?;
         Ok(())
     }
@@ -3169,6 +3173,10 @@ impl Store {
         .await?;
         let content = redact_to_fixed_point(chunk.content, &redactions)?;
         let digest: [u8; 32] = Sha256::digest(&content).into();
+        // The attempt advisory lock (also acquired by the legacy-write trigger)
+        // serializes this key through commit. UPDATE/DELETE take their tuple
+        // lock before their trigger waits for this advisory lock: requesting a
+        // tuple lock here would invert that order and permit a deadlock.
         let existing = sqlx::query_as::<_, (String, Vec<u8>, i32)>(
             "SELECT l.stream, l.digest, l.step_ordinal
              FROM attempt_log_chunks AS l
@@ -3183,8 +3191,7 @@ impl Store {
                AND a.restore_epoch = $5
                AND a.lease_owner = $6
                AND m.singleton
-               AND a.restore_epoch = m.restore_epoch
-             FOR UPDATE OF l",
+               AND a.restore_epoch = m.restore_epoch",
         )
         .bind(chunk.organization_id)
         .bind(chunk.attempt_id)
@@ -3206,11 +3213,10 @@ impl Store {
             return Ok(identical);
         }
         let committed = sqlx::query_scalar::<_, i64>(
-            "SELECT COALESCE(sum(octet_length(content)), 0)::bigint
-             FROM attempt_log_chunks
-             WHERE organization_id = $1
-               AND attempt_id = $2
-               AND fence = $3",
+            "SELECT COALESCE((
+                 SELECT committed_bytes FROM attempt_log_accounting
+                 WHERE organization_id = $1 AND attempt_id = $2 AND fence = $3
+             ), 0)::bigint",
         )
         .bind(chunk.organization_id)
         .bind(chunk.attempt_id)
@@ -3227,13 +3233,7 @@ impl Store {
                  organization_id, attempt_id, fence, sequence,
                  stream, content, digest, step_ordinal, build_id, build_position
              )
-             SELECT $1, a.id, $3, $6, $7, $8, $9, $10, n.build_id,
-                    (
-                        SELECT COALESCE(MAX(l2.build_position), 0) + 1
-                        FROM attempt_log_chunks AS l2
-                        WHERE l2.organization_id = n.organization_id
-                          AND l2.build_id = n.build_id
-                    )
+             SELECT $1, a.id, $3, $6, $7, $8, $9, $10, n.build_id, NULL::bigint
              FROM attempts AS a
              JOIN nodes AS n
                ON n.id = a.node_id AND n.organization_id = a.organization_id

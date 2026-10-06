@@ -8174,6 +8174,22 @@ async fn backup_restore_canary_seed() {
             .await
             .expect("register recovery object")
     );
+    assert!(
+        store
+            .append_log(&NewLogChunk {
+                organization_id,
+                attempt_id: claim.attempt_id,
+                fence: claim.fence,
+                restore_epoch: claim.restore_epoch,
+                agent_id: "pre-restore-agent",
+                sequence: 0,
+                step_ordinal: 0,
+                stream: "stdout",
+                content: b"before-restore"
+            })
+            .await
+            .expect("seed historical-fence log accounting")
+    );
     let historical_effect = json!({"cache_key": "backup-canary"});
     assert!(
         store
@@ -8233,6 +8249,22 @@ async fn backup_restore_canary_seed() {
             )
             .await
             .expect("accept reclaimed recovery canary")
+    );
+    assert!(
+        store
+            .append_log(&NewLogChunk {
+                organization_id,
+                attempt_id: reclaimed.attempt_id,
+                fence: reclaimed.fence,
+                restore_epoch: reclaimed.restore_epoch,
+                agent_id: "post-reclaim-agent",
+                sequence: 0,
+                step_ordinal: 0,
+                stream: "stdout",
+                content: b"reclaimed-log"
+            })
+            .await
+            .expect("seed current-fence log accounting")
     );
     let recovery_effect = json!({
         "destination": "deployment/production",
@@ -8333,6 +8365,22 @@ async fn backup_restore_canary_verify() {
     .fetch_one(store.pool())
     .await
     .expect("restored canary exists");
+    assert_eq!(
+        ctrl005_committed(&store, organization_id, admission.1, admission.2 - 1).await,
+        b"before-restore".len() as i64
+    );
+    assert_eq!(
+        ctrl005_committed(&store, organization_id, admission.1, admission.2).await,
+        b"reclaimed-log".len() as i64
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT committed_log_position FROM builds WHERE id=$1")
+            .bind(admission.0)
+            .fetch_one(store.pool())
+            .await
+            .unwrap(),
+        2
+    );
     let activation = store
         .activate_restore_epoch("compact-drill-001", "automated restore drill")
         .await
@@ -8520,6 +8568,32 @@ async fn backup_restore_canary_verify() {
             )
             .await
             .expect("accept current restore-epoch authority")
+    );
+    assert!(
+        store
+            .append_log(&NewLogChunk {
+                organization_id,
+                attempt_id: rewind_claim.attempt_id,
+                fence: rewind_claim.fence,
+                restore_epoch: rewind_claim.restore_epoch,
+                agent_id: "reused-agent",
+                sequence: 0,
+                step_ordinal: 0,
+                stream: "stdout",
+                content: b"restored-writer"
+            })
+            .await
+            .expect("restored triggers account a current-epoch append")
+    );
+    assert_eq!(
+        ctrl005_committed(
+            &store,
+            organization_id,
+            rewind_claim.attempt_id,
+            rewind_claim.fence
+        )
+        .await,
+        b"restored-writer".len() as i64
     );
     assert_eq!(
         store
@@ -9150,6 +9224,11 @@ async fn protected_credentials_are_approval_bound_fenced_and_one_time() {
     .await
     .expect("read redacted log");
     assert_eq!(persisted_log, b"before  after");
+    assert_eq!(
+        ctrl005_committed(&store, organization_id, claim.attempt_id, claim.fence).await,
+        persisted_log.len() as i64,
+        "quota charges only persisted redacted bytes"
+    );
 
     let payloads = sqlx::query_scalar::<_, String>(
         "SELECT string_agg(payload::text, '')
@@ -13575,4 +13654,1474 @@ async fn a_live_log_session_may_number_chunks_past_the_terminal_bound() {
             .collect::<Vec<_>>(),
         vec![0, 96]
     );
+}
+
+// CTRL-005 uses actual append SQL, rather than a separately optimized test query.
+fn ctrl005_append_statement(binding: &str) -> &'static str {
+    let source = include_str!("../src/lib.rs");
+    let append = source
+        .split("async fn append_log_with_session(")
+        .nth(1)
+        .expect("append source");
+    let statement = append.split(binding).nth(1).expect("append binding");
+    statement.split('"').nth(1).expect("literal SQL statement")
+}
+
+fn ctrl005_trigger_conflict_statement() -> String {
+    let migration = include_str!("../migrations/0044_log_accounting.sql");
+    let region = &migration[migration
+        .find("SELECT l.build_position INTO existing_position")
+        .expect("actual trigger conflict statement")..];
+    region[..region.find(';').expect("trigger statement terminator")]
+        .replace(" INTO existing_position", "")
+        .replace("chunk_org", "$1")
+        .replace("chunk_attempt", "$2")
+        .replace("chunk_fence", "$3")
+        .replace("NEW.sequence", "$4")
+}
+
+// The ticket explicitly excepts the own-key conflict check. Match the complete
+// extracted SQL, including every authority/key predicate; a relation or label
+// alone can never waive an aggregate, allocation scan, or changed conflict key.
+fn ctrl005_exact_conflict_statement(statement: &str) -> bool {
+    let normalize = |sql: &str| sql.split_whitespace().collect::<Vec<_>>().join(" ");
+    let existing = "SELECT l.stream, l.digest, l.step_ordinal
+        FROM attempt_log_chunks AS l JOIN attempts AS a
+        ON a.organization_id = l.organization_id AND a.id = l.attempt_id
+        CROSS JOIN controller_metadata AS m
+        WHERE l.organization_id = $1 AND l.attempt_id = $2
+        AND l.fence = $3 AND l.sequence = $4
+        AND a.restore_epoch = $5 AND a.lease_owner = $6
+        AND m.singleton AND a.restore_epoch = m.restore_epoch";
+    let trigger = "SELECT l.build_position FROM attempt_log_chunks AS l
+        WHERE l.organization_id = $1 AND l.attempt_id = $2
+        AND l.fence = $3 AND l.sequence = $4";
+    let actual = normalize(statement);
+    actual == normalize(existing) || actual == normalize(trigger)
+}
+
+fn ctrl005_nonconflict_prior_chunk_reads(statement: &str, plan: &Value) -> u64 {
+    if ctrl005_exact_conflict_statement(statement) {
+        0
+    } else {
+        ctrl005_prior_chunk_reads(plan)
+    }
+}
+
+fn ctrl005_prior_chunk_reads(plan: &Value) -> u64 {
+    match plan {
+        Value::Array(entries) => entries.iter().map(ctrl005_prior_chunk_reads).sum(),
+        Value::Object(fields) => {
+            let own = if fields.get("Relation Name").and_then(Value::as_str)
+                == Some("attempt_log_chunks")
+                && fields.get("Node Type").and_then(Value::as_str) != Some("ModifyTable")
+            {
+                [
+                    "Actual Rows",
+                    "Rows Removed by Filter",
+                    "Rows Removed by Index Recheck",
+                ]
+                .iter()
+                .map(|key| fields.get(*key).and_then(Value::as_u64).unwrap_or(0))
+                .sum::<u64>()
+                    * fields
+                        .get("Actual Loops")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0)
+            } else {
+                0
+            };
+            own + fields.values().map(ctrl005_prior_chunk_reads).sum::<u64>()
+        }
+        _ => 0,
+    }
+}
+
+#[test]
+fn ctrl005_plan_oracle_counts_filtered_reads() {
+    let filtered = json!({"Node Type":"Index Scan","Relation Name":"attempt_log_chunks","Actual Rows":0,"Rows Removed by Filter":3000,"Actual Loops":2});
+    assert_eq!(
+        ctrl005_prior_chunk_reads(&filtered),
+        6000,
+        "filtered cold-plan rows are actual work"
+    );
+    let rechecked = json!({"Node Type":"Bitmap Heap Scan","Relation Name":"attempt_log_chunks","Actual Rows":1,"Rows Removed by Index Recheck":3,"Actual Loops":2});
+    assert_eq!(
+        ctrl005_prior_chunk_reads(&rechecked),
+        8,
+        "lossy bitmap rechecks count too"
+    );
+    let inserted = json!({"Node Type":"ModifyTable","Relation Name":"attempt_log_chunks","Actual Rows":1,"Actual Loops":1});
+    assert_eq!(
+        ctrl005_prior_chunk_reads(&inserted),
+        0,
+        "RETURNING new row is not a prior read"
+    );
+    let existing = ctrl005_append_statement("let existing =");
+    let trigger = ctrl005_trigger_conflict_statement();
+    assert!(ctrl005_exact_conflict_statement(existing));
+    assert!(ctrl005_exact_conflict_statement(&trigger));
+    assert_eq!(
+        ctrl005_nonconflict_prior_chunk_reads(existing, &filtered),
+        0
+    );
+    for refused in [
+        existing.replace("AND l.fence = $3", ""),
+        existing.replace("AND l.sequence = $4", ""),
+        existing.replace("AND a.lease_owner = $6", ""),
+        existing.replace("AND a.restore_epoch = m.restore_epoch", ""),
+        "SELECT sum(octet_length(content)) FROM attempt_log_chunks".to_owned(),
+        "SELECT max(build_position) FROM attempt_log_chunks".to_owned(),
+        format!("WITH conflict AS ({existing}) SELECT * FROM conflict"),
+    ] {
+        assert!(
+            !ctrl005_exact_conflict_statement(&refused),
+            "changed SQL cannot inherit the exception"
+        );
+        assert_eq!(
+            ctrl005_nonconflict_prior_chunk_reads(&refused, &filtered),
+            6000
+        );
+    }
+}
+
+async fn ctrl005_live_fixture() -> Option<(
+    Store,
+    Store,
+    Uuid,
+    Uuid,
+    String,
+    mcloving_controller_store::ClaimedAttempt,
+)> {
+    let store = test_store().await?;
+    let runtime = unprivileged_store(&store).await;
+    Some(ctrl005_live_fixture_with_stores(store, runtime).await)
+}
+
+async fn ctrl005_live_fixture_with_stores(
+    store: Store,
+    runtime: Store,
+) -> (
+    Store,
+    Store,
+    Uuid,
+    Uuid,
+    String,
+    mcloving_controller_store::ClaimedAttempt,
+) {
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    let agent_id = format!("live-log-{}", Uuid::new_v4());
+    store
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "project",
+        )
+        .await
+        .expect("create tenant");
+    store
+        .admit_test_build(&NewBuild {
+            organization_id,
+            project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
+            idempotency_key: "live-log-work".into(),
+            pipeline_digest: [0x5f; 32],
+            node_key: "execute".into(),
+            required_capabilities: vec!["linux".into()],
+            required_trust_pool: "trusted".into(),
+            priority: 0,
+            execution_spec: json!({}),
+        })
+        .await
+        .expect("admit work");
+    assert!(
+        store
+            .open_agent_session(
+                &agent_id,
+                "trusted",
+                1,
+                0,
+                &["work-delivery-v1".into(), "live-log-stream-v1".into()],
+                &["linux".into()],
+            )
+            .await
+            .expect("open a live-log session")
+    );
+    let claim = store
+        .claim_next_in_session(
+            &ClaimRequest {
+                organization_id,
+                scheduler_id: "live-log".into(),
+                agent_id: agent_id.clone(),
+                capabilities: vec!["linux".into()],
+                trust_pool: "trusted".into(),
+                lease_seconds: 600,
+                fairness_seed: 0,
+            },
+            1,
+        )
+        .await
+        .expect("claim under the live-log session")
+        .expect("claim available work");
+    assert!(
+        store
+            .accept_offer_in_session(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                &agent_id,
+                1,
+            )
+            .await
+            .expect("accept under the live-log session")
+            .is_some()
+    );
+    assert!(
+        store
+            .mark_attempt_running_in_session(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                &agent_id,
+                1,
+            )
+            .await
+            .expect("start under the live-log session")
+    );
+
+    (store, runtime, organization_id, project_id, agent_id, claim)
+}
+
+#[tokio::test]
+async fn ctrl005_append_plans_do_not_read_prior_chunks() {
+    let Some((admin, store, organization_id, _, agent_id, claim)) = ctrl005_live_fixture().await
+    else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    for sequence in 0..3000 {
+        assert!(
+            store
+                .append_log_in_session(
+                    &NewLogChunk {
+                        organization_id,
+                        attempt_id: claim.attempt_id,
+                        fence: claim.fence,
+                        restore_epoch: claim.restore_epoch,
+                        agent_id: &agent_id,
+                        sequence,
+                        step_ordinal: 0,
+                        stream: "stdout",
+                        content: b"x",
+                    },
+                    1
+                )
+                .await
+                .expect("commit small live chunk")
+        );
+    }
+    // Fixture-only parameter grants permit tracing this one measured connection.
+    // The ordinary 3,000 appends and every production role remain unaltered.
+    let mut measured = false;
+    let mut measured_backend = None;
+    if std::env::var("MCLOVING_CTRL005_TRACE_SQL").as_deref() == Ok("1") {
+        let url = std::env::var("MCLOVING_TEST_DATABASE_URL").unwrap();
+        let options = url
+            .parse::<PgConnectOptions>()
+            .unwrap()
+            .username("mcloving_tenant");
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .expect("open measured fixture connection");
+        let mut connection = pool.acquire().await.unwrap();
+        for setting in [
+            "SET auto_explain.log_min_duration=0",
+            "SET auto_explain.log_analyze=on",
+            "SET auto_explain.log_buffers=on",
+            "SET auto_explain.log_nested_statements=on",
+            "SET auto_explain.log_format=json",
+            "SET auto_explain.log_timing=off",
+            "SET auto_explain.sample_rate=1",
+        ] {
+            sqlx::query(setting)
+                .execute(&mut *connection)
+                .await
+                .expect("configure measured fixture session");
+        }
+        measured_backend = Some(
+            sqlx::query_scalar::<_, i32>("SELECT pg_backend_pid()")
+                .fetch_one(&mut *connection)
+                .await
+                .unwrap(),
+        );
+        drop(connection);
+        let traced = Store::new(pool);
+        assert!(
+            traced
+                .append_log_in_session(
+                    &NewLogChunk {
+                        organization_id,
+                        attempt_id: claim.attempt_id,
+                        fence: claim.fence,
+                        restore_epoch: claim.restore_epoch,
+                        agent_id: &agent_id,
+                        sequence: 3000,
+                        step_ordinal: 0,
+                        stream: "stdout",
+                        content: b"measured",
+                    },
+                    1
+                )
+                .await
+                .expect("trace entire production append including nested trigger SQL")
+        );
+        traced.pool().close().await;
+        measured = true;
+    }
+    let mut tx = store.pool().begin().await.expect("begin tenant explain");
+    sqlx::query("SELECT set_config('mcloving.organization_id', $1, true)")
+        .bind(organization_id.to_string())
+        .execute(&mut *tx)
+        .await
+        .expect("set tenant");
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(format!(
+            "mcloving.log.{}.{}.{}",
+            organization_id, claim.attempt_id, claim.fence
+        ))
+        .execute(&mut *tx)
+        .await
+        .expect("take attempt lock");
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(format!(
+            "mcloving.log.build.{}.{}",
+            organization_id, claim.build_id
+        ))
+        .execute(&mut *tx)
+        .await
+        .expect("take build lock");
+    let existing_sql = format!(
+        "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {}",
+        ctrl005_append_statement("let existing =")
+    );
+    let existing: Value = sqlx::query_scalar(&existing_sql)
+        .bind(organization_id)
+        .bind(claim.attempt_id)
+        .bind(claim.fence)
+        .bind(if measured { 3001_i64 } else { 3000_i64 })
+        .bind(claim.restore_epoch)
+        .bind(&agent_id)
+        .fetch_one(&mut *tx)
+        .await
+        .expect("explain actual own-key conflict lookup");
+    let quota_sql = format!(
+        "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {}",
+        ctrl005_append_statement("let committed =")
+    );
+    let quota: Value = sqlx::query_scalar(&quota_sql)
+        .bind(organization_id)
+        .bind(claim.attempt_id)
+        .bind(claim.fence)
+        .fetch_one(&mut *tx)
+        .await
+        .expect("explain actual quota statement");
+    let insert_sql = format!(
+        "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {}",
+        ctrl005_append_statement("let inserted =")
+    );
+    let insert: Value = sqlx::query_scalar(&insert_sql)
+        .bind(organization_id)
+        .bind(claim.attempt_id)
+        .bind(claim.fence)
+        .bind(claim.restore_epoch)
+        .bind(&agent_id)
+        .bind(if measured { 3001_i64 } else { 3000_i64 })
+        .bind("stdout")
+        .bind(&b"y"[..])
+        .bind(Sha256::digest(b"y").to_vec())
+        .bind(0_i32)
+        .fetch_one(&mut *tx)
+        .await
+        .expect("explain actual insert statement");
+    tx.rollback()
+        .await
+        .expect("do not persist explain insertion");
+    if let Ok(root) = std::env::var("MCLOVING_CTRL005_EVIDENCE_DIR") {
+        std::fs::create_dir_all(&root).expect("create plan evidence directory");
+        std::fs::write(std::path::Path::new(&root).join("append-plans.json"),
+            serde_json::to_vec_pretty(&json!({"seeded_chunks":3000,"measured_append":measured,"prior_chunks":if measured {3001} else {3000},"measured_backend_pid":measured_backend,"organization_id":organization_id,"attempt_id":claim.attempt_id,"fence":claim.fence,"existing_statement":ctrl005_append_statement("let existing ="),"quota_statement":ctrl005_append_statement("let committed ="),"insert_statement":ctrl005_append_statement("let inserted ="),"conflict_rows_physically_read":ctrl005_prior_chunk_reads(&existing),"exact_conflict_exception":ctrl005_exact_conflict_statement(ctrl005_append_statement("let existing =")),"existing":existing,"quota":quota,"insert":insert})).unwrap())
+            .expect("write actual statement plans");
+    }
+    assert_eq!(
+        ctrl005_nonconflict_prior_chunk_reads(
+            ctrl005_append_statement("let existing ="),
+            &existing
+        ),
+        0,
+        "only the exact full-key conflict SQL may inherit the ticket exception: {existing}"
+    );
+    assert!(ctrl005_exact_conflict_statement(ctrl005_append_statement(
+        "let existing ="
+    )));
+    eprintln!(
+        "CTRL-005 exact conflict check physically visited {} ledger rows (explicit ticket exception, not a bounded-cost claim)",
+        ctrl005_prior_chunk_reads(&existing)
+    );
+    assert_eq!(
+        ctrl005_prior_chunk_reads(&quota),
+        0,
+        "quota plan scans prior chunks: {quota}"
+    );
+    assert_eq!(
+        ctrl005_prior_chunk_reads(&insert),
+        0,
+        "position allocation reads prior chunks: {insert}"
+    );
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM attempt_log_chunks WHERE organization_id=$1 AND attempt_id=$2",
+    )
+    .bind(organization_id)
+    .bind(claim.attempt_id)
+    .fetch_one(admin.pool())
+    .await
+    .unwrap();
+    assert_eq!(
+        count,
+        if measured { 3001 } else { 3000 },
+        "EXPLAIN transaction was rolled back"
+    );
+}
+
+async fn ctrl005_committed(admin: &Store, organization: Uuid, attempt: Uuid, fence: i64) -> i64 {
+    sqlx::query_scalar("SELECT COALESCE((SELECT committed_bytes FROM attempt_log_accounting WHERE organization_id=$1 AND attempt_id=$2 AND fence=$3),0)")
+        .bind(organization).bind(attempt).bind(fence).fetch_one(admin.pool()).await.expect("read durable log bytes")
+}
+
+#[tokio::test]
+async fn ctrl005_stale_tenant_statistics_do_not_restore_prior_chunk_scans() {
+    let Ok(url) = std::env::var("MCLOVING_TEST_DATABASE_URL") else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let retain_fixture =
+        std::env::var("MCLOVING_CTRL005_RETAIN_STALE_FIXTURE").as_deref() == Ok("1");
+    let options = url.parse::<PgConnectOptions>().unwrap();
+    let cluster = PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with(options.clone().database("postgres"))
+        .await
+        .unwrap();
+    let database = format!("ctrl005_stale_{}", Uuid::new_v4().simple());
+    sqlx::query(&format!("CREATE DATABASE {database}"))
+        .execute(&cluster)
+        .await
+        .unwrap();
+    let admin_pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect_with(options.clone().database(&database))
+        .await
+        .unwrap();
+    let admin = Store::new(admin_pool.clone());
+    admin
+        .migrate()
+        .await
+        .expect("install actual current schema in isolated stale-stat fixture");
+    // Fixture only: keep a deterministic production-like stale statistics snapshot.
+    // Never change production autovacuum or planner settings, nor analyze the new tenant.
+    sqlx::query("ALTER TABLE attempt_log_chunks SET (autovacuum_enabled=false)")
+        .execute(&admin_pool)
+        .await
+        .unwrap();
+    let login_setup = unprivileged_store(&admin).await;
+    login_setup.pool().close().await;
+    let runtime_pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect_with(options.database(&database).username("mcloving_tenant"))
+        .await
+        .unwrap();
+    let runtime = Store::new(runtime_pool.clone());
+    let (_, _, old_org, _, old_agent, old_claim) =
+        ctrl005_live_fixture_with_stores(admin.clone(), runtime.clone()).await;
+    for sequence in 0..3000 {
+        assert!(
+            runtime
+                .append_log_in_session(
+                    &NewLogChunk {
+                        organization_id: old_org,
+                        attempt_id: old_claim.attempt_id,
+                        fence: old_claim.fence,
+                        restore_epoch: old_claim.restore_epoch,
+                        agent_id: &old_agent,
+                        sequence,
+                        step_ordinal: 0,
+                        stream: "stdout",
+                        content: b"old",
+                    },
+                    1
+                )
+                .await
+                .expect("commit analyzed earlier-tenant population")
+        );
+    }
+    sqlx::query("ANALYZE attempt_log_chunks")
+        .execute(&admin_pool)
+        .await
+        .unwrap();
+    let statistics_before: Value = sqlx::query_scalar(
+        "SELECT jsonb_agg(to_jsonb(s) ORDER BY s.attname) FROM pg_stats s
+         WHERE s.schemaname='public' AND s.tablename='attempt_log_chunks'",
+    )
+    .fetch_one(&admin_pool)
+    .await
+    .unwrap();
+    assert!(
+        !statistics_before.is_null(),
+        "earlier tenant must have actual planner statistics"
+    );
+    let (_, _, organization_id, _, agent_id, claim) =
+        ctrl005_live_fixture_with_stores(admin.clone(), runtime.clone()).await;
+    assert_ne!(organization_id, old_org);
+    for sequence in 0..3000 {
+        assert!(
+            runtime
+                .append_log_in_session(
+                    &NewLogChunk {
+                        organization_id,
+                        attempt_id: claim.attempt_id,
+                        fence: claim.fence,
+                        restore_epoch: claim.restore_epoch,
+                        agent_id: &agent_id,
+                        sequence,
+                        step_ordinal: 0,
+                        stream: "stdout",
+                        content: b"new",
+                    },
+                    1
+                )
+                .await
+                .expect("commit distinct tenant without refreshing statistics")
+        );
+    }
+    let statistics_after: Value = sqlx::query_scalar(
+        "SELECT jsonb_agg(to_jsonb(s) ORDER BY s.attname) FROM pg_stats s
+         WHERE s.schemaname='public' AND s.tablename='attempt_log_chunks'",
+    )
+    .fetch_one(&admin_pool)
+    .await
+    .unwrap();
+    let mut tx = runtime.pool().begin().await.unwrap();
+    sqlx::query("SELECT set_config('mcloving.organization_id',$1,true)")
+        .bind(organization_id.to_string())
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    for key in [
+        format!(
+            "mcloving.log.{}.{}.{}",
+            organization_id, claim.attempt_id, claim.fence
+        ),
+        format!("mcloving.log.build.{}.{}", organization_id, claim.build_id),
+    ] {
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))")
+            .bind(key)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+    }
+    let existing: Value = sqlx::query_scalar(&format!(
+        "EXPLAIN (ANALYZE,BUFFERS,FORMAT JSON) {}",
+        ctrl005_append_statement("let existing =")
+    ))
+    .bind(organization_id)
+    .bind(claim.attempt_id)
+    .bind(claim.fence)
+    .bind(3000_i64)
+    .bind(claim.restore_epoch)
+    .bind(&agent_id)
+    .fetch_one(&mut *tx)
+    .await
+    .unwrap();
+    let trigger_statement = ctrl005_trigger_conflict_statement();
+    let trigger: Value = sqlx::query_scalar(&format!(
+        "EXPLAIN (ANALYZE,BUFFERS,FORMAT JSON) {trigger_statement}"
+    ))
+    .bind(organization_id)
+    .bind(claim.attempt_id)
+    .bind(claim.fence)
+    .bind(3000_i64)
+    .fetch_one(&mut *tx)
+    .await
+    .unwrap();
+    let quota: Value = sqlx::query_scalar(&format!(
+        "EXPLAIN (ANALYZE,BUFFERS,FORMAT JSON) {}",
+        ctrl005_append_statement("let committed =")
+    ))
+    .bind(organization_id)
+    .bind(claim.attempt_id)
+    .bind(claim.fence)
+    .fetch_one(&mut *tx)
+    .await
+    .unwrap();
+    let insert: Value = sqlx::query_scalar(&format!(
+        "EXPLAIN (ANALYZE,BUFFERS,FORMAT JSON) {}",
+        ctrl005_append_statement("let inserted =")
+    ))
+    .bind(organization_id)
+    .bind(claim.attempt_id)
+    .bind(claim.fence)
+    .bind(claim.restore_epoch)
+    .bind(&agent_id)
+    .bind(3000_i64)
+    .bind("stdout")
+    .bind(&b"y"[..])
+    .bind(Sha256::digest(b"y").to_vec())
+    .bind(0_i32)
+    .fetch_one(&mut *tx)
+    .await
+    .unwrap();
+    tx.rollback().await.unwrap();
+    let persisted: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM attempt_log_chunks WHERE organization_id=$1 AND attempt_id=$2",
+    )
+    .bind(organization_id)
+    .bind(claim.attempt_id)
+    .fetch_one(&admin_pool)
+    .await
+    .unwrap();
+    if let Ok(directory) = std::env::var("MCLOVING_CTRL005_EVIDENCE_DIR") {
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(
+            std::path::Path::new(&directory).join("stale-tenant-plans.json"),
+            serde_json::to_vec_pretty(&json!({"database":database,"old_organization_id":old_org,
+                "organization_id":organization_id,"attempt_id":claim.attempt_id,"fence":claim.fence,
+                "old_chunks":3000,"new_chunks":3000,"autovacuum_disabled_fixture_only":true,
+                "retained_database":retain_fixture,
+                "existing_statement":ctrl005_append_statement("let existing ="),
+                "trigger_statement":trigger_statement,
+                "conflict_rows_physically_read":ctrl005_prior_chunk_reads(&existing),
+                "trigger_conflict_rows_physically_read":ctrl005_prior_chunk_reads(&trigger),
+                "statistics_before":statistics_before,"statistics_after":statistics_after,
+                "existing":existing,"trigger":trigger,"quota":quota,"insert":insert}))
+            .unwrap(),
+        )
+        .unwrap();
+    }
+    runtime_pool.close().await;
+    admin_pool.close().await;
+    if retain_fixture {
+        eprintln!("CTRL-005 retained owned stale-stat fixture database: {database}");
+    } else {
+        sqlx::query(&format!("DROP DATABASE {database} WITH (FORCE)"))
+            .execute(&cluster)
+            .await
+            .unwrap();
+    }
+    cluster.close().await;
+    assert_eq!(
+        statistics_before, statistics_after,
+        "new tenant retains the earlier analyzed statistics"
+    );
+    assert_eq!(
+        persisted, 3000,
+        "EXPLAIN insertion rolls back before fixture cleanup"
+    );
+    assert!(ctrl005_exact_conflict_statement(ctrl005_append_statement(
+        "let existing ="
+    )));
+    assert!(ctrl005_exact_conflict_statement(&trigger_statement));
+    for (name, statement, plan) in [
+        (
+            "existing",
+            ctrl005_append_statement("let existing =").to_owned(),
+            existing,
+        ),
+        ("trigger", trigger_statement, trigger),
+        (
+            "quota",
+            ctrl005_append_statement("let committed =").to_owned(),
+            quota,
+        ),
+        (
+            "insert",
+            ctrl005_append_statement("let inserted =").to_owned(),
+            insert,
+        ),
+    ] {
+        eprintln!(
+            "CTRL-005 stale tenant {name}: {} physical ledger visits; exact conflict exception={}",
+            ctrl005_prior_chunk_reads(&plan),
+            ctrl005_exact_conflict_statement(&statement)
+        );
+        assert_eq!(
+            ctrl005_nonconflict_prior_chunk_reads(&statement, &plan),
+            0,
+            "stale tenant {name} reads prior chunks outside its exact conflict exception: {plan}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn ctrl005_retries_rejections_and_quota_keep_counts_exact() {
+    let Some((admin, store, organization_id, project_id, agent_id, claim)) =
+        ctrl005_live_fixture().await
+    else {
+        return;
+    };
+    let chunk = |sequence, content| NewLogChunk {
+        organization_id,
+        attempt_id: claim.attempt_id,
+        fence: claim.fence,
+        restore_epoch: claim.restore_epoch,
+        agent_id: &agent_id,
+        sequence,
+        step_ordinal: 0,
+        stream: "stdout",
+        content,
+    };
+    assert!(
+        store
+            .append_log_in_session(&chunk(0, b"first"), 1)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        ctrl005_committed(&admin, organization_id, claim.attempt_id, claim.fence).await,
+        5
+    );
+    assert!(
+        store
+            .append_log_in_session(&chunk(0, b"first"), 1)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !store
+            .append_log_in_session(&chunk(0, b"conflict"), 1)
+            .await
+            .unwrap()
+    );
+    let mut stale = chunk(1, b"stale");
+    stale.fence += 1;
+    assert!(!store.append_log_in_session(&stale, 1).await.unwrap());
+    assert!(
+        !store
+            .append_log_in_session(&chunk(1, b"stale-session"), 2)
+            .await
+            .unwrap()
+    );
+    let duplicate = chunk(1, b"same");
+    let left = store.append_log_in_session(&duplicate, 1);
+    let right = store.append_log_in_session(&duplicate, 1);
+    let (left, right) = tokio::join!(left, right);
+    assert!(left.unwrap() && right.unwrap());
+    assert_eq!(
+        ctrl005_committed(&admin, organization_id, claim.attempt_id, claim.fence).await,
+        9
+    );
+    let huge = vec![b'z'; 64 * 1_048_576 - 9];
+    assert!(
+        store
+            .append_log_in_session(&chunk(2, &huge), 1)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !store
+            .append_log_in_session(&chunk(3, b"x"), 1)
+            .await
+            .unwrap()
+    );
+    assert!(
+        store
+            .append_log_in_session(&chunk(2, &huge), 1)
+            .await
+            .unwrap(),
+        "retry at quota is still accepted"
+    );
+    assert_eq!(
+        ctrl005_committed(&admin, organization_id, claim.attempt_id, claim.fence).await,
+        64 * 1_048_576
+    );
+    let positions: Vec<i64> = sqlx::query_scalar("SELECT build_position FROM attempt_log_chunks WHERE organization_id=$1 AND build_id=$2 ORDER BY build_position")
+        .bind(organization_id).bind(claim.build_id).fetch_all(admin.pool()).await.unwrap();
+    assert_eq!(
+        positions,
+        vec![1, 2, 3],
+        "refusal/retry never consumes a position"
+    );
+    let counter: i64 = sqlx::query_scalar("SELECT committed_log_position FROM builds WHERE id=$1")
+        .bind(claim.build_id)
+        .fetch_one(admin.pool())
+        .await
+        .unwrap();
+    assert_eq!(counter, 3);
+    let mut tx = store.pool().begin().await.unwrap();
+    sqlx::query("SELECT set_config('mcloving.organization_id', $1, true)")
+        .bind(Uuid::new_v4().to_string())
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM attempt_log_accounting WHERE attempt_id=$1"
+        )
+        .bind(claim.attempt_id)
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap(),
+        0,
+        "accounting remains tenant confined"
+    );
+    tx.rollback().await.unwrap();
+    let visible = store
+        .build_logs_after_cursor(organization_id, project_id, claim.build_id, 0, 10)
+        .await
+        .unwrap();
+    assert_eq!(visible.len(), 3);
+}
+
+#[tokio::test]
+async fn ctrl005_legacy_inserts_updates_and_deletes_keep_accounting_exact() {
+    let Some((admin, store, organization_id, _, agent_id, claim)) = ctrl005_live_fixture().await
+    else {
+        return;
+    };
+    let legacy_sql = "INSERT INTO attempt_log_chunks (organization_id,attempt_id,fence,sequence,stream,content,digest,step_ordinal) VALUES ($1,$2,$3,$4,'stdout',$5,sha256($5),0) ON CONFLICT (organization_id,attempt_id,fence,sequence) DO UPDATE SET content=EXCLUDED.content";
+    for (sequence, bytes) in [(0, &b"old"[..]), (0, &b"old"[..]), (1, &b"second"[..])] {
+        let mut tx = store.pool().begin().await.unwrap();
+        sqlx::query("SELECT set_config('mcloving.organization_id', $1, true)")
+            .bind(organization_id.to_string())
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        sqlx::query(legacy_sql)
+            .bind(organization_id)
+            .bind(claim.attempt_id)
+            .bind(claim.fence)
+            .bind(sequence as i64)
+            .bind(bytes)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+    }
+    assert_eq!(
+        ctrl005_committed(&admin, organization_id, claim.attempt_id, claim.fence).await,
+        9
+    );
+    assert!(
+        store
+            .append_log_in_session(
+                &NewLogChunk {
+                    organization_id,
+                    attempt_id: claim.attempt_id,
+                    fence: claim.fence,
+                    restore_epoch: claim.restore_epoch,
+                    agent_id: &agent_id,
+                    sequence: 2,
+                    step_ordinal: 0,
+                    stream: "stdout",
+                    content: b"new"
+                },
+                1
+            )
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        ctrl005_committed(&admin, organization_id, claim.attempt_id, claim.fence).await,
+        12
+    );
+    let positions: Vec<i64> = sqlx::query_scalar("SELECT build_position FROM attempt_log_chunks WHERE organization_id=$1 AND build_id=$2 ORDER BY build_position")
+        .bind(organization_id).bind(claim.build_id).fetch_all(admin.pool()).await.unwrap();
+    assert_eq!(positions, vec![1, 2, 3]);
+    sqlx::query(
+        "DELETE FROM attempt_log_chunks WHERE organization_id=$1 AND attempt_id=$2 AND sequence=1",
+    )
+    .bind(organization_id)
+    .bind(claim.attempt_id)
+    .execute(admin.pool())
+    .await
+    .unwrap();
+    assert_eq!(
+        ctrl005_committed(&admin, organization_id, claim.attempt_id, claim.fence).await,
+        6
+    );
+    let counter: i64 = sqlx::query_scalar("SELECT committed_log_position FROM builds WHERE id=$1")
+        .bind(claim.build_id)
+        .fetch_one(admin.pool())
+        .await
+        .unwrap();
+    assert_eq!(
+        counter, 3,
+        "deleting logs never reuses committed cursor positions"
+    );
+    let too_large = vec![b'q'; 64 * 1_048_576];
+    let refusal = sqlx::query(legacy_sql)
+        .bind(organization_id)
+        .bind(claim.attempt_id)
+        .bind(claim.fence)
+        .bind(3_i64)
+        .bind(&too_large)
+        .execute(admin.pool())
+        .await
+        .expect_err("legacy writer also enforces quota");
+    assert_eq!(
+        refusal
+            .as_database_error()
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("23514")
+    );
+    assert_eq!(
+        ctrl005_committed(&admin, organization_id, claim.attempt_id, claim.fence).await,
+        6
+    );
+}
+
+#[tokio::test]
+async fn ctrl005_migration_backfills_all_tenants_and_fences_once() {
+    let Ok(url) = std::env::var("MCLOVING_TEST_DATABASE_URL") else {
+        return;
+    };
+    let options = url.parse::<PgConnectOptions>().unwrap();
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with(options.clone().database("postgres"))
+        .await
+        .unwrap();
+    let database = format!("ctrl005_{}", Uuid::new_v4().simple());
+    sqlx::query(&format!("CREATE DATABASE {database}"))
+        .execute(&admin)
+        .await
+        .unwrap();
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect_with(options.database(&database))
+        .await
+        .unwrap();
+    let migrations: &[(i32, &str)] = &[
+        (1, include_str!("../migrations/0001_controller_truth.sql")),
+        (2, include_str!("../migrations/0002_tenant_security.sql")),
+        (3, include_str!("../migrations/0003_public_api.sql")),
+        (4, include_str!("../migrations/0004_durable_retry.sql")),
+        (5, include_str!("../migrations/0005_object_references.sql")),
+        (
+            6,
+            include_str!("../migrations/0006_recovery_operations.sql"),
+        ),
+        (7, include_str!("../migrations/0007_agent_sessions.sql")),
+        (8, include_str!("../migrations/0008_node_trust_pool.sql")),
+        (9, include_str!("../migrations/0009_pipeline_dag.sql")),
+        (
+            10,
+            include_str!("../migrations/0010_attempt_credentials.sql"),
+        ),
+        (11, include_str!("../migrations/0011_tenant_audit.sql")),
+        (12, include_str!("../migrations/0012_artifact_metadata.sql")),
+        (13, include_str!("../migrations/0013_test_results.sql")),
+        (
+            14,
+            include_str!("../migrations/0014_object_publication_fence.sql"),
+        ),
+        (15, include_str!("../migrations/0015_product_surface.sql")),
+        (16, include_str!("../migrations/0016_global_log_order.sql")),
+        (17, include_str!("../migrations/0017_state_transfer.sql")),
+        (18, include_str!("../migrations/0018_attempt_readiness.sql")),
+        (
+            19,
+            include_str!("../migrations/0019_identity_lifecycle.sql"),
+        ),
+        (
+            20,
+            include_str!("../migrations/0020_identity_session_refresh.sql"),
+        ),
+        (
+            21,
+            include_str!("../migrations/0021_identity_session_lineage.sql"),
+        ),
+        (
+            22,
+            include_str!("../migrations/0022_credential_namespace.sql"),
+        ),
+        (
+            23,
+            include_str!("../migrations/0023_runtime_function_boundary.sql"),
+        ),
+        (
+            24,
+            include_str!("../migrations/0024_authorization_mapping.sql"),
+        ),
+        (
+            25,
+            include_str!("../migrations/0025_external_read_consumers.sql"),
+        ),
+        (
+            26,
+            include_str!("../migrations/0026_external_admin_clients.sql"),
+        ),
+        (
+            27,
+            include_str!("../migrations/0027_pipeline_operational_state.sql"),
+        ),
+        (28, include_str!("../migrations/0028_trigger_ingress.sql")),
+        (29, include_str!("../migrations/0029_discovery.sql")),
+        (30, include_str!("../migrations/0030_effect_evidence.sql")),
+        (
+            31,
+            include_str!("../migrations/0031_effect_release_pending.sql"),
+        ),
+        (
+            32,
+            include_str!("../migrations/0032_effect_dispatch_commit.sql"),
+        ),
+        (
+            33,
+            include_str!("../migrations/0033_effect_dispatch_commit_guard.sql"),
+        ),
+        (
+            34,
+            include_str!("../migrations/0034_work_ready_notifications.sql"),
+        ),
+        (
+            35,
+            include_str!("../migrations/0035_active_lease_notifications.sql"),
+        ),
+        (36, include_str!("../migrations/0036_build_workspace.sql")),
+        (37, include_str!("../migrations/0037_step_ordinal.sql")),
+        (38, include_str!("../migrations/0038_webhook_receipts.sql")),
+        (
+            39,
+            include_str!("../migrations/0039_log_build_position.sql"),
+        ),
+        (40, include_str!("../migrations/0040_notifications.sql")),
+        (
+            41,
+            include_str!("../migrations/0041_project_role_grants.sql"),
+        ),
+        (
+            42,
+            include_str!("../migrations/0042_trigger_schedule_slots.sql"),
+        ),
+        (
+            43,
+            include_str!("../migrations/0043_workspace_affinity.sql"),
+        ),
+    ];
+    let mut tx = pool.begin().await.unwrap();
+    sqlx::query("CREATE TABLE mcloving_schema_migrations (version integer PRIMARY KEY, installed_at timestamptz NOT NULL DEFAULT clock_timestamp())").execute(&mut *tx).await.unwrap();
+    for (version, migration) in migrations {
+        sqlx::raw_sql(migration)
+            .execute(&mut *tx)
+            .await
+            .unwrap_or_else(|error| panic!("install v{version}: {error}"));
+        sqlx::query("INSERT INTO mcloving_schema_migrations(version) VALUES($1)")
+            .bind(version)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+    }
+    tx.commit().await.unwrap();
+    let old = Store::new(pool.clone());
+    let mut expected = Vec::new();
+    let mut builds = Vec::new();
+    for _ in 0..2 {
+        let organization = Uuid::new_v4();
+        let project = Uuid::new_v4();
+        old.create_project(
+            organization,
+            &format!("org-{organization}"),
+            project,
+            "project",
+        )
+        .await
+        .unwrap();
+        for populated in [true, false] {
+            let build = Uuid::new_v4();
+            let node = Uuid::new_v4();
+            let attempt = Uuid::new_v4();
+            sqlx::query("INSERT INTO builds(id,organization_id,project_id,idempotency_key,pipeline_digest,status) VALUES($1,$2,$3,$4,$5,'running')")
+                .bind(build).bind(organization).bind(project).bind(build.to_string()).bind([7_u8;32].as_slice()).execute(&pool).await.unwrap();
+            sqlx::query("INSERT INTO nodes(id,organization_id,build_id,node_key,status,required_trust_pool) VALUES($1,$2,$3,'step','running','trusted')")
+                .bind(node).bind(organization).bind(build).execute(&pool).await.unwrap();
+            sqlx::query("INSERT INTO attempts(id,organization_id,node_id,ordinal,status,fence) VALUES($1,$2,$3,1,'running',3)")
+                .bind(attempt).bind(organization).bind(node).execute(&pool).await.unwrap();
+            if populated {
+                for (sequence, fence, bytes) in [
+                    (0_i64, 2_i64, &b"old-fence"[..]),
+                    (0, 3, &b"current"[..]),
+                    (1, 3, &b"tail"[..]),
+                ] {
+                    sqlx::query("INSERT INTO attempt_log_chunks(organization_id,attempt_id,fence,sequence,stream,content,digest) VALUES($1,$2,$3,$4,'stdout',$5,sha256($5))")
+                        .bind(organization).bind(attempt).bind(fence).bind(sequence).bind(bytes).execute(&pool).await.unwrap();
+                }
+                expected.push((organization, attempt, 2_i64, 9_i64));
+                expected.push((organization, attempt, 3, 11));
+            }
+            builds.push((build, if populated { 3_i64 } else { 0 }));
+        }
+    }
+    old.migrate()
+        .await
+        .expect("backfill v44 across both organizations");
+    old.migrate()
+        .await
+        .expect("migration ledger makes reentry idempotent");
+    let mut actual: Vec<(Uuid, Uuid, i64, i64)> = sqlx::query_as(
+        "SELECT organization_id,attempt_id,fence,committed_bytes FROM attempt_log_accounting",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    actual.sort();
+    expected.sort();
+    assert_eq!(actual, expected);
+    for (build, position) in builds {
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT committed_log_position FROM builds WHERE id=$1")
+                .bind(build)
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            position
+        );
+    }
+    let applied: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM mcloving_schema_migrations WHERE version=44")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(applied, 1);
+    pool.close().await;
+    sqlx::query(&format!("DROP DATABASE {database} WITH (FORCE)"))
+        .execute(&admin)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn ctrl005_concurrent_legacy_and_modern_writers_share_lock_order() {
+    let Some((admin, store, organization_id, _, agent_id, claim)) = ctrl005_live_fixture().await
+    else {
+        return;
+    };
+    let modern_chunk = NewLogChunk {
+        organization_id,
+        attempt_id: claim.attempt_id,
+        fence: claim.fence,
+        restore_epoch: claim.restore_epoch,
+        agent_id: &agent_id,
+        sequence: 1,
+        step_ordinal: 0,
+        stream: "stdout",
+        content: b"modern",
+    };
+    let legacy = async {
+        let mut tx = store.pool().begin().await.unwrap();
+        sqlx::query("SET LOCAL lock_timeout='5s'")
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        sqlx::query("SELECT set_config('mcloving.organization_id',$1,true)")
+            .bind(organization_id.to_string())
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO attempt_log_chunks(organization_id,attempt_id,fence,sequence,stream,content,digest) VALUES($1,$2,$3,0,'stdout',$4,sha256($4))")
+            .bind(organization_id).bind(claim.attempt_id).bind(claim.fence).bind(&b"legacy"[..]).execute(&mut *tx).await.unwrap();
+        tx.commit().await.unwrap();
+    };
+    let modern = store.append_log_in_session(&modern_chunk, 1);
+    let (_, modern) = tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::join!(legacy, modern)
+    })
+    .await
+    .expect("mixed writer locks converge");
+    assert!(modern.unwrap());
+    assert_eq!(
+        ctrl005_committed(&admin, organization_id, claim.attempt_id, claim.fence).await,
+        12
+    );
+    let positions: Vec<i64> = sqlx::query_scalar("SELECT build_position FROM attempt_log_chunks WHERE organization_id=$1 AND build_id=$2 ORDER BY build_position")
+        .bind(organization_id).bind(claim.build_id).fetch_all(admin.pool()).await.unwrap();
+    assert_eq!(positions, vec![1, 2]);
+}
+
+#[tokio::test]
+async fn ctrl005_pre_v44_writer_and_supported_parent_cleanup() {
+    let Some((admin, store, organization_id, _, agent_id, claim)) = ctrl005_live_fixture().await
+    else {
+        return;
+    };
+    // The deployed v39-v43 INSERT, including its supplied build/position and MAX.
+    // Old replicas retain their old scan cost until upgraded; their durable writes
+    // must nevertheless maintain v44 byte and position counters correctly.
+    let old_sql = "INSERT INTO attempt_log_chunks (organization_id, attempt_id, fence, sequence, stream, content, digest, step_ordinal, build_id, build_position)
+        SELECT $1,a.id,$3,$6,$7,$8,$9,$10,n.build_id,
+            (SELECT COALESCE(MAX(l2.build_position),0)+1 FROM attempt_log_chunks l2 WHERE l2.organization_id=n.organization_id AND l2.build_id=n.build_id)
+        FROM attempts a JOIN nodes n ON n.id=a.node_id AND n.organization_id=a.organization_id
+        WHERE a.organization_id=$1 AND a.id=$2 AND a.fence=$3 AND a.restore_epoch=$4
+            AND a.restore_epoch=(SELECT restore_epoch FROM controller_metadata WHERE singleton)
+            AND a.lease_owner=$5 AND a.lease_expires_at>clock_timestamp()
+            AND a.status IN ('accepted','running','finalizing','cancelling')
+        ON CONFLICT (organization_id,attempt_id,fence,sequence) DO UPDATE SET content=EXCLUDED.content
+        WHERE attempt_log_chunks.stream=EXCLUDED.stream AND attempt_log_chunks.digest=EXCLUDED.digest
+            AND attempt_log_chunks.step_ordinal=EXCLUDED.step_ordinal RETURNING sequence";
+    for sequence in [0_i64, 0, 1] {
+        let mut tx = store.pool().begin().await.unwrap();
+        sqlx::query("SELECT set_config('mcloving.organization_id',$1,true)")
+            .bind(organization_id.to_string())
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        // Match the old writer's attempt-before-build advisory lock order too.
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))")
+            .bind(format!(
+                "mcloving.log.{}.{}.{}",
+                organization_id, claim.attempt_id, claim.fence
+            ))
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))")
+            .bind(format!(
+                "mcloving.log.build.{}.{}",
+                organization_id, claim.build_id
+            ))
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(old_sql)
+                .bind(organization_id)
+                .bind(claim.attempt_id)
+                .bind(claim.fence)
+                .bind(claim.restore_epoch)
+                .bind(&agent_id)
+                .bind(sequence)
+                .bind("stdout")
+                .bind(&b"old-full"[..])
+                .bind(Sha256::digest(b"old-full").to_vec())
+                .bind(0_i32)
+                .fetch_one(&mut *tx)
+                .await
+                .unwrap(),
+            sequence
+        );
+        tx.commit().await.unwrap();
+    }
+    assert_eq!(
+        ctrl005_committed(&admin, organization_id, claim.attempt_id, claim.fence).await,
+        16
+    );
+    let refused_parent = sqlx::query("DELETE FROM attempts WHERE id=$1")
+        .bind(claim.attempt_id)
+        .execute(admin.pool())
+        .await
+        .expect_err("live ledger keeps original restrictive parent FK");
+    assert_eq!(
+        refused_parent
+            .as_database_error()
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("23503")
+    );
+    assert_eq!(
+        ctrl005_committed(&admin, organization_id, claim.attempt_id, claim.fence).await,
+        16
+    );
+    sqlx::query("DELETE FROM attempt_log_chunks WHERE attempt_id=$1 AND sequence=1")
+        .bind(claim.attempt_id)
+        .execute(admin.pool())
+        .await
+        .unwrap();
+    assert!(
+        store
+            .append_log_in_session(
+                &NewLogChunk {
+                    organization_id,
+                    attempt_id: claim.attempt_id,
+                    fence: claim.fence,
+                    restore_epoch: claim.restore_epoch,
+                    agent_id: &agent_id,
+                    sequence: 2,
+                    step_ordinal: 0,
+                    stream: "stdout",
+                    content: b"new"
+                },
+                1
+            )
+            .await
+            .unwrap()
+    );
+    let positions: Vec<i64> = sqlx::query_scalar(
+        "SELECT build_position FROM attempt_log_chunks WHERE attempt_id=$1 ORDER BY build_position",
+    )
+    .bind(claim.attempt_id)
+    .fetch_all(admin.pool())
+    .await
+    .unwrap();
+    assert_eq!(
+        positions,
+        vec![1, 3],
+        "published cursor is never reused after deleting last chunk"
+    );
+    sqlx::query("DELETE FROM attempt_log_chunks WHERE attempt_id=$1")
+        .bind(claim.attempt_id)
+        .execute(admin.pool())
+        .await
+        .unwrap();
+    assert_eq!(
+        ctrl005_committed(&admin, organization_id, claim.attempt_id, claim.fence).await,
+        0
+    );
+    sqlx::query("DELETE FROM attempts WHERE id=$1")
+        .bind(claim.attempt_id)
+        .execute(admin.pool())
+        .await
+        .expect("supported chunks-first cleanup");
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM attempt_log_accounting WHERE attempt_id=$1"
+        )
+        .bind(claim.attempt_id)
+        .fetch_one(admin.pool())
+        .await
+        .unwrap(),
+        0,
+        "zero accounting follows parent cleanup"
+    );
+}
+
+#[tokio::test]
+async fn ctrl005_ledger_mutations_wait_for_the_attempt_lock() {
+    let Some((admin, store, organization_id, _, agent_id, claim)) = ctrl005_live_fixture().await
+    else {
+        return;
+    };
+    assert!(
+        store
+            .append_log_in_session(
+                &NewLogChunk {
+                    organization_id,
+                    attempt_id: claim.attempt_id,
+                    fence: claim.fence,
+                    restore_epoch: claim.restore_epoch,
+                    agent_id: &agent_id,
+                    sequence: 0,
+                    step_ordinal: 0,
+                    stream: "stdout",
+                    content: b"old"
+                },
+                1
+            )
+            .await
+            .unwrap()
+    );
+    for (operation, expected) in [
+        (
+            "UPDATE attempt_log_chunks SET content='updated'::bytea,digest=sha256('updated'::bytea) WHERE organization_id=$1 AND attempt_id=$2 AND fence=$3",
+            7_i64,
+        ),
+        (
+            "DELETE FROM attempt_log_chunks WHERE organization_id=$1 AND attempt_id=$2 AND fence=$3",
+            0_i64,
+        ),
+    ] {
+        let mut holder = store.pool().begin().await.unwrap();
+        sqlx::query("SELECT set_config('mcloving.organization_id',$1,true)")
+            .bind(organization_id.to_string())
+            .execute(&mut *holder)
+            .await
+            .unwrap();
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))")
+            .bind(format!(
+                "mcloving.log.{}.{}.{}",
+                organization_id, claim.attempt_id, claim.fence
+            ))
+            .execute(&mut *holder)
+            .await
+            .unwrap();
+        let mut change = store.pool().begin().await.unwrap();
+        sqlx::query("SELECT set_config('mcloving.organization_id',$1,true)")
+            .bind(organization_id.to_string())
+            .execute(&mut *change)
+            .await
+            .unwrap();
+        let pid = sqlx::query_scalar::<_, i32>("SELECT pg_backend_pid()")
+            .fetch_one(&mut *change)
+            .await
+            .unwrap();
+        let attempt = claim.attempt_id;
+        let fence = claim.fence;
+        let writer = tokio::spawn(async move {
+            sqlx::query(operation)
+                .bind(organization_id)
+                .bind(attempt)
+                .bind(fence)
+                .execute(&mut *change)
+                .await
+                .unwrap();
+            change.commit().await.unwrap();
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let waiting=sqlx::query_scalar::<_,bool>("SELECT EXISTS(SELECT 1 FROM pg_locks WHERE pid=$1 AND locktype='advisory' AND NOT granted)")
+                .bind(pid).fetch_one(admin.pool()).await.unwrap();
+            if waiting {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "actual mutation must wait on held attempt lock"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            !writer.is_finished(),
+            "update/delete cannot bypass same-key serialization"
+        );
+        // UPDATE/DELETE already own the tuple lock before the BEFORE trigger
+        // waits for holder's attempt advisory lock. Execute the real duplicate
+        // lookup while that edge is live: FOR UPDATE here would close a cycle.
+        let existing = tokio::time::timeout(
+            Duration::from_secs(5),
+            sqlx::query_as::<_, (String, Vec<u8>, i32)>(ctrl005_append_statement("let existing ="))
+                .bind(organization_id)
+                .bind(claim.attempt_id)
+                .bind(claim.fence)
+                .bind(0_i64)
+                .bind(claim.restore_epoch)
+                .bind(&agent_id)
+                .fetch_optional(&mut *holder),
+        )
+        .await
+        .expect("real duplicate lookup must finish while row mutation waits")
+        .expect("real duplicate lookup must not deadlock with the row mutation");
+        assert!(
+            existing.is_some(),
+            "existing row remains readable under the held attempt lock"
+        );
+        assert!(
+            !writer.is_finished(),
+            "duplicate lookup must not release writer's advisory wait"
+        );
+        holder.commit().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), writer)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            ctrl005_committed(&admin, organization_id, claim.attempt_id, claim.fence).await,
+            expected
+        );
+    }
 }

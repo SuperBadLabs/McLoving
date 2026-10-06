@@ -95,7 +95,7 @@ resource controls. They are not treated as hostile multi-tenant isolation.
 | TM-015 | Webhook is forged or replayed | Provider signature, body limits, immutable event ID | Invalid signature/replay/rate tests | EXT/SEC | Provider credential theft |
 | TM-016 | Dependency or action is replaced through mutable reference | Lockfiles, signed releases, digest-pinned images/actions | Provenance and substitution gates | FOUND/REL | Upstream signing compromise |
 | TM-017 | Database restore resurrects old authority | New recovery epoch and full agent reconciliation | Catastrophic restore drill | OPS/ARCH | Lost agent journals |
-| TM-018 | Log/artifact volume exhausts controller or agent disk or memory | 64 MiB attempt-log and 64 KiB result quotas, bounded two-pass streaming, explicit backpressure | Oversize rejection, streaming digest-mismatch, disk-full, and quota war tests | OPS/AGENT | Operator misconfiguration |
+| TM-018 | Log/artifact volume exhausts controller or agent disk, memory, or shared database CPU | 64 MiB exact-fence attempt-log and 64 KiB result quotas; transactionally maintained redacted-byte counters and build-position counters under attempt-before-build locks for modern and legacy writers; bounded two-pass streaming and explicit backpressure | Oversize rejection, streaming digest-mismatch, disk-full, quota war tests; CTRL-005 PostgreSQL backfill, retry, tenant, mixed-writer, quota-boundary and actual append-plan tests (candidate evidence below) | OPS/AGENT/CTRL | Operator misconfiguration; privileged database mutation and PostgreSQL/host failure remain trusted operational boundaries |
 | TM-019 | Approval is reused after pipeline or artifact changes | Approval binds build, IR, artifact, environment, action | Stale-approval negative tests | SEC/UX | Approver account compromise |
 | TM-020 | Compatibility worker executes untrusted Groovy, forges compiler output, or imports mutable/secret-bearing authority | Groovy is never evaluated; v1 retains exact-source admission, while v2 performs bounded PARSING and original-source recognition before CONVERSION and requires independent Rust source-to-output agreement; exact source/context/profile/contract/compiler binding; no secrets/network/DB/agent/controller access; rootless read-only limits and all-false authority ledger; separate disabled state record; independent Rust canonical-EDN, strict-YAML, canonical-IR, provenance, authority, state, host-path, and secret-substitution validation | Deterministic exact-oracle and declared sequential-fixture compilation; sandbox/mount/symlink/limit/environment authority-negative gates; malformed/noncanonical/profile/authority/state/host-path/secret adversarial worker-output tests; working-tree marker scan | COMPAT/SEC | JVM/container escape or a jointly flawed worker and independent validator |
 | TM-026 | A floating or substituted Jenkins step/plugin mapping silently falls back, reads an undeclared host input, or turns a compile-only construct into execution or external-effect authority | Versioned strict-YAML catalog; exact plugin/profile/corpus/source/target bindings; detached byte and semantic lock; deny-unknown schema; explicit unsupported policy; all-false authority; connector-only production effects; unearned local-input/shared-resource/cache semantics are not admitted | Mapping-catalog golden, strict-YAML, bundle, authority, policy, profile/plugin/corpus substitution, unknown-field, and coverage-inflation tests; sealed successor corpus | COMPAT/SEC | Only one literal `sh` mapping is earned; execution equivalence, local input, shared resources, cache behavior, and production effects remain uncertified |
@@ -1503,3 +1503,70 @@ workflow mitigations in TM-052 do not change. Residual risk remains differently
 phrased prose and external state changing after the local check; the live
 exact-head readback is still mandatory. HYG-003 is `ACTIVE`; this section is not
 a closure attribution or independent review receipt.
+
+
+## CTRL-005 incremental log accounting (implementation candidate)
+
+This candidate changes controller persistence and resource accounting. It does
+not close CTRL-005 or grant production authority. The ticket's local tests,
+independent review, exact-head checks, protected merge, and post-merge
+Foundation/native Windows receipts remain separate obligations.
+
+TM-018 now includes shared database CPU: scanning every prior log chunk for
+every append makes a legal live-log attempt quadratic. Migration 0044 backfills
+one counter per organization/attempt/fence and the last committed position of
+each build. The append reads the exact counter; successful chunk insertion
+updates it in the same transaction. Counter triggers cover admitted older
+controllers as well as the current writer, take the same attempt-before-build
+locks, allocate a position only for a genuinely new chunk key, preserve retries
+without charging twice, and roll back count and position together on refusal.
+Counters charge redacted stored bytes and retain the existing 64 MiB scope.
+
+The original primary key and other indexes are unchanged. Same-key advisory
+serialization covers modern append and admitted legacy insert/update/delete
+paths. A direct UPDATE/DELETE locks its tuple before its BEFORE trigger waits
+on the attempt advisory lock; the modern duplicate lookup therefore avoids
+FOR UPDATE, which would invert that order and permit a deadlock.
+
+The ticket explicitly excepts its own conflict check. Plan classification
+excepts only the complete extracted organization/attempt/fence/sequence lookup
+and trigger duplicate-position statement; quota, counter and next-position
+plans still must read no prior chunk. Physical work within those exact conflict
+statements remains visible: retained plans filtered 3,000 prior rows and one
+lookup touched 2,076 blocks. That unresolved planner cost can still make the
+whole append quadratic; this change claims incremental accounting, not universal
+constant-cost append. A covering-key experiment passed a fresh fixture but
+failed on a grown one, so the speculative index rebuild was removed. Returned
+rows alone cannot measure filtered work, and cloned-table comparisons or a
+passing stale-stat pattern do not disprove the retained counterexamples.
+
+TM-003/TM-011 fenced attempt/session authority and TM-013 credential redaction
+remain in the append path. The accounting table adds forced tenant RLS and an
+explicit runtime grant/preflight entry; trigger functions expose no PUBLIC
+execution. TM-005 durable recovery and TM-017 restore include the new relation
+and build column through PostgreSQL dump/restore. Unexplained missing accounting
+on ledger updates/deletion fails closed. Existing restrictive chunk/attempt
+foreign keys and monotonic published positions remain in force.
+
+Verification targets are the CTRL-005 tests in
+`crates/controller-store/tests/postgres_truth.rs`: a 3,000-chunk production
+append-plan test, exact 64 MiB plus one-byte refusal, idempotent/concurrent
+retries, stale authority, tenant isolation, mixed legacy/current writes,
+legacy quota refusal, and multi-tenant/multi-fence upgrade reentry. Actual
+same-key UPDATE/DELETE overlap must permit the real duplicate query while the
+writer waits on the advisory lock; a FOR UPDATE-only mutant must expose the
+actual deadlock. The isolated stale-stat fixture records physical conflict
+costs and strictly checks nonconflict quota/allocation work. Actual
+nested trigger plans require a disposable administrator-configured
+`auto_explain` fixture; ordinary EXPLAIN output alone cannot prove that triggers
+avoid prior-ledger scans. These are required evidence targets; this candidate
+text does not assert their execution or success.
+
+Authentication, external authorization, secrets, agent execution, compiler,
+connectors, pool enrollment, supply-chain, deployment contracts, migration
+authority, and decommission authority receive no capability or protocol change.
+Independent review must confirm those no-change conclusions before closure.
+Privileged database access can still corrupt counters as it can corrupt the
+ledger; same-account operator compromise, storage loss, and kernel/database
+failures remain existing operational risks. No owner, reviewer, merge, or CI
+receipt is fabricated here.
