@@ -595,6 +595,7 @@ had never claimed one.
 | JCOMP-003 | `docs/evidence/JCOMP-003_SECURITY_REVIEW.md` |
 | AGENT-007 | `docs/evidence/AGENT-007_SECURITY_REVIEW.md` |
 | AGENT-008 | `docs/evidence/AGENT-008_SECURITY_REVIEW.md` |
+| AGENT-009 | `docs/evidence/AGENT-009_SECURITY_REVIEW.md` |
 | JOBSTATE-001 | `docs/evidence/JOBSTATE-001_SECURITY_REVIEW.md` |
 | OBS-001 | `docs/evidence/OBS-001_SECURITY_REVIEW.md` |
 | OUTBOX-001 | `docs/evidence/OUTBOX-001_SECURITY_REVIEW.md` |
@@ -2079,3 +2080,43 @@ nor operational authority; directory checks are local observations rather than
 atomic filesystem custody. Live exact-head queries and explicit written
 conventions remain required. All original archive bytes and historic receipts
 are preserved.
+
+
+## AGENT-009 subsequent full closure review (2026-10-07 UTC)
+
+Reviewed all three original clauses against the complete source and canonical
+security dossier. Effective store pinning and v3 journal identity, the real
+changed-store refusal with matching parked attempt and original container alive,
+restored original-store cleanup before existing attributed operator discharge,
+genuine uncontrolled/controlled implicit mounts with a writable workspace,
+installed private configuration custody, and independent IR/executor leading-#
+refusals retain positive, specific negative and byte-restored evidence. Independent
+PGID uncertainty remains fail-closed. Original local 272-test package and eleven-test remote evidence,
+41 scoped deployment commands (sixteen provenance, twenty-five transitions), six
+private-store cleanup witnesses and the separate PG retirement total of 61
+commands are bound in `docs/evidence/AGENT-009_SECURITY_REVIEW.md`.
+
+The whole-27 implementation review SHA-256 is
+`a8b5948ec091845b17a6e513545e1e44adb41834ee11511fda9592a3ae2fd4dc`.
+PR #181 implementation merge `cb0abf3ec8679797b5f1b8213d10e0e0969cc0d3`
+passed exact Foundation `37571830947` and actual native Windows `37571830986`,
+with all fifteen Foundation jobs and all 23 native Windows steps. Joint receipt
+SHA-256 is `0a91eabfa438014401ae126a8454790de6aac768a2cdf142caa326846835b52b`.
+The later protected-base observation `74182232066eb1639d4c96ab23a544a907f74bc4`
+passed Foundation `37575856382` and native Windows `37575856402`, joint receipt
+SHA-256 `f172d4a7814878dbe9b5b447697c6ea98df9c6614b245d56471aacf4135d795d`.
+These qualify those dated heads, not subsequent metadata. At the f307 authoring
+assignment its resulting Foundation remained pending; this private closure
+candidate's own whole-file review, protected checks, merge and resulting-main
+qualification are unearned. AGENT-012 activation is dispatch, not artifact closure.
+
+TM-003/TM-006/TM-007/TM-023/TM-052 and existing authority judgments are retained.
+Same-UID/root configuration trust, runtime/kernel/storage failure, legacy-v2
+parking, legacy configuration enrollment and SEC-005 host-process limits remain.
+Scoped --no-systemd lifecycle proof is not live service execution, predecessor
+migration or a fabricated full deployment-driver receipt. Historical accidental
+ambient-store qualification and incomplete global inventories remain disclosed;
+no default reset or whole-owner-store invariance is asserted. The changes leave
+protocol, persistence, access to sensitive data, fencing, quotas and authorized
+discharge intact. All historical review/negative bytes remain, and no operational
+authority is granted.
