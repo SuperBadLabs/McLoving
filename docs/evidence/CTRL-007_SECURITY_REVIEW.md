@@ -339,3 +339,75 @@ this continuation's before20 bytes; the board and original complete acceptance
 remain unchanged and ACTIVE. Root owns independent review, CI/publication,
 merge/post-merge checks and closure. The finite-convergence/NAT64/network/tenant
 residuals previously recorded remain.
+
+
+## 2026-10-07 subsequent reviewed closure observation
+
+Observed at 2026-10-07T04:09:24.394197+00:00: the full original CTRL-007 implementation acceptance had
+independently reviewed evidence, a normal protected implementation merge and
+successful exact-implementation-result Foundation and actual native Windows
+verification. The entire earlier receipt remains an exact historical prefix;
+its pending language describes those earlier candidate phases.
+
+The original implementation, complete native/mutation evidence and affected
+boundaries were independently reviewed by `/root/milestone_m2` in
+`/tmp/mcloving-milestones/M2/CTRL-007/independent-review.json`, SHA-256
+`5af32306646981bcd91d494192606e4c4f98335d56761aa02081d86612f55da0`.
+The full twenty-file final composition at
+`13e6b6d8eb14d733dcec5c92e67a7699ceb02a5a` on protected base
+`36221c44d793538dad8565dfb0cabc236c286348` was independently reviewed in
+`agent008-closure-main-rebase-independent-review.json` in that custody directory,
+SHA-256 `76000d51319fcb96520ecb43159e94a02c11359c56214c6eda00ae2205a1fb5e`.
+The reviewed source-coverage and sanitized-interpreter corrections retain their
+separate historical negative controls and boundary determinations.
+
+The full acceptance is retained: mark-before-send, quiet-interval and stale-
+settlement ordering; delivered repository/commit/exact-context observation and
+one corrective post when needed; twelve durably charged observations without
+budget reset; exclusive leased generation/attempt/UUID-fenced claims; the
+target-owned timed-out older write really applied after the newer post and quiet
+interval before reconciliation restored the newer outcome; and configured
+RFC6052 decoding of all six legal prefix widths through the existing IPv4
+private-address policy. Actual startup/deployment guards, bounded JSON/page/
+byte/deadline behavior and six specific semantic mutations remain bound to the
+native phase above. No local test count is relabeled as newly executed here.
+
+PR [#179](https://github.com/SuperBadLabs/McLoving/pull/179) normally protected
+squash-merged as `3fb819f53116f039159e9d0055eadcf539f1243c` at
+2026-10-07T03:09:58Z. The exact reviewed candidate passed all eight required
+GitHub Actions App 15368 contexts, with protected policy and resolved review
+conversations; no administrator override or direct main push was used.
+`protected-implementation-premerge-20261007.json` and
+`protected-implementation-merge-20261007.json` retain that observation.
+
+Exact-merge push Foundation
+[37565473306](https://github.com/SuperBadLabs/McLoving/actions/runs/37565473306)
+and Windows Agent
+[37565473257](https://github.com/SuperBadLabs/McLoving/actions/runs/37565473257)
+completed successfully on attempt 2 after failed-only retries. Foundation's
+fifteen recorded jobs succeeded, including the actual PostgreSQL, deployment,
+architecture and UI browser work. Actual native Windows job
+[112615588859](https://github.com/SuperBadLabs/McLoving/actions/runs/37565473257/job/112615588859)
+executed all 23 steps successfully; raw log SHA-256 is
+`4d92c30d22b5011eba2fe61dfa63f624f9bc2959e4bcbf7efe96d14ff36380aa`.
+`implementation-current-main-joint-gate-success.json`, SHA-256
+`f933d31cf5b7a914c735d5c34e0b5fe4d5ab61ee216f013db46ff12b0dbc15ac`,
+binds this exact 3fb implementation-result observation. The first actual Windows
+failure remains preserved and its cause remains unproven; the successful retry
+does not retroactively assign a cause or turn the failed attempt into a pass.
+No source, test, scanner or protected workflow policy was relaxed for that retry.
+
+The affected TM-039 ordering/reconciliation, TM-054 destination admission,
+TM-013 credential/interpreter custody, TM-018 budgets and TM-005/TM-017/TM-038
+migration determinations above retain their full scope. Finite twelve-attempt
+convergence, arbitrarily late/external writes, unconfigured translators,
+operator routing, system TLS roots and cross-organization same-context races
+remain explicit limitations. This bookkeeping changes no runtime, protocol,
+schema, credential grant, network policy or migration execution authority.
+No production, canary, release or deployment authority is granted.
+
+This private subsequent closure candidate preserves the literal acceptance and
+PAR-004 dependency. Root still owns its independent whole-five-file review,
+validation, composition on the qualified result of the in-flight combined
+implementation, required protected checks and normal closure merge. It does
+not assert a later head's workflow result or an already published closure.

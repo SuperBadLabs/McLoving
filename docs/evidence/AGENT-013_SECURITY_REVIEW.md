@@ -182,3 +182,101 @@ to those prior exact bytes. This later metadata correction still requires root's
 independent whole-candidate/exact committed review and fresh unchanged scanner
 and candidate checks before publication/merge. No future candidate SHA is
 invented or bound circularly inside this receipt. AGENT-013 remains ACTIVE.
+
+
+## 2026-10-07 subsequent reviewed closure observation
+
+Observed at 2026-10-07T04:09:24.394197+00:00: the full original AGENT-013 acceptance had independently
+reviewed proof, normal protected implementation merge and successful exact-
+implementation-result Foundation and actual native Windows verification.
+The entire earlier receipt remains an exact historical prefix, including the
+initial 362 provenance, later 3fb composition and earlier pending-gate language.
+
+All three original behavior obligations and both proof requirements remain
+earned at their recorded scope. Batched blob materialization retains per-blob,
+file/total/path/transport/deadline/secret bounds. The kernel-acknowledged partial-
+materialization SIGSTOP/SIGKILL proof retries the same actual native executable,
+config, private bindings, acquisition identity and byte-identical request,
+without operator cleanup or retained-claim rewriting; the full signed tree
+and owned-state reclamation are checked. Exact older reachable-object acquisition
+after its branch advances passes, while another-ref-only authorization remains
+refused. The native proof's 62 unique source tests and strict Clippy retain their
+qualified cbfb source/binary identities and measured phases.
+
+The actual HeMan dogfood checkout proof is the historical protected
+`dc5c58e85f0835d9761beffa330d46d960139e10` target: a complete successful
+two-step attempt took **9,314 ms** for **2,191 files / 28,074,111 bytes** through
+the shipped authenticated controller, remote mTLS agent and sealed checkout.
+That conservative interval includes ordinary tree verification/publication and
+the harmless readiness process. Acquisition-only 9,112 ms is diagnostic and the
+13.521 s wrapper duration is not checkout timing. No new d7 checkout or native
+benchmark is claimed by this closure.
+
+Original leaf `/root/milestone_m1/agent013` authored/executed the crash proof;
+its actual FINAL was consumed. Independent corrected-source/native review by
+`/root/milestone_m1` is
+`/tmp/mcloving-milestones/M1/AGENT-013/native/independent-native-review.json`,
+SHA-256 `ba2ac1423190b8bcc84969da3fd3e4cd230c4fb4eab85bfc32590ba5909ef34d`.
+Root independently reviewed and executed the benchmark tool; independent full
+result/HMAC/tree/manifest/timing/cleanup review by `/root/milestone_m1` is
+`benchmark/root-owner-benchmark-dc5-retry2-independent-review.json`,
+SHA-256 `a265906ee5797b636168b3eab68142ac83bd709974fd20b0aa53f9b2c19b83db`.
+Root's exact whole-five-file implementation/projection/provenance review in
+`root-final-current-main-projection-review.json` binds
+`c5bf441fa5c9b5ec29ec45949375513f81bbbbbb` on protected 3fb, SHA-256
+`5a8ecd74692d652dbbf89e7ac9ca08b2adc74f90b374813fd552703a6787835a`.
+
+The public receipt is explicitly an **unsigned metadata projection**, omitting
+the original marker commitment and signature while retaining the original raw
+receipt SHA-256. It does not authenticate the reduced projection. The complete
+original signed receipt, exact manifest/tree and config/request/execution
+bindings were privately HMAC-reviewed before root retired the exact fixture
+verification key and private journals. The retirement record
+`benchmark/root-benchmark-post-review-private-custody-retirement.json`,
+SHA-256 `572c7474d867102c3fd0bcb75187c9f4740c8ee6d2996b7b205479e36073a810`,
+retains that sequence. No key recovery/regeneration or provider-token revocation
+is claimed. The original entropy-scan negative and unchanged-scanner correction
+remain historical evidence without a rule exemption.
+
+PR [#182](https://github.com/SuperBadLabs/McLoving/pull/182) normally protected
+squash-merged as `d7bba542dfa67306a3128908c3ccd37e84fbb8d5` at
+2026-10-07T03:42:05Z, after the exact reviewed candidate's eight required
+GitHub Actions App 15368 contexts and protected review policy; no administrator
+override or direct main push was used. The protected premerge/merge records
+remain under `/tmp/mcloving-milestones/M1/AGENT-013/`.
+
+Exact-merge push Foundation
+[37567968905](https://github.com/SuperBadLabs/McLoving/actions/runs/37567968905)
+and Windows Agent
+[37567968977](https://github.com/SuperBadLabs/McLoving/actions/runs/37567968977)
+completed successfully on attempt 1. Foundation's fifteen recorded jobs were
+terminal: fourteen succeeded and the UI browser job was legitimately skipped
+under the successful impact classifier. No skipped browser execution is credited.
+Actual native Windows job
+[112619980593](https://github.com/SuperBadLabs/McLoving/actions/runs/37567968977/job/112619980593)
+executed all 23 steps successfully; raw log SHA-256 is
+`8067e5b437948b2059b8eb35bd6fd7fe824d893b9947e5561cb5f7be4004caed`.
+`implementation-current-main-joint-gate-success.json`, SHA-256
+`cfef9319a7d4bb581f31a083d4ee3306a245a7d0c038ddf56f89adf957da33f5`,
+records the exact d7 implementation-result gate. The Linux kill/retry and dc5
+owner checkout are distinct proofs, not claims those scenarios ran on Windows.
+
+All affected source/provenance, retained-state, cancellation, secret and
+admission boundary determinations above remain. The named source profile is
+explicitly unconfined and grants user-namespace permission, not MAC containment.
+A real credential binding for a public GitHub origin does not prove the provider
+challenged/used that credential; raw live NDJSON was not retained. Same-UID owner
+inspection/transformed secrets, SIGKILL/power-loss cleanup, bounded process
+visibility and host/disk corruption remain residuals. The first 121.677 s
+PostgreSQL setup failure and subsequent bootstrap/readiness negatives remain
+historical failures, not checkout metrics. Older HeMan 13.0 s and Luigi 64.6 s
+are not relabeled. DOGFOOD-001 ingress and SEC-005 hostile same-UID isolation
+remain separate full-scope tickets.
+
+This private closure bookkeeping preserves the literal acceptance and PAR-005
+dependency. It changes no product source, protocol, schema, checkout policy,
+credential grant or operational authority. Root owns independent whole-five-file
+review, validation, composition on the qualified result of the in-flight combined
+implementation, protected checks and normal closure merge. No production,
+canary, migration, deployment or release authority is granted, and no later
+head's gates or already published closure are asserted.
