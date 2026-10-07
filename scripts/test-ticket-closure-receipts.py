@@ -896,6 +896,66 @@ class CitedEvidence(unittest.TestCase):
             errors, _, _ = check(Path(name))
         self.assertEqual(errors, [])
 
+    def _scope_cite(self, spelling, prepare=None):
+        with build(board=BOARD.replace(
+            "Closed with a receipt and an attributed review",
+            f"Scope: {spelling}; receipt: `docs/evidence/AAA-001_SECURITY_REVIEW.md`",
+        )) as name, synthetic():
+            root = Path(name)
+            (root / "docs/handoffs").mkdir()
+            if prepare is not None:
+                prepare(root)
+            errors, _, _ = check(root)
+        return errors
+
+    def test_explicit_real_directory_scope_passes(self):
+        self.assertEqual(self._scope_cite("`docs/handoffs/`"), [])
+
+    def test_missing_directory_scope_is_refused(self):
+        self.assertTrue(self._scope_cite("`docs/missing/`"))
+
+    def test_bare_directory_is_not_an_evidence_document(self):
+        self.assertTrue(self._scope_cite("docs/handoffs"))
+
+    def test_valid_scope_does_not_hide_same_path_invalid_citation(self):
+        self.assertTrue(self._scope_cite("`docs/handoffs/` and docs/handoffs"))
+
+    def test_template_prefix_is_not_a_complete_directory_scope(self):
+        self.assertTrue(self._scope_cite("`docs/handoffs/<TICKET>.md`"))
+
+    def test_filename_directory_cannot_masquerade_as_scope(self):
+        self.assertTrue(self._scope_cite(
+            "`docs/receipt.md/`", lambda root: (root / "docs/receipt.md").mkdir(),
+        ))
+
+    def test_file_with_trailing_slash_is_not_directory_scope(self):
+        self.assertTrue(self._scope_cite("`docs/evidence/AAA-001_SECURITY_REVIEW.md/`"))
+
+    def test_directory_scope_cannot_escape_docs(self):
+        self.assertTrue(self._scope_cite(
+            "`docs/../outside/`", lambda root: (root / "outside").mkdir(),
+        ))
+
+    def test_directory_scope_leaf_symlink_is_refused(self):
+        def prepare(root):
+            (root / "docs/link").symlink_to("handoffs", target_is_directory=True)
+        self.assertTrue(self._scope_cite("`docs/link/`", prepare))
+
+    def test_directory_scope_ancestor_symlink_is_refused(self):
+        def prepare(root):
+            (root / "docs/handoffs/child").mkdir()
+            (root / "docs/link").symlink_to("handoffs", target_is_directory=True)
+        self.assertTrue(self._scope_cite("`docs/link/child/`", prepare))
+
+    def test_directory_scope_alias_is_refused(self):
+        self.assertTrue(self._scope_cite("`docs/handoffs/../handoffs/`"))
+
+    def test_directory_scope_dot_prefix_is_refused(self):
+        self.assertTrue(self._scope_cite("`./docs/handoffs/`"))
+
+    def test_directory_scope_parent_prefix_is_refused(self):
+        self.assertTrue(self._scope_cite("`../docs/handoffs/`"))
+
 
 class LedgerDiscipline(unittest.TestCase):
     def test_a_ticket_outside_the_baseline_fails(self):

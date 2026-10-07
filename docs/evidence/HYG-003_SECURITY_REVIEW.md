@@ -258,3 +258,101 @@ with its [raw log](hyg-003/archive-scope-root-owner-tree.log), SHA-256
 This is a dated candidate-source readback against that owner-tree snapshot;
 it establishes no future head's result, hosted workflow success, publication,
 merge, authorship, operational authority or ticket closure. HYG-003 remains ACTIVE.
+
+
+## 2026-10-07 implementation-result verification and directory-scope continuation
+
+PR [#177](https://github.com/SuperBadLabs/McLoving/pull/177) normally protected
+squash-merged as `dc5c58e85f0835d9761beffa330d46d960139e10` at
+2026-10-07T01:45:44Z. The independent full 27-file current-base composition review
+is retained at `/tmp/mcloving-milestones/M2/HYG-003/archive-scope-planning-merge-rebase-independent-review.json`,
+SHA-256 `f7dcd154cd26444f3585a9e75948a522c0a8d54b1f2b2f8e488c7c92fa82b476`.
+Root verified committed source hashes, all eight required App 15368 contexts,
+strict protected-main policy and zero unresolved conversations; no administrator
+override or direct main push was used.
+
+Exact dc5 implementation-result push Foundation
+[37558694848](https://github.com/SuperBadLabs/McLoving/actions/runs/37558694848)
+and Windows Agent
+[37558694803](https://github.com/SuperBadLabs/McLoving/actions/runs/37558694803)
+completed successfully on attempt 1. All recorded Foundation jobs succeeded,
+including actual PostgreSQL, architecture, deployment and UI browser/mutation
+work. Actual native Windows job
+[112590823869](https://github.com/SuperBadLabs/McLoving/actions/runs/37558694803/job/112590823869)
+executed all 23 steps successfully; raw log SHA-256 is
+`eeadce53c287fd2ed612946e24af9ab8b633a2eb5748dd97d8876368a93426a2`.
+The joint record `/tmp/mcloving-milestones/hyg-archive-current-main-joint-gate-success.json`,
+SHA-256 `d102e970e88fc884ee986bdf567f78f4c0f414faa3b738e95186adefd40fd85e`,
+qualifies that result, rather than later main advancements. The docs-PR skipped
+native job is not credited as this actual native observation.
+
+Preparing closure then exposed one further clause-seven false alarm. The
+original, unchanged seven-clause acceptance names the real `docs/handoffs/`
+directory as check scope. When its status became DONE in the isolated closure
+candidate, `cited_documents` stripped the trailing slash and required that
+scope directory to be an evidence file. The board suite passed all 83 tests;
+the closure suite failed two repository assertions with this exact directory
+refusal. No closure was published or earned. The complete initial four-file
+closure candidate and its freeze remain archived under
+`/tmp/mcloving-milestones/M2/HYG-003/closure-initial-candidate-source/`.
+The original acceptance was not deleted or reworded to evade the checker.
+
+This separate implementation continuation recognizes only an exact backticked,
+slash-terminated directory token with an extensionless leaf. Each occurrence is
+checked individually against an actual docs-contained directory whose inspected
+components are directories, including no symlink ancestor or leaf and no dot/
+parent/empty component alias. A real scope occurrence cannot launder a distinct
+invalid citation of the same path. Truncated templates, filename-shaped
+directories, missing directories and escaping paths remain refusals. Ordinary
+evidence citations, canonical receipts and closure-attribution fields continue
+to require actual files under their existing containment/substance rules. The
+old broad `exists` relaxation is not restored. These are local repository
+path observations, not a claim of an atomic snapshot against concurrent owner
+filesystem mutation or of operational evidence/authority in a directory.
+
+The corrected closure suite passed all 96 tests, including the original 85
+and eleven new scope/refusal cases. The actual protected production guard
+fails the genuine real-directory control with one assertion failure; the
+corrected guard passes. Nine semantic controls separately earn baseline GREEN,
+a specific one-assertion/no-test-error RED after removing or weakening the
+relevant guard, then restored GREEN: scope rejection, template truncation,
+filename-directory admission, linked leaf, linked ancestor, first-occurrence
+laundering, aliases, missing-directory admission and the original evidence-
+template file predicate. Mutation occurs only in disposable source copies;
+authoritative candidate source remains byte-identical. Validation is bound by
+`/tmp/mcloving-milestones/M2/HYG-003/citation-scope/corrected-full-closure-tests.json`
+and `citation-scope/named-controls.json` in the same custody directory. Their
+raw logs and source/test hashes distinguish this new proof from the original
+43 stale-claim/archive mutations, which remain unchanged historical evidence.
+
+The full seven original clauses, historical population, 107-Markdown/three-seal
+boundary and actual dated owner-tree preservation observation remain intact.
+No sealed archive, owner file, debt ledger, count floor, workflow or required
+command is changed. HYG-003 stays ACTIVE, with no DONE ratchet or closure
+attribution addition. This new guard/test/evidence candidate requires independent
+whole-diff review, exact protected checks, normal merge and exact resulting-main
+Foundation/actual native Windows before a separate closure update is earned.
+
+
+### Subsequent exact-token review correction
+
+Independent review found that the ordinary file-citation grammar intentionally
+captures leading `./` or `../` outside its normalized docs path. The first
+scope candidate reused that capture and could accept a prefixed directory token
+as plain docs-contained scope. The correction additionally requires the whole
+matched token to equal the captured docs path, while retaining the existing
+ordinary file-citation grammar. Real `./docs/handoffs/` and
+`../docs/handoffs/` controls each fail on the pre-correction source with one
+assertion failure, then pass as refusals with the exact-token guard present.
+The outside-scope control also uses an actual existing outside directory.
+
+Current verification passed all 98 closure tests. All eleven current named
+baseline-GREEN/specific-one-assertion-RED/byte-restored-GREEN controls were
+executed against the corrected production source, including both prefix guard
+removals and all prior nine controls. The fresh report and raw hashes are in
+`/tmp/mcloving-milestones/M2/HYG-003/citation-scope/prefix-alias-final/named-controls.json`;
+`citation-scope/full98-prefix-alias.log` records the full suite. Earlier 96-test
+and nine-mutation records remain dated historical phases with their original
+source/test hashes, not relabeled current. The full protected historical receipt
+prefix and all seven original board acceptance clauses are unchanged. HYG-003
+remains ACTIVE pending this complete correction's own review and protected gates.

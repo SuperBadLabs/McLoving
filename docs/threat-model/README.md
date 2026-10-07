@@ -1771,3 +1771,42 @@ prior native/CI receipts explicitly historical. No full deployment/native/servic
 campaign or current-head CI success is asserted; independent review, protected
 merge/post-merge and full original ACTIVE acceptance remain root obligations.
 Finite reconciliation and network/tenant residuals are unchanged.
+
+
+## HYG-003 directory-scope false-alarm continuation (2026-10-07)
+
+The earlier HYG-003 candidate and archive assessments remain historical.
+PR #177's exact dc5 implementation-result Foundation37558694848 and actual
+native Windows37558694803 succeeded. Attempting separate closure exposed a
+further original clause-seven false alarm: the unchanged acceptance names the
+real handoff directory as scope, while the DONE citation checker required a
+file. No closure was published. The canonical HYG-003 review records the
+specific failure, preserved initial closure candidate and corrected scope proof.
+
+TM-052's documentation boundary admits only exact backticked extensionless
+slash-terminated real directory scope under docs, with no linked inspected
+components or path aliases; each occurrence is checked independently. Missing
+files, truncated evidence templates, filename-directory masquerades, escaping
+paths and scope/citation laundering remain refused. Canonical receipt and
+closure-attribution evidence still requires files. All seven original acceptance
+clauses and sealed historical owner bytes remain unchanged. The new 96-test
+suite and nine specific baseline/RED/restored controls supplement the prior
+43 historical stale-claim/archive controls; no broad exists exemption is added.
+
+This is bounded repository text/path checking without atomic filesystem or
+external-observation authority. Arbitrary prose, unrecorded owner decisions,
+future file changes and reviewed registry commitment trust remain residuals.
+HYG-003 remains ACTIVE; independent review and this correction's own protected
+merge/post-merge gates precede separate formal closure. No runtime, credential,
+fencing, release, production, migration or canary authority changes.
+
+
+The HYG-003 scope continuation's subsequent independent review found and corrected
+normalization of leading dot/parent prefixes outside the capture. Scope now
+requires the entire matched token to equal the captured docs path; ordinary file
+citation grammar is unchanged. Both actual prefix controls reproduce pre-fix
+assertion failures, and all 98 closure tests plus eleven fresh specific mutation
+controls pass. Earlier 96/nine records remain historical. The outside-scope test
+uses a real existing target; no accepted scope spelling can replace missing
+receipt/attribution files. Original acceptance, ACTIVE state, protected historic
+prefixes and all runtime/authority limits remain unchanged.
