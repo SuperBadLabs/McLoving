@@ -1771,3 +1771,69 @@ prior native/CI receipts explicitly historical. No full deployment/native/servic
 campaign or current-head CI success is asserted; independent review, protected
 merge/post-merge and full original ACTIVE acceptance remain root obligations.
 Finite reconciliation and network/tenant residuals are unchanged.
+
+## AGENT-013 candidate proof continuation (2026-10-07 UTC)
+
+The earlier AGENT-013 assessment is retained. This candidate strengthens only
+the existing native mid-materialization kill/retry oracle and adds canonical
+evidence. TM-016/TM-023 supply-chain/source bindings, PAR-012 exact checkout,
+TM-005/TM-006 retained-state durability/recovery, TM-007 process lifetime and
+TM-013/TM-014 secret/receipt provenance are assessed in
+`docs/evidence/AGENT-013_SECURITY_REVIEW.md`; TM-009/TM-011/TM-038 admission,
+tenant/pool/fence contracts and TM-052 protected merge authority are unchanged.
+There is no production source, protocol, schema, workflow, profile, credential
+grant or controller/agent runtime change.
+
+Actual native proof interrupted2/256 distinct blobs after exact content existed,
+acknowledged SIGSTOP in the kernel and asserted SIGKILL plus bounded 5s reap.
+The same native binary/config/private bindings/acquisition and byte-identical
+request retry succeeded with no claim rewrite or operator cleanup; only the
+fixture readiness indicator changes path. It authenticated all 257 retained files
+and reclaimed owned leftovers. The full 62-test source suite preserves batched
+bounds, exact reachable older commit after branch advance, other-ref refusal,
+secret controls, named ambiguity and unrelated live-helper preservation.
+
+A separately root-reviewed fresh isolated shipped-product runtime on HeMan
+checked out protected dc5's complete 2,191-file tree in 9.314s, conservatively
+measured from the exact successful attempt start through completion of checkout
+and harmless readiness process. Its original signed receipt HMAC and complete
+manifest/tree/content were independently verified before exact fixture key and
+journal retirement. The target-specific dc5 measurement is historical after
+base 362 advances; signed acquisition-only 9.112s and wrapper 13.521s are distinct
+intervals. First PG setup/preflight failures remain unearned historical evidence.
+
+The source profile is explicitly `mcloving-source-acquirer (unconfined)`, a
+userns permission profile and not MAC-confinement proof. Cleanup covers fresh
+owned container/mount/private credential/runtime paths and bounded same-real-UID
+exe/cwd identities, not universal host/other-UID or anonymous-image quiescence.
+Accepted owner-user environment/debug and SIGKILL cleanup residuals remain;
+SEC-005 and DOGFOOD-001 retain their independent full scope. Public GitHub may
+serve without authentication, so real credential binding does not attest
+provider-side use. Live NDJSON was not persisted; signed request identity is
+retained without inventing a transcript. Fixture keys confer no production
+broker, canary, migration or release authority.
+
+AGENT-013 remains ACTIVE. Independent complete exact committed candidate review,
+actionable finding resolution, required app-bound checks/live protection, normal
+protected merge, exact resulting-main Foundation/actual native Windows and later
+reviewed closure bookkeeping remain. This continuation adds no earned closure
+attribution and changes neither the execution board nor DONE ratchet.
+
+### AGENT-013 candidate public metadata and entropy finding
+
+Observed 2026-10-07 UTC: the published candidate's Secret scan found
+`secret_marker_set_sha256` in its full public receipt. Exact private readback
+against the original authenticated receipt/config and the shipped length-framed
+SHA256 marker digest identifies a nonsecret commitment, not credential/key
+bytes. The public proof is now explicitly an unsigned metadata projection,
+omitting that commitment and the original signature. The unchanged complete
+original signed receipt hash and independently observed HMAC/tree/timing proof
+remain bound; the reduced projection itself is not falsely authenticated. No
+value renaming/reencoding, scanner exemption or rule weakening is introduced.
+
+TM-013/TM-014 evidence publication is narrowed; source/runtime/credential/
+protocol boundaries and all earlier protected historical bytes stay intact.
+The actual failed candidate Secret scan remains a dated negative, and the
+unchanged scan plus independent full exact committed candidate review and
+remaining protected/post-merge gates are still required. No production leak,
+provider credential-use, broker authority or ticket closure is inferred.

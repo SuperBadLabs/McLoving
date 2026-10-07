@@ -857,17 +857,26 @@ async fn reclaim_preserves_live_waiting_helper_runtime_dirs() {
 
 #[tokio::test]
 async fn sealed_helper_killed_mid_materialization_is_reclaimed() {
-    use tokio::io::AsyncWriteExt as _;
+    use std::os::unix::process::ExitStatusExt as _;
+
+    use nix::sys::signal::{Signal, kill};
+    use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
+    use nix::unistd::Pid;
 
     let temporary = tempfile::tempdir().expect("kill reclaim tempdir");
     let repository = RepositoryFixture::new(temporary.path(), "kill-root");
     repository.write("README.md", b"kill reclaim\n");
-    for index in 0..48 {
-        repository.write(
-            &format!("bulk/file-{index}.txt"),
-            format!("payload-{index}\n").repeat(32).as_bytes(),
-        );
-    }
+    // Enough bounded, distinct blobs to observe partial materialization even
+    // on a fast host. Completion before the kill is a failed crash oracle.
+    const FILE_COUNT: usize = 256;
+    let expected_blobs = (0..FILE_COUNT)
+        .map(|index| {
+            let path = format!("bulk/file-{index:03}.txt");
+            let bytes = format!("payload-{index}\n").repeat(512).into_bytes();
+            repository.write(&path, &bytes);
+            (path, bytes)
+        })
+        .collect::<Vec<_>>();
     let commit = repository.commit("kill reclaim");
     let binary = PathBuf::from(env!("CARGO_BIN_EXE_mcloving-source-acquirer"));
     let git = git_executable();
@@ -969,8 +978,12 @@ async fn sealed_helper_killed_mid_materialization_is_reclaimed() {
         expires_at_unix_ms: now_ms() + FIXTURE_AUTHORITY_WINDOW_MS,
         audit_lineage: "audit/source/kill-reclaim".to_owned(),
     };
-    std::fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
-    let mut child = tokio::process::Command::new(&binary)
+    let config_bytes = serde_json::to_vec(&config).unwrap();
+    std::fs::write(&config_path, &config_bytes).unwrap();
+    let mut request_bytes = serde_json::to_vec(&request).unwrap();
+    request_bytes.push(b'\n');
+    let mut command = tokio::process::Command::new(&binary);
+    command
         .env_clear()
         .env("MCLOVING_SOURCE_ACQUIRER_CONFIG", &config_path)
         .env("MCLOVING_SOURCE_ACQUIRER_CREDENTIAL_FILE", &credential_path)
@@ -984,9 +997,8 @@ async fn sealed_helper_killed_mid_materialization_is_reclaimed() {
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .expect("kill-reclaim helper");
+        .kill_on_drop(true);
+    let mut child = command.spawn().expect("kill-reclaim helper");
     let ready_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
     loop {
         if ready_path.exists() {
@@ -1013,94 +1025,200 @@ async fn sealed_helper_killed_mid_materialization_is_reclaimed() {
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
     let mut stdin = child.stdin.take().unwrap();
-    stdin
-        .write_all(&serde_json::to_vec(&request).unwrap())
-        .await
-        .unwrap();
+    stdin.write_all(&request_bytes).await.unwrap();
     drop(stdin);
-    // Wait for the stage directory specifically. A claim without a stage is the
-    // controlled-failure shape that must stay ambiguous; reclaim only drops the
-    // claim when a matching stage shows the attempt was killed mid-flight.
-    tokio::time::timeout(std::time::Duration::from_secs(120), async {
+    let stage_prefix = format!(".stage-{acquisition_id}-");
+    let partial_stage = tokio::time::timeout(Duration::from_secs(120), async {
         loop {
-            let staging = output_root.exists()
-                && std::fs::read_dir(&output_root)
-                    .unwrap()
-                    .filter_map(Result::ok)
-                    .any(|entry| {
-                        entry
-                            .file_name()
-                            .to_string_lossy()
-                            .starts_with(&format!(".stage-{acquisition_id}-"))
-                    });
-            if staging {
-                break;
+            if let Some(status) = child.try_wait().expect("observe materializing helper") {
+                panic!("helper exited before a partial checkout: status={status:?}");
             }
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            for entry in std::fs::read_dir(&output_root).unwrap().flatten() {
+                if !entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(&stage_prefix)
+                {
+                    continue;
+                }
+                if let Ok(blobs) = std::fs::read_dir(entry.path().join("tree/bulk")) {
+                    let blobs = blobs.flatten().collect::<Vec<_>>();
+                    if !blobs.is_empty()
+                        && blobs.len() < FILE_COUNT
+                        && expected_blobs.iter().any(|(path, expected)| {
+                            std::fs::read(entry.path().join("tree").join(path))
+                                .is_ok_and(|bytes| bytes == *expected)
+                        })
+                    {
+                        return entry.path();
+                    }
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
         }
     })
     .await
-    .expect("helper reached stage");
-    child.start_kill().expect("SIGKILL helper");
-    let _ = child.wait_with_output().await;
+    .expect("helper actually materialized a partial checkout");
 
-    // Reclaim with an in-process acquirer bound to the same roots. Its runtime
-    // closure must come from this test executable (as Context::new does), not
-    // from the helper binary we just killed.
-    let test_exe = std::env::current_exe().expect("test executable");
-    let reclaim_runtime =
-        inspect_runtime_closure(&[git.clone(), git_remote_https.clone(), test_exe.clone()])
-            .await
-            .unwrap();
-    let mut reclaim_config = config;
-    reclaim_config.runtime_closure = reclaim_runtime.clone();
-    reclaim_config.runtime_closure_sha256 = runtime_closure_digest(&reclaim_runtime).unwrap();
-    let reclaim_implementation = sha256_file(&test_exe).await.unwrap();
-    let acquirer = SourceAcquirer::new(
-        reclaim_config.clone(),
-        reclaim_implementation.clone(),
-        credential_path,
-        CREDENTIAL,
-        SIGNING_KEY.to_vec(),
-        vec![CREDENTIAL.to_vec()],
+    // Freeze the helper before inspecting the crash boundary. A stage created
+    // before fetch, or an already completed tree, cannot stand in for a kill
+    // during materialization. Observe the kernel's stop acknowledgement.
+    let helper_pid = Pid::from_raw(i32::try_from(child.id().unwrap()).unwrap());
+    kill(helper_pid, Signal::SIGSTOP).expect("stop partially materialized helper");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match waitpid(
+                helper_pid,
+                Some(WaitPidFlag::WUNTRACED | WaitPidFlag::WNOHANG),
+            ) {
+                Ok(WaitStatus::Stopped(_, Signal::SIGSTOP)) => break,
+                Ok(WaitStatus::StillAlive) | Err(nix::errno::Errno::EINTR) => {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+                status => panic!("helper did not stop at the crash boundary: {status:?}"),
+            }
+        }
+    })
+    .await
+    .expect("bounded helper stop acknowledgement");
+    let partial_blobs = std::fs::read_dir(partial_stage.join("tree/bulk"))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert!(
+        !partial_blobs.is_empty() && partial_blobs.len() < FILE_COUNT,
+        "kill must interrupt a partial blob tree, not a completed checkout"
+    );
+    assert!(!output_root.join(acquisition_id.to_string()).exists());
+    assert!(
+        expected_blobs.iter().any(|(path, expected)| {
+            std::fs::read(partial_stage.join("tree").join(path))
+                .is_ok_and(|bytes| bytes == *expected)
+        }),
+        "at least one complete expected blob must precede the kill"
+    );
+    child.start_kill().expect("SIGKILL stopped helper");
+    let killed_output = tokio::time::timeout(Duration::from_secs(5), child.wait_with_output())
+        .await
+        .expect("bounded killed-helper reap and output completion")
+        .expect("killed helper output");
+    assert_eq!(killed_output.status.signal(), Some(Signal::SIGKILL as i32));
+
+    // Record retained state without modifying it. The retry uses the same
+    // binary, sealed config/private files and exact serialized request: no
+    // in-process rebound acquirer, claim rewrite or operator cleanup.
+    let claim_path = output_root.join(format!("{acquisition_id}.claim.json"));
+    let claim_bytes = std::fs::read(&claim_path).expect("killed helper retained its claim");
+    let claim: serde_json::Value = serde_json::from_slice(&claim_bytes).unwrap();
+    let request_sha256 = SourceAcquirer::request_sha256(&request).unwrap();
+    assert_eq!(claim["request_sha256"], request_sha256);
+    let retained_output = std::fs::read_dir(&output_root)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            let name = path.file_name().unwrap().to_string_lossy();
+            name.starts_with(&stage_prefix)
+                || name.starts_with(".runtime-")
+                || name.starts_with(".git-exec-")
+        })
+        .collect::<Vec<_>>();
+    let transport_prefix = format!(".transport-{acquisition_id}-");
+    let retained_transport = std::fs::read_dir(&transport_root)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            path.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with(&transport_prefix)
+        })
+        .collect::<Vec<_>>();
+    assert!(retained_output.contains(&partial_stage));
+    assert!(
+        !retained_transport.is_empty(),
+        "kill must retain its active transport tree"
+    );
+    assert_eq!(std::fs::read(&config_path).unwrap(), config_bytes);
+    assert_eq!(sha256_file(&binary).await.unwrap(), implementation_sha256);
+    assert_eq!(std::fs::read(&claim_path).unwrap(), claim_bytes);
+    eprintln!(
+        "AGENT-013 crash boundary: helper_pid={} acquisition_id={acquisition_id} \
+         partial_blobs={} claim_sha256={} retained_output={retained_output:?} \
+         retained_transport={retained_transport:?}",
+        helper_pid.as_raw(),
+        partial_blobs.len(),
+        content_sha256(&claim_bytes),
+    );
+
+    // Only the test readiness indicator gets a fresh path (create_new). All
+    // acquisition bindings and request bytes are unchanged between helpers.
+    let mut retry_child = command
+        .env(
+            "MCLOVING_SOURCE_ACQUIRER_TEST_READY_FILE",
+            temporary.path().join("retry-helper-ready"),
+        )
+        .spawn()
+        .expect("ordinary identical native retry");
+    let mut retry_stdin = retry_child.stdin.take().unwrap();
+    retry_stdin.write_all(&request_bytes).await.unwrap();
+    drop(retry_stdin);
+    let output = tokio::time::timeout(Duration::from_secs(120), retry_child.wait_with_output())
+        .await
+        .expect("bounded ordinary native retry")
+        .expect("retry helper output");
+    assert!(output.status.success(), "retry helper status: {output:?}");
+    assert!(!contains(&output.stdout, CREDENTIAL));
+    assert!(!contains(&output.stderr, CREDENTIAL));
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        response["ok"],
+        true,
+        "untouched retained-state retry failed: {response}; stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let receipt: mcloving_source_acquirer::AcquisitionReceipt =
+        serde_json::from_value(response["receipt"].clone()).unwrap();
+    assert_eq!(receipt.acquisition_id, acquisition_id);
+    assert_eq!(receipt.request_sha256, request_sha256);
+    assert_eq!(receipt.repository_trees[0].resolved_commit, commit);
+    assert_eq!(receipt.materialized_files, FILE_COUNT + 1);
+    SourceAcquirer::verify_retained_acquisition(
+        &config,
+        &request.expected_config_sha256,
+        &implementation_sha256,
+        SIGNING_KEY,
+        &receipt,
+        &|| false,
     )
     .await
-    .expect("reclaiming acquirer");
-    let mut retry = request.clone();
-    retry.acquisition_id = acquisition_id;
-    retry.expected_implementation_sha256 = reclaim_implementation;
-    retry.expected_config_sha256 = acquirer.config_sha256().to_owned();
-    retry.expected_git_sha256 = reclaim_config.git_executable_sha256.clone();
-    retry.expected_git_remote_https_sha256 =
-        reclaim_config.git_remote_https_executable_sha256.clone();
-    // The killed helper sealed a claim under its own implementation digest.
-    // Rebind the incomplete claim to this recovery request so reclaim can drop
-    // it without allowing a different-content id reuse.
-    let claim_path = output_root.join(format!("{acquisition_id}.claim.json"));
-    if claim_path.exists() {
-        let retry_digest = SourceAcquirer::request_sha256(&retry).expect("recovery request digest");
-        std::fs::write(
-            &claim_path,
-            serde_json::to_vec(&serde_json::json!({
-                "protocol_version": PROTOCOL_VERSION,
-                "request_sha256": retry_digest,
-                "publication_deadline_unix_ms": now_ms() + 60_000,
-            }))
-            .unwrap(),
-        )
-        .unwrap();
+    .expect("original signing binding authenticates retry receipt and exact retained inventory");
+    let published_tree = output_root.join(&receipt.output_relative_path);
+    assert_eq!(
+        std::fs::read(published_tree.join("README.md")).unwrap(),
+        b"kill reclaim\n"
+    );
+    for (path, expected) in &expected_blobs {
+        assert_eq!(std::fs::read(published_tree.join(path)).unwrap(), *expected);
     }
-    let receipt = acquirer
-        .acquire(&retry)
-        .await
-        .expect("acquire after mid-materialization kill");
-    assert_eq!(receipt.repository_trees[0].resolved_commit, commit);
     assert!(
-        !output_root
-            .join(format!("{acquisition_id}.claim.json"))
-            .exists()
-            || output_root.join(acquisition_id.to_string()).exists(),
-        "killed attempt must not leave an unreclaimed incomplete claim without a published tree"
+        !claim_path.exists(),
+        "ordinary retry must clear its incomplete claim"
+    );
+    for path in retained_output.iter().chain(&retained_transport) {
+        assert!(!path.exists(), "ordinary retry did not reclaim {path:?}");
+    }
+    assert!(transport_root_is_clean(&transport_root));
+    eprintln!(
+        "AGENT-013 identical native recovery: acquisition_id={acquisition_id} \
+         request_sha256={} implementation_sha256={} config_sha256={} \
+         manifest_sha256={} materialized_files={} materialized_bytes={} \
+         original signing/retained verification passed; owned leftovers reclaimed",
+        receipt.request_sha256,
+        implementation_sha256,
+        request.expected_config_sha256,
+        receipt.manifest_sha256,
+        receipt.materialized_files,
+        receipt.materialized_bytes,
     );
 }
 
