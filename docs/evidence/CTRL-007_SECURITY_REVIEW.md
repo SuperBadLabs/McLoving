@@ -219,3 +219,61 @@ mapping the same repository/commit/context to race at GitHub; use separate
 contexts or one organization mapping. Existing arbitrary-commit-within-mapped-
 repository authority and bounded retry of permanent 4xx answers remain. No remote
 service calls or production migration/deployment were performed by this agent.
+
+
+## 2026-10-07 continuation: deployment source coverage
+
+Actual PR #179 deployment job `112579053746` failed before PostgreSQL fixture
+creation: the scoped NAT64 guard passed immediately before the existing Rust
+source environment-name coverage gate refused `MCLOVING_NOTIFICATION_NAT64_PREFIXES`
+as neither a classified path nor a named reviewed value exclusion. Actual log:
+`/tmp/mcloving-milestones/M2/CTRL-007/candidate-deployment-failure.log`, SHA-256
+`934350cfeee0c939785ee2361e42598fd53e499914ea3fe8ed9cc2067a2c0805`.
+The coordinator provided clean current candidate
+`59781a6a66fe887de09eb57b8dc61f1ab84cf0bc` (base abbreviation `fbad`);
+this agent performed no Git operation to establish or modify that identity.
+
+The correction adds only one `excluded_literals` entry and two explanatory
+comments in `deploy/test-deployment.sh`: the setting is a startup-frozen,
+validated, contract-pinned RFC6052 policy scalar, not a filesystem path. This
+reviewed coverage exclusion does not exempt configuration/contract validation.
+The source sweep, path authority, existing exclusion patterns, coverage refusal,
+guards and floors remain unchanged.
+
+Source-only execution used the exact embedded `CLASSCOVER` Python payload,
+including its real Rust-source sweep and shell path-classification enumeration.
+Baseline exit 1 reproduced the named NAT64 refusal before editing. The corrected
+payload passed on actual repository sources. An unknown name added to a private
+copy of the swept Rust sources still failed, naming
+`MCLOVING_UNREVIEWED_NOTIFICATION_POLICY`. Removing only the named reviewed-reason
+entry in an in-memory payload copy failed naming NAT64. This negative removes
+the entire entry; it does not claim the existing gate validates reason prose.
+The copied-source fixture was cleaned on context exit; negatives did not alter
+the owned worktree. Actual outcomes and raw log SHA-256:
+
+| Case | Payload exit | Log SHA-256 |
+| --- | --- | --- |
+| baseline-red | 1 | `ebefc4c2b08d27f34ed981df3539661eb168406938cb837c5ed4e022f9e1e82e` |
+| valid-positive | 0 | `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855` |
+| unknown-name-negative | 1 | `5a8567af0bea18d28e8d6a501bea3f281318156d99d00d6835d3c5a123b14526` |
+| removed-reviewed-entry-negative | 1 | `ebefc4c2b08d27f34ed981df3539661eb168406938cb837c5ed4e022f9e1e82e` |
+
+`/tmp/mcloving-milestones/M2/CTRL-007/source-coverage-continuation/` retains the
+runner, baseline source/payload, logs and JSON receipts with actual argv and
+executed/deployed payload hashes. Current corrected deployment test SHA-256 is
+`8eb8b5476127fe04d0065d721ad59781a5e52047491bdc4d17db3e685b1eb827`.
+The coordinator's current candidate already differs from the historical native
+freeze in `.github/workflows/foundation.yml`
+(`2c560eb4c8009dc9360cdfc910dc4ff8b9f6fe3111903abe26f9051cb5238605`) and
+`scripts/test-controller-postgres.sh`
+(`bbdb61669b28909a0077d283d259b4d37da14f88bf10ca130341e0351b21ba39`);
+this continuation did not edit either. Fourteen other original source/config/test
+files remain byte-identical to that native freeze. The final continuation
+inventory distinguishes current source custody from historical native evidence.
+The 17-file native hash table above is the historical allocated-4fa measured
+phase, not the current 597 composition or this source-only delta.
+Earlier ten-test/Clippy/startup/guard receipts remain historical observations;
+no Cargo, native, Podman, SQL or full deployment ran in this source-only
+continuation. Root owns independent review, rerun CI/readback, publication,
+merge and post-merge checks. Full original acceptance remains ACTIVE; finite
+convergence and network/tenant residuals are unchanged.

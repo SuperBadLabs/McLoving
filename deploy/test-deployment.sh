@@ -316,6 +316,9 @@ excluded_literals = {
     "MCLOVING_AGENT_TRUST_POOL": "trust pool name",
     "MCLOVING_CONTROLLER_DNS_NAME": "TLS server name, not a path",
     "MCLOVING_ALLOW_INSECURE_LOOPBACK": "boolean flag",
+    # The startup loader and environment guard validate this scalar policy;
+    # the guard also pins it to the controller deployment contract.
+    "MCLOVING_NOTIFICATION_NAT64_PREFIXES": "startup-frozen, validated, contract-pinned RFC6052 policy scalar, not a filesystem path",
     # RETIRED: the controller refuses any value by name
     # (bins/controller/src/main.rs); deliberately unclassified so setting
     # it stays an error, never a validated configuration.

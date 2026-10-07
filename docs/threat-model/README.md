@@ -1735,3 +1735,20 @@ organizations remain residuals. Operators provide translator policy and distinct
 contexts where multiple organizations share a repository/commit. Public
 authentication, agent/pool/compiler/artifact authority and migration/decommission
 permission are unchanged; independent review must dispose of these determinations.
+
+
+### CTRL-007 2026-10-07 source-coverage continuation
+
+Actual PR #179 deployment job `112579053746` failed before PostgreSQL because
+its Rust environment-name coverage gate did not yet account for the NAT64 policy
+scalar; the scoped configuration/contract guard had just passed. The correction
+adds one named reviewed value exclusion stating the startup-frozen, validated,
+contract-pinned RFC6052 meaning and absence of a filesystem path. It changes no
+path classification, source sweep, exclusion pattern, guard or floor. Exact
+embedded payload execution reproduced baseline refusal and then passed; an
+unknown source name and removal of the reviewed entry still failed specifically.
+`docs/evidence/CTRL-007_SECURITY_REVIEW.md` records actual CI/source-only hashes
+and distinguishes current root-composed candidate custody from historical native
+receipts. No Cargo/native/full deployment ran in this continuation. Independent
+review, rerun CI and protected merge/post-merge remain root obligations. Original
+full acceptance stays ACTIVE, with the same finite-convergence/SSRF/tenant risks.
