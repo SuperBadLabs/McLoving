@@ -1061,7 +1061,7 @@ fn validate_assignment_with_features(
                         detail: "source runtime binding unavailable for a checkout step".to_owned(),
                     }));
                 }
-                if image.is_some() && (!cfg!(unix) || config.podman_path.is_none()) {
+                if image.is_some() && (!cfg!(unix) || config.podman_context.is_none()) {
                     // Routing keeps image work away from agents without a
                     // runtime; if it arrives anyway, another agent can run it.
                     return Ok(AssignmentDisposition::ForAnotherRuntime(
@@ -1488,6 +1488,17 @@ fn supported_multi_step_spec(execution_spec_json: &[u8]) -> Result<MultiStepSpec
             "credential targets across all steps ({}) exceed the per-attempt bound of 8",
             union.len()
         ));
+    }
+    if spec.image.is_some()
+        && spec.steps.iter().any(|step| {
+            step.env.iter().any(|(name, value)| {
+                name.starts_with('#')
+                    || name.contains(['=', '\n', '\0'])
+                    || value.contains(['\n', '\0'])
+            })
+        })
+    {
+        return Err("container environment name or value is not representable".to_owned());
     }
     if let Some(image) = &spec.image
         && !mcloving_domain::container::is_digest_pinned_image(image)
@@ -1951,7 +1962,8 @@ async fn run_assignment(
             config
                 .podman_path
                 .clone()
-                .map(|runtime| (runtime, image.clone()))
+                .zip(config.podman_context.clone())
+                .map(|(runtime, context)| (runtime, image.clone(), context))
                 .ok_or_else(|| {
                     AgentError::InvalidAssignment(
                         "container stage reached an agent without a runtime".to_owned(),
@@ -2143,7 +2155,7 @@ async fn run_assignment(
                 let container_context = step_container
                     .as_deref()
                     .zip(container_runtime.as_ref())
-                    .map(|(name, (runtime, _))| (name, crate::container::runtime_context(runtime)));
+                    .map(|(name, (runtime, _, context))| (name, context.identity(runtime)));
                 let acquisition_directory = helper.and_then(PreparedHelper::acquisition_directory);
                 journal.record_step_start(
                     &organization,
@@ -2194,10 +2206,13 @@ async fn run_assignment(
                     ),
                 step_ordinal: multi_step.then_some(ordinal),
                 container: container_runtime.as_ref().zip(step_container.as_ref()).map(
-                    |((runtime, image), name)| mcloving_agent_runtime::executor::ContainerSpec {
-                        runtime: runtime.clone(),
-                        image: image.clone(),
-                        name: name.clone(),
+                    |((runtime, image, context), name)| {
+                        mcloving_agent_runtime::executor::ContainerSpec {
+                            runtime: runtime.clone(),
+                            context: context.clone(),
+                            image: image.clone(),
+                            name: name.clone(),
+                        }
                     },
                 ),
                 workspace_root: config.workspace_root.clone(),
@@ -6010,6 +6025,8 @@ mod tests {
             cache_bindings: None,
             source_bindings: None,
             podman_path: None,
+            podman_config_path: None,
+            podman_context: None,
             agent_id: "agent-1".to_owned(),
             trust_pool: "trusted".to_owned(),
             organization_id: "00000000-0000-0000-0000-000000000123".to_owned(),

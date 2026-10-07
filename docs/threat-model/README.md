@@ -1837,3 +1837,134 @@ The actual failed candidate Secret scan remains a dated negative, and the
 unchanged scan plus independent full exact committed candidate review and
 remaining protected/post-merge gates are still required. No production leak,
 provider credential-use, broker authority or ticket closure is inferred.
+
+
+## AGENT-009 candidate: Podman store and configuration custody
+
+TM-003, TM-023 and TM-052 are affected. The agent resolves rootless Podman
+storage at session open, confirms explicitly selected graphroot/runroot/driver/
+options, and journals the same versioned identity before spawning. Probe,
+launch, timeout/cancellation teardown and recovery use that explicit store.
+Recovery re-resolves deployment storage and refuses a changed identity with
+"effective store changed; absence unproven". A legacy v2 identity also parks.
+Options and STORAGE_DRIVER are pinned, including Podman's ID-mapping reexec;
+unknown option representations and transient stores are refused.
+
+The deployment installs service-owned, regular, no-follow, single-link mode-0400
+containers.conf and storage.conf, plus an empty HOME/.config/containers/mounts.conf
+under private mode-0700 directories. Effective workload HOME is this private
+configuration root; setting CONTAINERS_CONF or XDG_CONFIG_HOME alone did not
+suppress Podman's independent mounts.conf lookup. Original HOME selects only
+bootstrap storage configuration. The journal binds effective HOME, mounts path,
+configuration path, the store tuple/options, and byte-exact optional bootstrap
+HOME/runtime/user/temp inputs. Workload variables still use the memory-only env
+file. IR admission and the independent executor refuse leading-# names as well
+as equals, multiline and NUL contracts before serialization or workspace work.
+
+The local qualification records real uncontrolled sentinel exposure, controlled
+exclusion with a writable workspace, real storage.conf drift with a live
+original-store container and matching journal/controller records without a
+terminal result, and original-store cleanup after restoring identity. The
+independent process-group uncertainty stays fail-closed: cleanup alone does not
+terminalize the attempt. The test then uses the existing explicitly attributed
+operator discharge, verifies its controller receipt, and observes local journal
+retirement. Specific mutants must fail their named semantic assertions, including
+actual sentinel content in controller logs when private HOME is removed.
+
+Actual scoped shipped install/reinstall/upgrade/rollback entrypoints and installed
+configuration guards are exercised with private roots, real binaries and private
+PostgreSQL. The deployment receipt separates 16 artifact/provenance operations
+from 25 transitions (five positive, twenty intended refusals). This uses
+--no-systemd and two differently stripped artifacts from the same build. It does
+not establish live service execution or predecessor-version migration. Legacy
+deployments without these assets require actual installation/reinstallation and
+configuration enrollment before container capability can qualify; upgrade alone
+does not create the new private assets. The full deployment driver retains the
+new focused tests and remains a separate Foundation requirement.
+
+Initial live proofs had a fixture rootless-storage-path error and are retained
+as historical, unearned private-store qualification. Later proofs require actual
+bootstrap and pinned info to equal exact owned roots before any workload. Failed
+cleanup preserves diagnostic paths. Historical default-store cleanup was limited
+to a specifically attributed test container; lack of complete before/after
+inventories prevents any claim that the owner's whole store was unchanged.
+See [the candidate security receipt](../evidence/AGENT-009_SECURITY_REVIEW.md).
+
+Plain host-process steps retain SEC-005's uncontained residual. Same-account
+operators, service-owned runtime/configuration and rootless runtime escape remain
+within the trusted-host boundary; mode 0400 is not protection from that account
+or root. No new credential, protocol, controller persistence, connector,
+migration, decommission or production authority is granted. Independent review,
+current-base composition, protected Foundation/native Windows checks, publication
+and post-merge receipts remain separate obligations; local evidence is not ticket
+closure.
+
+
+## 2026-10-07 UTC: source continuation after hosted CI failures
+
+The earlier qualification above is a historical observation on its recorded
+baseline. For the candidate observed at
+`66a0cd4763da140deb0f561d03adb4793a6ee44e`, based on
+`dc5c58e85f0835d9761beffa330d46d960139e10`, the retained hosted Windows job
+112594812386 failed the unconditional storage-options unit test: 80 passed,
+one failed at `container.rs:272` because `/private/graph` and `/private/run`
+are not absolute Windows paths. Its raw log SHA-256 is
+`33f7d93f310e4a1ce15d731822929cd9c4256211dc12f9532149ff46192cfabe`.
+The test fixture now joins graph/run paths below a canonical actual temporary
+root and serializes them with `serde_json::json!`, preserving platform escaping.
+Mount-program option shape/preservation, relative-path refusal and unknown-shape
+refusal remain tested on Windows; production absolute-path checks are unchanged.
+
+Hosted PostgreSQL job 112594706823 actually ran all eleven remote-work tests:
+11 passed, zero failed/ignored in 47.97 seconds, then its exact-count gate refused
+the obsolete expected count of nine. The direct raw log SHA-256 is
+`16baebeb0b44448aecc92cc50e460f4597c90446af38afc23e5ae87478dfd563`.
+Foundation and `scripts/test-controller-postgres.sh` now require exactly eleven
+remote-work tests. Long-step's nine-test floor, existing CLI build/environment
+wiring, mandatory HYG archival checks and every other count/oracle remain in
+place. Neither a generic gate relaxation nor a test skip is introduced.
+
+This continuation records source authoring and retained failure readback only.
+Fresh scheduled native verification, the named Windows test and full hosted
+Foundation/Windows reruns on the revised candidate are still owed. The original
+three-clause acceptance remains ACTIVE; no revised green result or ticket closure
+is claimed. Historical receipts and threat scope above are retained verbatim.
+
+
+## HYG-003 directory-scope false-alarm continuation (2026-10-07)
+
+The earlier HYG-003 candidate and archive assessments remain historical.
+PR #177's exact dc5 implementation-result Foundation37558694848 and actual
+native Windows37558694803 succeeded. Attempting separate closure exposed a
+further original clause-seven false alarm: the unchanged acceptance names the
+real handoff directory as scope, while the DONE citation checker required a
+file. No closure was published. The canonical HYG-003 review records the
+specific failure, preserved initial closure candidate and corrected scope proof.
+
+TM-052's documentation boundary admits only exact backticked extensionless
+slash-terminated real directory scope under docs, with no linked inspected
+components or path aliases; each occurrence is checked independently. Missing
+files, truncated evidence templates, filename-directory masquerades, escaping
+paths and scope/citation laundering remain refused. Canonical receipt and
+closure-attribution evidence still requires files. All seven original acceptance
+clauses and sealed historical owner bytes remain unchanged. The new 96-test
+suite and nine specific baseline/RED/restored controls supplement the prior
+43 historical stale-claim/archive controls; no broad exists exemption is added.
+
+This is bounded repository text/path checking without atomic filesystem or
+external-observation authority. Arbitrary prose, unrecorded owner decisions,
+future file changes and reviewed registry commitment trust remain residuals.
+HYG-003 remains ACTIVE; independent review and this correction's own protected
+merge/post-merge gates precede separate formal closure. No runtime, credential,
+fencing, release, production, migration or canary authority changes.
+
+
+The HYG-003 scope continuation's subsequent independent review found and corrected
+normalization of leading dot/parent prefixes outside the capture. Scope now
+requires the entire matched token to equal the captured docs path; ordinary file
+citation grammar is unchanged. Both actual prefix controls reproduce pre-fix
+assertion failures, and all 98 closure tests plus eleven fresh specific mutation
+controls pass. Earlier 96/nine records remain historical. The outside-scope test
+uses a real existing target; no accepted scope spelling can replace missing
+receipt/attribution files. Original acceptance, ACTIVE state, protected historic
+prefixes and all runtime/authority limits remain unchanged.

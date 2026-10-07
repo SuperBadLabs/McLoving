@@ -1761,6 +1761,7 @@ fn podman_for_tests() -> Option<PathBuf> {
     ))
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn container_stage_runs_in_the_pinned_image_and_sees_only_the_workspace() {
     let Some(podman) = podman_for_tests() else {
@@ -1769,6 +1770,7 @@ async fn container_stage_runs_in_the_pinned_image_and_sees_only_the_workspace() 
     let Some(mut harness) = multi_step_harness("container-agent", "container").await else {
         return;
     };
+    let container_host = IsolatedPodman::new(podman.clone());
     let mut agent = agent_command(
         "container-agent",
         harness.organization_id,
@@ -1777,7 +1779,7 @@ async fn container_stage_runs_in_the_pinned_image_and_sees_only_the_workspace() 
         &harness.journal,
         &harness.workspace,
     )
-    .env("MCLOVING_AGENT_PODMAN_PATH", &podman)
+    .envs(container_host.agent_environment())
     // A container attempt reserves the bounded reap inside its lease on top
     // of the grace and cadence; the harness's 5 s term cannot hold it.
     .env("MCLOVING_AGENT_LEASE_SECONDS", "30")
@@ -1906,6 +1908,7 @@ stages:
     stop(&mut harness.controller).await;
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn timed_out_container_step_leaves_no_container_behind() {
     let Some(podman) = podman_for_tests() else {
@@ -1916,6 +1919,7 @@ async fn timed_out_container_step_leaves_no_container_behind() {
     else {
         return;
     };
+    let container_host = IsolatedPodman::new(podman.clone());
     let mut agent = agent_command(
         "container-timeout-agent",
         harness.organization_id,
@@ -1924,7 +1928,7 @@ async fn timed_out_container_step_leaves_no_container_behind() {
         &harness.journal,
         &harness.workspace,
     )
-    .env("MCLOVING_AGENT_PODMAN_PATH", &podman)
+    .envs(container_host.agent_environment())
     // A container attempt reserves the bounded reap inside its lease on top
     // of the grace and cadence; the harness's 5 s term cannot hold it.
     .env("MCLOVING_AGENT_LEASE_SECONDS", "30")
@@ -1991,7 +1995,8 @@ stages:
     // The container is named after the attempt and step; after teardown the
     // runtime must not know it at all (`container exists` exits 1).
     let name = format!("mcloving-{}-0", status.attempt_id);
-    let exists = StdCommand::new(&podman)
+    let exists = container_host
+        .command()
         .args(["container", "exists", &name])
         .status()
         .expect("query the container runtime");
@@ -2244,5 +2249,892 @@ async fn a_planted_link_refuses_the_artifact_set_by_name() {
     );
 
     stop(&mut agent).await;
+    stop(&mut harness.controller).await;
+}
+
+/// Every test Podman operation owns fresh config, runtime and storage roots.
+#[cfg(unix)]
+struct IsolatedPodman {
+    _root: Option<tempfile::TempDir>,
+    runtime: PathBuf,
+    graph: PathBuf,
+    run: PathBuf,
+    xdg: PathBuf,
+    storage: PathBuf,
+    controlled: PathBuf,
+    custody_qualified: bool,
+}
+#[cfg(unix)]
+impl IsolatedPodman {
+    fn new(runtime: PathBuf) -> Self {
+        use mcloving_agent_runtime::executor::podman::{
+            CONTAINERS_CONFIGURATION, STORAGE_CONFIGURATION,
+        };
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let graph = root.path().join("graph");
+        let run = root.path().join("run/containers");
+        let xdg = root.path().join("host-config");
+        let controlled_root = root.path().join("controlled");
+        for dir in [
+            run.clone(),
+            xdg.join("containers"),
+            controlled_root.join(".config/containers"),
+        ] {
+            std::fs::create_dir_all(&dir).unwrap();
+            for ancestor in dir.ancestors().take_while(|p| p.starts_with(root.path())) {
+                std::fs::set_permissions(ancestor, std::fs::Permissions::from_mode(0o700)).unwrap();
+            }
+        }
+        let storage = xdg.join("containers/storage.conf");
+        std::fs::write(
+            &storage,
+            format!(
+                "[storage]\ndriver = \"vfs\"\ngraphroot = \"{}\"\nrootless_storage_path = \"{}\"\nrunroot = \"{}\"\n",
+                graph.display(),
+                graph.display(),
+                run.display()
+            ),
+        )
+        .unwrap();
+        std::fs::create_dir_all(xdg.join(".config/containers")).unwrap();
+        let controlled = controlled_root.join("containers.conf");
+        for (path, bytes) in [
+            (controlled.clone(), CONTAINERS_CONFIGURATION),
+            (controlled_root.join("storage.conf"), STORAGE_CONFIGURATION),
+            (
+                controlled_root.join(".config/containers/mounts.conf"),
+                b"".as_slice(),
+            ),
+        ] {
+            std::fs::write(&path, bytes).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400)).unwrap();
+        }
+        eprintln!(
+            "owned Podman fixture: root={} mode=0700 graph={} run={} driver=vfs storage={} controlled={}",
+            root.path().display(),
+            graph.display(),
+            run.display(),
+            storage.display(),
+            controlled.display()
+        );
+        let mut fixture = Self {
+            _root: Some(root),
+            runtime,
+            graph,
+            run,
+            xdg,
+            storage,
+            controlled,
+            custody_qualified: false,
+        };
+        fixture.preflight_owned_context().expect("bootstrap and controlled confirmation must select the exact owned store before any workload");
+        fixture.custody_qualified = true;
+        fixture
+    }
+    fn root_path(&self) -> &Path {
+        self._root.as_ref().expect("owned fixture is live").path()
+    }
+    fn preflight_owned_context(&self) -> Result<(), String> {
+        use mcloving_agent_runtime::executor::podman::PodmanContext;
+        let context = PodmanContext {
+            graph_root: self.graph.clone(),
+            run_root: self.run.clone(),
+            driver: "vfs".into(),
+            storage_options: Vec::new(),
+            config_path: self.controlled.clone(),
+            home: Some(self.xdg.clone().into_os_string()),
+            runtime_dir: Some(self.run.parent().unwrap().as_os_str().to_owned()),
+            user: std::env::var_os("USER"),
+            temporary_dir: None,
+        };
+        context
+            .validate_configuration()
+            .map_err(|e| e.to_string())?;
+        let mut bootstrap = StdCommand::new(&self.runtime);
+        bootstrap
+            .env_clear()
+            .envs(context.environment())
+            .env("HOME", &self.xdg)
+            .env("CONTAINERS_STORAGE_CONF", &self.storage)
+            .args(["info", "--format", "json"]);
+        let first = self.bounded_fixture_command(bootstrap, "bootstrap-info")?;
+        Self::require_owned_store_info(&first, &self.graph, &self.run)?;
+        let mut confirmation = StdCommand::new(&self.runtime);
+        confirmation
+            .env_clear()
+            .envs(context.environment())
+            .args(context.arguments())
+            .args(["info", "--format", "json"]);
+        let second = self.bounded_fixture_command(confirmation, "controlled-confirmation-info")?;
+        Self::require_owned_store_info(&second, &self.graph, &self.run)?;
+        let a: serde_json::Value = serde_json::from_slice(&first).map_err(|e| e.to_string())?;
+        let b: serde_json::Value = serde_json::from_slice(&second).map_err(|e| e.to_string())?;
+        if a["store"]["graphOptions"] != b["store"]["graphOptions"] {
+            return Err("owned store options changed during confirmation".into());
+        }
+        eprintln!(
+            "actual owned bootstrap and controlled confirmation: graph={} run={} driver=vfs options={} effective_HOME={} mounts={}",
+            self.graph.display(),
+            self.run.display(),
+            b["store"]["graphOptions"],
+            self.controlled.parent().unwrap().display(),
+            context
+                .config_root()
+                .join("containers/mounts.conf")
+                .display()
+        );
+        Ok(())
+    }
+    fn require_owned_store_info(bytes: &[u8], graph: &Path, run: &Path) -> Result<(), String> {
+        let info: serde_json::Value = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
+        if info["host"]["security"]["rootless"] != true
+            || info["store"]["graphRoot"].as_str() != graph.to_str()
+            || info["store"]["runRoot"].as_str() != run.to_str()
+            || info["store"]["graphDriverName"] != "vfs"
+            || info["store"]["graphOptions"]
+                .as_object()
+                .is_none_or(|m| !m.is_empty())
+        {
+            return Err(format!(
+                "effective store mismatch; mutation forbidden: expected graph={} run={} driver=vfs options={{}}, actual={}",
+                graph.display(),
+                run.display(),
+                info["store"]
+            ));
+        }
+        Ok(())
+    }
+    // Cleanup is bounded and inspects the exact owned store before deleting
+    // its backing paths. Failure preserves config, runtime, store and logs.
+    fn cleanup_owned_store(&self) -> Result<(), String> {
+        if !self.custody_qualified {
+            return Err(
+                "fixture store preflight unqualified; no cleanup mutation attempted".into(),
+            );
+        }
+        if self.graph != self.root_path().join("graph")
+            || self.run != self.root_path().join("run/containers")
+        {
+            return Err("cleanup storage identity is outside its owned fixture".into());
+        }
+        for (graph, run, prefix) in [
+            (self.graph.clone(), self.run.clone(), "original"),
+            (
+                self.root_path().join("other-graph"),
+                self.run.clone(),
+                "replacement",
+            ),
+        ] {
+            self.cleanup_store(&graph, &run, prefix)?;
+        }
+        Ok(())
+    }
+    fn cleanup_store(
+        &self,
+        graph_path: &Path,
+        run_path: &Path,
+        prefix: &str,
+    ) -> Result<(), String> {
+        use std::os::unix::fs::MetadataExt;
+        if !graph_path.exists() {
+            return Ok(());
+        }
+        let root = std::fs::symlink_metadata(self.root_path()).map_err(|e| e.to_string())?;
+        let graph = std::fs::symlink_metadata(graph_path).map_err(|e| e.to_string())?;
+        if !root.is_dir()
+            || root.mode() & 0o777 != 0o700
+            || root.uid() != nix::unistd::geteuid().as_raw()
+            || !graph.is_dir()
+            || graph.uid() != root.uid()
+            || graph.mode() & 0o022 != 0
+        {
+            return Err("cleanup fixture/store custody cannot be established".into());
+        }
+        let info = self.cleanup_command(
+            graph_path,
+            run_path,
+            &["info", "--format", "json"],
+            &format!("{prefix}-custody-info"),
+        )?;
+        Self::require_owned_store_info(&info, graph_path, run_path)?;
+        for (args, phase, require_empty) in [
+            (vec!["rm", "--force", "--all"], "remove", false),
+            (vec!["ps", "--all", "--format", "{{.ID}}"], "absence", true),
+            (vec!["system", "reset", "--force"], "reset", false),
+            (
+                vec!["ps", "--all", "--format", "{{.ID}}"],
+                "post-reset-containers",
+                true,
+            ),
+            (
+                vec!["images", "--all", "--format", "{{.ID}}"],
+                "post-reset-images",
+                true,
+            ),
+        ] {
+            let output =
+                self.cleanup_command(graph_path, run_path, &args, &format!("{prefix}-{phase}"))?;
+            if require_empty && !output.iter().all(u8::is_ascii_whitespace) {
+                return Err(format!("owned {prefix} store still has objects ({phase})"));
+            }
+        }
+        // A successful reset can recreate empty database/driver scaffolding.
+        // Bound the filesystem inspection and refuse unexpected substitutions.
+        let entries = std::fs::read_dir(graph_path).map_err(|e| e.to_string())?;
+        let mut count = 0;
+        for entry in entries {
+            count += 1;
+            let entry = entry.map_err(|e| e.to_string())?;
+            let name = entry.file_name();
+            if count > 16
+                || !matches!(
+                    name.to_str(),
+                    Some(
+                        "storage.lock"
+                            | "userns.lock"
+                            | "vfs"
+                            | "vfs-images"
+                            | "vfs-layers"
+                            | "vfs-containers"
+                            | "libpod"
+                            | "mounts"
+                            | "db.sql"
+                            | "db.sql-shm"
+                            | "db.sql-wal"
+                            | "defaultNetworkBackend"
+                            | "networks"
+                    )
+                )
+            {
+                return Err(format!(
+                    "unexpected owned store entry: {}",
+                    entry.path().display()
+                ));
+            }
+            let metadata = std::fs::symlink_metadata(entry.path()).map_err(|e| e.to_string())?;
+            if metadata.file_type().is_symlink() || metadata.uid() != root.uid() {
+                return Err("owned store entry custody changed".into());
+            }
+        }
+        eprintln!(
+            "exact owned {prefix} store empty after rm/ps/reset/ps/images; graph={} run={} bounded_entries={count}",
+            graph_path.display(),
+            run_path.display()
+        );
+        Ok(())
+    }
+    fn cleanup_command(
+        &self,
+        graph: &Path,
+        run: &Path,
+        args: &[&str],
+        phase: &str,
+    ) -> Result<Vec<u8>, String> {
+        self.bounded_fixture_command(
+            {
+                let mut command = self.command_for_store(graph, run);
+                command.args(args);
+                command
+            },
+            phase,
+        )
+    }
+    fn bounded_fixture_command(
+        &self,
+        mut command: StdCommand,
+        phase: &str,
+    ) -> Result<Vec<u8>, String> {
+        let stdout_path = self.root_path().join(format!("cleanup-{phase}.stdout"));
+        let stderr_path = self.root_path().join(format!("cleanup-{phase}.stderr"));
+        let stdout = std::fs::File::create(&stdout_path).map_err(|e| e.to_string())?;
+        let stderr = std::fs::File::create(&stderr_path).map_err(|e| e.to_string())?;
+        eprintln!("owned fixture invocation {phase}: {command:?}");
+        let mut child = command
+            .stdout(Stdio::from(stdout))
+            .stderr(Stdio::from(stderr))
+            .spawn()
+            .map_err(|e| format!("cleanup {phase}: {e}"))?;
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        loop {
+            match child.try_wait().map_err(|e| e.to_string())? {
+                Some(status) if status.success() => break,
+                Some(status) => {
+                    return Err(format!(
+                        "cleanup {phase} exited {status}; see {}",
+                        stderr_path.display()
+                    ));
+                }
+                None if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(25))
+                }
+                None => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(format!("cleanup {phase} timed out; store preserved"));
+                }
+            }
+        }
+        let size = std::fs::metadata(&stdout_path)
+            .map_err(|e| e.to_string())?
+            .len();
+        if size > 65_536 {
+            return Err(format!("cleanup {phase} output exceeded bound"));
+        }
+        std::fs::read(stdout_path).map_err(|e| e.to_string())
+    }
+    fn agent_environment(&self) -> Vec<(&'static str, PathBuf)> {
+        vec![
+            ("MCLOVING_AGENT_PODMAN_PATH", self.runtime.clone()),
+            ("MCLOVING_AGENT_PODMAN_CONFIG_PATH", self.controlled.clone()),
+            ("HOME", self.xdg.clone()),
+            ("XDG_CONFIG_HOME", self.xdg.clone()),
+            ("XDG_RUNTIME_DIR", self.run.parent().unwrap().to_owned()),
+            ("CONTAINERS_STORAGE_CONF", self.storage.clone()),
+        ]
+    }
+    fn command(&self) -> StdCommand {
+        self.command_for_store(&self.graph, &self.run)
+    }
+    fn command_for_store(&self, graph: &Path, run: &Path) -> StdCommand {
+        assert!(
+            self.custody_qualified,
+            "no workload or cleanup command before exact private-store preflight"
+        );
+        let mut command = StdCommand::new(&self.runtime);
+        command
+            .env_clear()
+            .env(
+                "PATH",
+                "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            )
+            .envs(std::env::vars_os().filter(|(k, _)| matches!(k.to_str(), Some("HOME" | "USER"))))
+            .env("XDG_CONFIG_HOME", &self.xdg)
+            .env("HOME", &self.xdg)
+            .env("XDG_RUNTIME_DIR", self.run.parent().unwrap())
+            .env("CONTAINERS_STORAGE_CONF", &self.storage)
+            .args(["--root"])
+            .arg(graph)
+            .arg("--runroot")
+            .arg(run)
+            .args([
+                "--storage-driver",
+                "vfs",
+                "--storage-opt=",
+                "--transient-store=false",
+            ]);
+        command
+    }
+}
+#[cfg(unix)]
+impl Drop for IsolatedPodman {
+    fn drop(&mut self) {
+        if let Err(reason) = self.cleanup_owned_store() {
+            let failure = self.root_path().join("cleanup-failure.txt");
+            let _ = std::fs::write(
+                &failure,
+                format!(
+                    "{reason}\nExplicit original graph={} run={} driver=vfs\n",
+                    self.graph.display(),
+                    self.run.display()
+                ),
+            );
+            let preserved = self._root.take().expect("owned fixture is live").keep();
+            eprintln!(
+                "unverified Podman store preserved at {}: {reason}",
+                preserved.display()
+            );
+            if !std::thread::panicking() {
+                panic!(
+                    "owned Podman store cleanup unverified; evidence at {}",
+                    preserved.display()
+                );
+            }
+        } else {
+            eprintln!(
+                "verified owned Podman cleanup: graph={} run={} driver=vfs; exact store contains no containers or images after reset",
+                self.graph.display(),
+                self.run.display()
+            );
+        }
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn controlled_podman_configuration_excludes_a_genuine_implicit_mount() {
+    let Some(podman) = podman_for_tests() else {
+        return;
+    };
+    let Some(mut harness) = multi_step_harness("implicit-mount-agent", "implicit-mount").await
+    else {
+        return;
+    };
+    let host = IsolatedPodman::new(podman);
+    let sentinel = host.root_path().join("host-secret");
+    std::fs::create_dir(&sentinel).unwrap();
+    std::fs::write(sentinel.join("sentinel"), b"host-only-mount-secret").unwrap();
+    std::fs::write(
+        host.xdg.join(".config/containers/mounts.conf"),
+        format!("{}:/implicit-secret\n", sentinel.display()),
+    )
+    .unwrap();
+    let control = host
+        .command()
+        .args([
+            "run",
+            "--rm",
+            "--entrypoint",
+            "/bin/sh",
+            ALPINE_DIGEST,
+            "-c",
+            "cat /implicit-secret/sentinel",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        control.status.success(),
+        "uncontrolled mount must actually expose sentinel: {}",
+        String::from_utf8_lossy(&control.stderr)
+    );
+    assert!(String::from_utf8_lossy(&control.stdout).contains("host-only-mount-secret"));
+    eprintln!(
+        "uncontrolled real implicit mount exposes sentinel: {}",
+        String::from_utf8_lossy(&control.stdout)
+    );
+    let mut agent = agent_command(
+        "implicit-mount-agent",
+        harness.organization_id,
+        harness.agent_port,
+        &harness.tls,
+        &harness.journal,
+        &harness.workspace,
+    )
+    .envs(host.agent_environment())
+    .env("MCLOVING_AGENT_LEASE_SECONDS", "30")
+    .kill_on_drop(true)
+    .spawn()
+    .unwrap();
+    let pipeline = format!(
+        "version: 1\nname: implicit-mount\nstages:\n  - id: build\n    name: Build\n    image: {ALPINE_DIGEST}\n    steps:\n      - process:\n          program: /bin/sh\n          args: [-c, \"if ! test -w /workspace; then printf workspace-not-writable; exit 83; fi; printf workspace-writable; if test -e /implicit-secret/sentinel; then printf unintended-sentinel-present:; cat /implicit-secret/sentinel; exit 84; fi; printf mount-excluded\"]\n          timeout_seconds: 30\n"
+    );
+    let id = Uuid::new_v4();
+    harness
+        .client
+        .put_pipeline(
+            harness.organization_id,
+            harness.project_id,
+            id,
+            0,
+            &PipelineUpsertRequest {
+                slug: "implicit-mount".into(),
+                source: pipeline,
+                parameters: Default::default(),
+            },
+        )
+        .await
+        .unwrap();
+    let admission = harness
+        .client
+        .submit_pipeline_on_platform_in_pool(
+            harness.organization_id,
+            harness.project_id,
+            id,
+            "implicit-mount",
+            "linux",
+            "trusted-linux",
+            &PipelineBuildRequest::default(),
+        )
+        .await
+        .unwrap();
+    let result = wait_for_terminal(
+        &harness.client,
+        harness.organization_id,
+        harness.project_id,
+        admission.build_id,
+    )
+    .await;
+    let logs = harness
+        .client
+        .logs(
+            harness.organization_id,
+            harness.project_id,
+            admission.build_id,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        result.status, "succeeded",
+        "actual mount step status with logs: {logs:?}"
+    );
+    assert!(
+        logs.iter().any(|log| log
+            .text
+            .as_deref()
+            .unwrap_or("")
+            .contains("workspace-writable")),
+        "actual workspace writability witness: {logs:?}"
+    );
+    assert!(
+        logs.iter()
+            .any(|log| log.text.as_deref().unwrap_or("").contains("mount-excluded"))
+    );
+    eprintln!(
+        "controlled real implicit mount excluded; workspace writable; build={} status={}",
+        admission.build_id, result.status
+    );
+    stop(&mut agent).await;
+    stop(&mut harness.controller).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn storage_configuration_drift_parks_recovery_while_original_container_survives() {
+    let Some(podman) = podman_for_tests() else {
+        return;
+    };
+    let Some(mut harness) = multi_step_harness("storage-drift-agent", "storage-drift").await else {
+        return;
+    };
+    let host = IsolatedPodman::new(podman);
+    let start_agent = || {
+        let mut command = agent_command(
+            "storage-drift-agent",
+            harness.organization_id,
+            harness.agent_port,
+            &harness.tls,
+            &harness.journal,
+            &harness.workspace,
+        );
+        command
+            .envs(host.agent_environment())
+            .env("MCLOVING_AGENT_LEASE_SECONDS", "30")
+            .kill_on_drop(true);
+        command
+    };
+    let mut agent = start_agent().spawn().unwrap();
+    let id = Uuid::new_v4();
+    let source = format!(
+        "version: 1\nname: storage-drift\nstages:\n  - id: build\n    name: Build\n    image: {ALPINE_DIGEST}\n    steps:\n      - process:\n          program: /bin/sh\n          args: [-c, \"printf running > /workspace/running; sleep 300\"]\n          timeout_seconds: 300\n"
+    );
+    harness
+        .client
+        .put_pipeline(
+            harness.organization_id,
+            harness.project_id,
+            id,
+            0,
+            &PipelineUpsertRequest {
+                slug: "storage-drift".into(),
+                source,
+                parameters: Default::default(),
+            },
+        )
+        .await
+        .unwrap();
+    let admission = harness
+        .client
+        .submit_pipeline_on_platform_in_pool(
+            harness.organization_id,
+            harness.project_id,
+            id,
+            "storage-drift",
+            "linux",
+            "trusted-linux",
+            &PipelineBuildRequest::default(),
+        )
+        .await
+        .unwrap();
+    let attempt = tokio::time::timeout(Duration::from_secs(120), async {
+        loop {
+            let status = harness
+                .client
+                .status(
+                    harness.organization_id,
+                    harness.project_id,
+                    admission.build_id,
+                )
+                .await
+                .unwrap();
+            if matches!(status.status.as_str(), "failed" | "aborted" | "succeeded") {
+                let logs = harness
+                    .client
+                    .logs(
+                        harness.organization_id,
+                        harness.project_id,
+                        admission.build_id,
+                    )
+                    .await
+                    .unwrap();
+                panic!(
+                    "storage fixture exited before recovery semantics: status={} logs={logs:?}",
+                    status.status
+                );
+            }
+            let journal = mcloving_agent_runtime::Journal::open(&harness.journal).unwrap();
+            for attempt in journal.reconcile().unwrap().attempts {
+                if let Some(name) = &attempt.container_name
+                    && attempt.process_id.is_some()
+                    && host
+                        .command()
+                        .args(["container", "exists", name])
+                        .status()
+                        .unwrap()
+                        .success()
+                {
+                    return attempt;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("container launched and durably journaled");
+    let admitted_status = harness
+        .client
+        .status(
+            harness.organization_id,
+            harness.project_id,
+            admission.build_id,
+        )
+        .await
+        .unwrap();
+    assert_eq!(admitted_status.build_id, admission.build_id);
+    assert_eq!(admitted_status.attempt_id.to_string(), attempt.attempt_id);
+    let controller_restore_epoch: i64 =
+        sqlx::query_scalar("SELECT restore_epoch FROM attempts WHERE organization_id=$1 AND id=$2")
+            .bind(harness.organization_id)
+            .bind(admitted_status.attempt_id)
+            .fetch_one(&harness.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        (u64::try_from(controller_restore_epoch).unwrap() << 32)
+            | u64::try_from(admitted_status.fence).unwrap(),
+        attempt.fence_token,
+        "journal authority binds the real controller restore epoch and fence"
+    );
+    let identity = attempt.container_context.as_deref().unwrap();
+    let hex = |v: &std::ffi::OsStr| {
+        v.as_encoded_bytes()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()
+    };
+    assert!(identity.starts_with("v3|runtime="));
+    assert!(
+        identity.contains(&format!("|root={}|", hex(host.graph.as_os_str()))),
+        "journal pins exact expected graph root: {identity}"
+    );
+    assert!(
+        identity.contains(&format!("|runroot={}|", hex(host.run.as_os_str()))),
+        "journal pins exact expected runtime root: {identity}"
+    );
+    assert!(
+        identity.contains("|driver=766673|"),
+        "journal pins vfs, not a field-name placeholder: {identity}"
+    );
+    let name = attempt.container_name.as_deref().unwrap();
+    stop(&mut agent).await;
+    // Kill the original client after the agent, leaving conmon's container alive.
+    assert!(
+        StdCommand::new("kill")
+            .args(["-KILL", &attempt.process_id.unwrap().to_string()])
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        host.command()
+            .args(["container", "exists", name])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let original = std::fs::read(&host.storage).unwrap();
+    let replacement_graph = host.root_path().join("other-graph");
+    let replacement_run = host.run.clone();
+    std::fs::write(
+        &host.storage,
+        format!(
+            "[storage]\ndriver = \"vfs\"\ngraphroot = \"{}\"\nrootless_storage_path = \"{}\"\nrunroot = \"{}\"\n",
+            replacement_graph.display(),
+            replacement_graph.display(),
+            replacement_run.display()
+        ),
+    )
+    .unwrap();
+    let refusal_log = host.root_path().join("recovery-store-refusal.log");
+    let mut recovering = start_agent()
+        .stderr(Stdio::from(std::fs::File::create(&refusal_log).unwrap()))
+        .spawn()
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let rows = mcloving_agent_runtime::Journal::open(&harness.journal)
+                .unwrap()
+                .reconcile()
+                .unwrap()
+                .attempts;
+            if rows.iter().any(|a| {
+                a.attempt_id == attempt.attempt_id
+                    && a.phase == mcloving_agent_runtime::AttemptPhase::ReconciliationRequired
+            }) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("storage drift must park, not terminalize");
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let report = std::fs::read_to_string(&refusal_log).unwrap();
+            let status = harness.client.status(harness.organization_id, harness.project_id, admission.build_id).await.unwrap();
+            if report.contains(&format!("recovered container {name}: effective store changed; absence unproven")) && status.status == "reconciliation_required" {
+                assert_eq!(status.attempt_id.to_string(), attempt.attempt_id);
+                assert_eq!(status.attempt_status, "reconciliation_required");
+                assert!(status.terminal_summary.is_none()); break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }).await.expect("actual storage comparison refuses the exact matching build, independently of PGID uncertainty");
+    let terminal_rows: i64 = sqlx::query_scalar("SELECT count(*) FROM attempts AS a JOIN nodes AS n ON n.organization_id = a.organization_id AND n.id = a.node_id WHERE a.organization_id = $1 AND n.build_id = $2 AND a.id = $3 AND (a.completed_at IS NOT NULL OR a.terminal_summary IS NOT NULL OR a.status IN ('succeeded', 'failed', 'aborted'))")
+        .bind(harness.organization_id).bind(admission.build_id).bind(admitted_status.attempt_id).fetch_one(&harness.pool).await.unwrap();
+    assert_eq!(
+        terminal_rows, 0,
+        "parked attempt must not publish a terminal outcome"
+    );
+    let terminal_events: i64 = sqlx::query_scalar("SELECT count(*) FROM build_events WHERE organization_id = $1 AND build_id = $2 AND kind IN ('attempt.terminal', 'attempt.reconciliation_terminal', 'attempt.cancellation_completed', 'attempt.recovery_terminated', 'attempt.recovery_process_already_exited', 'attempt.recovery_stale_process')")
+        .bind(harness.organization_id).bind(admission.build_id).fetch_one(&harness.pool).await.unwrap();
+    assert_eq!(terminal_events, 0);
+    assert!(
+        host.command()
+            .args(["container", "exists", name])
+            .status()
+            .unwrap()
+            .success(),
+        "original store still contains the container"
+    );
+    eprintln!(
+        "storage drift witness: build={} attempt={} fence={} journal_context={} parked=true terminal_rows={} terminal_events={} original_container={} alive=true refusal={}",
+        admission.build_id,
+        attempt.attempt_id,
+        attempt.fence_token,
+        identity,
+        terminal_rows,
+        terminal_events,
+        name,
+        std::fs::read_to_string(&refusal_log).unwrap()
+    );
+    stop(&mut recovering).await;
+    std::fs::write(&host.storage, original).unwrap();
+    let restored_log = host.root_path().join("recovery-restored.log");
+    let mut restored = start_agent()
+        .stderr(Stdio::from(std::fs::File::create(&restored_log).unwrap()))
+        .spawn()
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            if host
+                .command()
+                .args(["container", "exists", name])
+                .status()
+                .unwrap()
+                .code()
+                == Some(1)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("restoring store identity permits original-store cleanup");
+    // The matched restored control reaps the original store, while the
+    // independent dead-client process-group uncertainty remains fail-closed.
+    let restored_report = std::fs::read_to_string(&restored_log).unwrap();
+    assert!(!restored_report.contains("effective store changed; absence unproven"));
+    assert!(restored_report.contains(&format!("recovered container {name}: effective store matches journal; proving original-store absence")), "matched restored identity must reach the real original-store reap: {restored_report}");
+    let before_operator = harness
+        .client
+        .status(
+            harness.organization_id,
+            harness.project_id,
+            admission.build_id,
+        )
+        .await
+        .unwrap();
+    assert_eq!(before_operator.attempt_id, admitted_status.attempt_id);
+    assert_eq!(before_operator.status, "reconciliation_required");
+    assert!(before_operator.terminal_summary.is_none());
+    assert_eq!(
+        host.command()
+            .args(["container", "exists", name])
+            .status()
+            .unwrap()
+            .code(),
+        Some(1),
+        "absence precedes any operator terminal decision"
+    );
+    stop(&mut restored).await;
+    eprintln!(
+        "restored identity witness: build={} original_container={} absent=true controller_parked=true before_operator=true matched_report={}",
+        admission.build_id, name, restored_report
+    );
+    // Use the existing controller-side operator reconciliation entry point
+    // on this explicitly owned fixture; never mutate SQL truth to bypass it.
+    let actor = "AGENT-009-owned-storage-fixture-operator";
+    let summary = json!({"reason":"container_absence_verified_after_storage_restore", "container":name, "journal_context":identity, "owned_graphroot":host.graph, "owned_runroot":host.run, "independent_process_group_uncertainty":true});
+    assert!(
+        Store::new(harness.pool.clone())
+            .finalize_reconciled_attempt(
+                harness.organization_id,
+                admitted_status.attempt_id,
+                admitted_status.fence,
+                actor,
+                mcloving_controller_store::TerminalOutcome::Aborted,
+                summary.clone()
+            )
+            .await
+            .unwrap()
+    );
+    let terminal = wait_for_terminal(
+        &harness.client,
+        harness.organization_id,
+        harness.project_id,
+        admission.build_id,
+    )
+    .await;
+    assert_eq!(terminal.status, "aborted");
+    assert_eq!(terminal.attempt_status, "aborted");
+    assert_eq!(terminal.attempt_id, admitted_status.attempt_id);
+    let authorization_count: i64 = sqlx::query_scalar("SELECT count(*) FROM build_events WHERE organization_id = $1 AND build_id = $2 AND kind = 'attempt.reconciliation_terminal' AND payload ->> 'attempt_id' = $3::text AND payload ->> 'actor' = $4 AND payload -> 'summary' = $5::jsonb")
+        .bind(harness.organization_id).bind(admission.build_id).bind(admitted_status.attempt_id).bind(actor).bind(&summary).fetch_one(&harness.pool).await.unwrap();
+    assert_eq!(
+        authorization_count, 1,
+        "terminal receipt binds existing operator authority to this exact fixture"
+    );
+    let mut discharged = start_agent().spawn().unwrap();
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            if !mcloving_agent_runtime::Journal::open(&harness.journal).unwrap().reconcile().unwrap().attempts.iter().any(|a| a.attempt_id == attempt.attempt_id) { break; }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }).await.expect("real controller authorizes retirement only after original-store absence and explicit terminal reconciliation");
+    let discharge_count: i64 = sqlx::query_scalar("SELECT count(*) FROM build_events WHERE organization_id = $1 AND build_id = $2 AND kind = 'attempt.recovered_discharge_authorized' AND payload ->> 'attempt_id' = $3::text")
+        .bind(harness.organization_id).bind(admission.build_id).bind(admitted_status.attempt_id).fetch_one(&harness.pool).await.unwrap();
+    assert_eq!(discharge_count, 1);
+    eprintln!(
+        "explicit operator discharge witness: build={} attempt={} actor={} summary={} authorization_count={} terminal_status={} local_retired=true discharge_count={}",
+        admission.build_id,
+        admitted_status.attempt_id,
+        actor,
+        summary,
+        authorization_count,
+        terminal.status,
+        discharge_count
+    );
+    stop(&mut discharged).await;
     stop(&mut harness.controller).await;
 }

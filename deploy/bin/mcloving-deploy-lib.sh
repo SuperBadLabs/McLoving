@@ -556,6 +556,9 @@ deployment_contract_path_variables() {
         "trust follow MCLOVING_CONTROLLER_CA_PATH file" \
         "trust follow MCLOVING_AGENT_CERTIFICATE_PATH file" \
         "trust follow MCLOVING_AGENT_PODMAN_PATH file" \
+        "secret nofollow MCLOVING_AGENT_PODMAN_CONFIG_PATH file" \
+        "secret nofollow MCLOVING_AGENT_PODMAN_STORAGE_PATH file" \
+        "secret nofollow MCLOVING_AGENT_PODMAN_MOUNTS_PATH file" \
         "state follow MCLOVING_AGENT_WORKSPACE_ROOT directory" \
         "state follow MCLOVING_AGENT_JOURNAL_PATH file" \
         "state follow MCLOVING_AGENT_SESSION_RECEIPT_PATH file"
@@ -4577,6 +4580,22 @@ require_deployment_assets_present() {
 # same refusal messages as install; the unit-declared roots are parsed from
 # the INSTALLED units, because the deployed tree is what the transition is
 # about to touch.
+# Workload container configuration is immutable independently of active units.
+# Called before install/upgrade/rollback may mutate the deployed tree.
+require_workload_podman_configuration() {
+  local workload_root="$1" workload_file workload_dir
+  [[ -e "${workload_root}" || -L "${workload_root}" ]] || return 0
+  for workload_dir in "${workload_root}" "${workload_root}/.config" "${workload_root}/.config/containers"; do
+    [[ -d "${workload_dir}" && ! -L "${workload_dir}" && "$(stat -Lc '%a %u' -- "${workload_dir}")" == "700 ${EUID}" ]] || deploy_fail "workload Podman configuration directory is not service-owned mode 700: ${workload_dir}"
+  done
+  for workload_file in "${workload_root}/containers.conf" "${workload_root}/storage.conf" "${workload_root}/.config/containers/mounts.conf"; do
+    [[ -f "${workload_file}" && ! -L "${workload_file}" && "$(stat -Lc '%a %u %h' -- "${workload_file}")" == "400 ${EUID} 1" ]] || deploy_fail "workload Podman configuration requires regular service-owned mode 400 single-link files: ${workload_file}"
+  done
+  cmp -s "${workload_root}/containers.conf" <(printf '# McLoving agent-owned workload configuration.\n[containers]\n') || deploy_fail "workload Podman containers.conf changed"
+  cmp -s "${workload_root}/storage.conf" <(printf '# Storage is selected by explicit command arguments.\n[storage]\n') || deploy_fail "workload Podman storage.conf changed"
+  [[ ! -s "${workload_root}/.config/containers/mounts.conf" ]] || deploy_fail "workload Podman mounts.conf must be empty"
+}
+
 require_deployment_integrity() {
   local home_dir="${1%/}" manager_authoritative=0
   [[ "${2:-}" == "--manager-authoritative" ]] && manager_authoritative=1
@@ -4587,12 +4606,16 @@ require_deployment_integrity() {
   xdg_config_base="$(deployment_effective_config_root "${home_dir}")"
   unit_root="${xdg_config_base}/systemd/user"
   quadlet_root="${xdg_config_base}/containers/systemd"
+  require_workload_podman_configuration "${config_root}/podman"
   local managed_roots=(
     "${libexec_root}"
     "${libexec_root}/helpers"
     "${libexec_root}/releases"
     "${config_root}"
     "${config_root}/pki"
+    "${config_root}/podman"
+    "${config_root}/podman/.config"
+    "${config_root}/podman/.config/containers"
     "${unit_root}"
     "${quadlet_root}"
   )
@@ -4601,6 +4624,12 @@ require_deployment_integrity() {
     "${config_root}/db-init.env"
     "${config_root}/controller.env"
     "${config_root}/agent.env"
+  )
+  # Workload TOML and mounts files are custody inputs, not EnvironmentFiles.
+  local workload_configuration_files=(
+    "${config_root}/podman/containers.conf"
+    "${config_root}/podman/storage.conf"
+    "${config_root}/podman/.config/containers/mounts.conf"
   )
   local unit_files=()
   for unit_file in "${unit_root}"/mcloving-*.service \
@@ -4978,11 +5007,11 @@ require_deployment_integrity() {
   # skipped by the directory checks while every directory on the way is
   # judged.
   require_secure_ancestors "${home_dir}" "${managed_roots[@]}" \
-    "${contract_destinations[@]}" "${unit_declared_roots[@]}" \
+    "${contract_destinations[@]}" "${workload_configuration_files[@]}" "${unit_declared_roots[@]}" \
     "${declared_contracts[@]}" "${declared_executables[@]}" \
     "${load_path_roots[@]}" "${dropin_dirs[@]}" "${unit_source_files[@]}" \
     "${union_unit_files[@]}"
-  require_secure_files "${home_dir}" "${contract_destinations[@]}" \
+  require_secure_files "${home_dir}" "${contract_destinations[@]}" "${workload_configuration_files[@]}" \
     "${declared_contracts[@]}"
   # DECLARED VARIABLES, default-deny, refused at validation time -- the only
   # moment early enough, since a shell or the loader acts on a hook before

@@ -16,6 +16,7 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=tools/versions.env
 source "${repo_root}/tools/versions.env"
+bash "${repo_root}/deploy/test-workload-podman-config.sh"
 
 # CTRL-007 configuration proof uses no container or service resources.
 bash "${repo_root}/deploy/test-notification-nat64.sh"

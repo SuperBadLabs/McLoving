@@ -61,6 +61,9 @@ pub struct AgentConfig {
     /// Absolute path of the deployment-pinned podman binary (PAR-011).
     /// Absent means this agent never advertises `container-podman-v1`.
     pub podman_path: Option<PathBuf>,
+    pub podman_config_path: Option<PathBuf>,
+    /// Resolved at session open, shared by the journal and every invocation.
+    pub podman_context: Option<mcloving_agent_runtime::executor::podman::PodmanContext>,
     pub agent_id: String,
     pub trust_pool: String,
     pub organization_id: String,
@@ -349,6 +352,11 @@ impl AgentConfig {
                 }
                 None => None,
             },
+            podman_config_path: values
+                .get("MCLOVING_AGENT_PODMAN_CONFIG_PATH")
+                .filter(|v| !v.trim().is_empty())
+                .map(PathBuf::from),
+            podman_context: None,
             podman_path,
             agent_id: required("MCLOVING_AGENT_ID")?,
             trust_pool: required("MCLOVING_AGENT_TRUST_POOL")?,
@@ -460,6 +468,9 @@ fn names_stale_session_epoch(error: &AgentError) -> bool {
 
 pub async fn probe_once(config: &AgentConfig) -> Result<SessionReceipt, AgentError> {
     let _instance = acquire_instance_guard(config)?;
+    let mut session_config = config.clone();
+    session_config.podman_context = container::resolve(config);
+    let config = &session_config;
     with_probe_timeout(PROBE_TIMEOUT, async {
         let stop = CancellationToken::new();
         let (mut client, mut receipt) = open_session(config, stop.clone()).await?;
@@ -512,6 +523,9 @@ fn instance_lock_path(journal_path: &Path) -> PathBuf {
 }
 
 async fn run_session(config: &AgentConfig, stop: CancellationToken) -> Result<(), AgentError> {
+    let mut session_config = config.clone();
+    session_config.podman_context = container::resolve(config);
+    let config = &session_config;
     let (mut client, receipt) = open_session(config, stop.clone()).await?;
     publish_recovery_ready_session_receipt(
         config.session_receipt_path.as_deref(),

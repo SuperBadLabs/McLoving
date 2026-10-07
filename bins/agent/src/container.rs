@@ -1,82 +1,160 @@
-//! Container stage support (PAR-011): the scheduling capability an agent
-//! advertises only when its deployment-pinned podman actually answers, and
-//! the recovery-time reap of a container whose client the agent lost.
-
-use std::path::Path;
+//! Container stage custody: a session resolves storage once, then every
+//! operation uses the exact journaled store and agent-owned configuration.
+use crate::AgentConfig;
+use mcloving_agent_runtime::executor::podman::{PodmanContext, validate_configuration};
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
-use crate::AgentConfig;
-
-const PINNED_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 const PROBE_DEADLINE: Duration = Duration::from_secs(10);
 const REAP_DEADLINE: Duration = Duration::from_secs(60);
+const MAX_INFO_BYTES: u64 = 65_536;
 
-/// `container-podman-v1` when a podman path is configured and `--version`
-/// succeeds within a bounded time under the same minimal environment the
-/// executor will give it; otherwise nothing, reported once per process.
 pub(crate) fn scheduling_capabilities(config: &AgentConfig) -> Vec<String> {
-    let Some(runtime) = &config.podman_path else {
-        return Vec::new();
-    };
-    if !cfg!(unix) {
-        return Vec::new();
-    }
-    if runtime_answers(runtime) {
+    if config.podman_context.is_some() {
         vec![mcloving_domain::container::CONTAINER_CAPABILITY.to_owned()]
     } else {
-        // Session opens repeat on every reconnect; the report is worth one
-        // line per process, not one per reconnect.
-        static REPORTED: std::sync::Once = std::sync::Once::new();
-        REPORTED.call_once(|| {
-            eprintln!(
-                "container runtime {} did not answer --version within {}s; \
-                 container-podman-v1 is not advertised",
-                runtime.display(),
-                PROBE_DEADLINE.as_secs()
-            );
-        });
         Vec::new()
     }
 }
-
-/// The name the executor gives step `ordinal` of `attempt_id`'s container.
 pub(crate) fn container_name(attempt_id: &str, ordinal: u32) -> String {
     format!("mcloving-{attempt_id}-{ordinal}")
 }
 
-/// Identity of the runtime and storage context a container is launched in:
-/// the pinned podman path plus the environment rootless podman keys its
-/// storage on. Recovery under a different context can only see a different
-/// store, so it must not claim anything about the original container.
-///
-/// Every field is the exact bytes of the value, hex-encoded, and an unset
-/// variable is recorded as unset rather than as empty: two distinct contexts
-/// cannot serialize alike through lossy UTF-8 replacement or a delimiter
-/// inside a value.
-pub(crate) fn runtime_context(runtime: &Path) -> String {
-    let hex = |value: &std::ffi::OsStr| {
-        value
-            .as_encoded_bytes()
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>()
-    };
-    let variable = |key: &str| match std::env::var_os(key) {
-        Some(value) => hex(&value),
-        None => "unset".to_owned(),
-    };
-    format!(
-        "v2|runtime={}|HOME={}|XDG_RUNTIME_DIR={}",
-        hex(runtime.as_os_str()),
-        variable("HOME"),
-        variable("XDG_RUNTIME_DIR")
-    )
+/// Discovery is the sole bootstrap command. Its info output selects the
+/// effective store; the confirming probe and all later commands pin it.
+pub(crate) fn resolve(config: &AgentConfig) -> Option<PodmanContext> {
+    if !cfg!(unix) {
+        return None;
+    }
+    let runtime = config.podman_path.as_deref()?;
+    let configuration = config.podman_config_path.as_deref()?;
+    resolve_runtime(runtime, configuration)
 }
 
-/// Whether a recovered attempt's container is proven gone: trivially so
-/// when it launched none; otherwise only when the current runtime context
-/// equals the journaled one and the reap's absence proof succeeds.
+fn resolve_runtime(runtime: &Path, configuration: &Path) -> Option<PodmanContext> {
+    validate_configuration(configuration).ok()?;
+    let mut context = PodmanContext {
+        graph_root: PathBuf::new(),
+        run_root: PathBuf::new(),
+        driver: String::new(),
+        storage_options: Vec::new(),
+        config_path: configuration.to_owned(),
+        home: std::env::var_os("HOME"),
+        runtime_dir: std::env::var_os("XDG_RUNTIME_DIR"),
+        user: std::env::var_os("USER"),
+        temporary_dir: std::env::var_os("TMPDIR"),
+    };
+    let mut command = Command::new(runtime);
+    command.env_clear().envs(context.environment());
+    // Discovery executes no workload and preserves the original HOME for
+    // default rootless storage selection. All confirming/workload/teardown
+    // commands use controlled HOME plus explicitly selected storage options.
+    if let Some(home) = &context.home {
+        command.env("HOME", home);
+    } else {
+        command.env_remove("HOME");
+    }
+    // Select the deployment's original rootless/user or system storage.conf.
+    let storage_file = std::env::var_os("CONTAINERS_STORAGE_CONF")
+        .map(PathBuf::from)
+        .or_else(|| {
+            let base = std::env::var_os("XDG_CONFIG_HOME")
+                .map(PathBuf::from)
+                .or_else(|| {
+                    context
+                        .home
+                        .as_ref()
+                        .map(|home| PathBuf::from(home).join(".config"))
+                })?;
+            let file = base.join("containers/storage.conf");
+            file.exists().then_some(file)
+        })
+        .or_else(|| {
+            Path::new("/etc/containers/storage.conf")
+                .exists()
+                .then(|| PathBuf::from("/etc/containers/storage.conf"))
+        });
+    if let Some(file) = storage_file {
+        command.env("CONTAINERS_STORAGE_CONF", file);
+    } else {
+        command.env_remove("CONTAINERS_STORAGE_CONF");
+    }
+    command
+        .args(["info", "--format", "json"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null());
+    let info = bounded_output(&mut command)?;
+    let value: serde_json::Value = serde_json::from_slice(&info).ok()?;
+    if value.pointer("/host/security/rootless")?.as_bool() != Some(true) {
+        return None;
+    }
+    let store = value.get("store")?;
+    let (root, runroot, driver, options) = parse_store(store)?;
+    context.graph_root = root;
+    context.run_root = runroot;
+    context.driver = driver;
+    context.storage_options = options;
+    // Root/driver flags discard ambient storage options. Prove that the
+    // explicitly supplied options open the identical store before advertising.
+    let confirmed: serde_json::Value = serde_json::from_slice(&bounded_output(
+        runtime_command(runtime, &context).args(["info", "--format", "json"]),
+    )?)
+    .ok()?;
+    if parse_store(confirmed.get("store")?)? != parse_store(store)? {
+        return None;
+    }
+    Some(context)
+}
+
+fn parse_store(store: &serde_json::Value) -> Option<(PathBuf, PathBuf, String, Vec<String>)> {
+    let root = PathBuf::from(store.get("graphRoot")?.as_str()?);
+    let runroot = PathBuf::from(store.get("runRoot")?.as_str()?);
+    let driver = store.get("graphDriverName")?.as_str()?.to_owned();
+    if !root.is_absolute()
+        || !runroot.is_absolute()
+        || driver.is_empty()
+        || driver.len() > 128
+        || !driver
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+        || store
+            .get("transientStore")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+    {
+        return None;
+    }
+    let mut options = Vec::new();
+    if let Some(value) = store.get("graphOptions")
+        && !value.is_null()
+    {
+        let map = value.as_object()?;
+        if map.len() > 32 {
+            return None;
+        }
+        for (key, value) in map {
+            if key.is_empty()
+                || key.len() > 128
+                || !key
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'))
+            {
+                return None;
+            }
+            let value = value
+                .as_str()
+                .or_else(|| value.get("Executable").and_then(|v| v.as_str()))?;
+            if value.len() > 4096 || value.contains(['\n', '\0']) {
+                return None;
+            }
+            options.push(format!("{key}={value}"));
+        }
+    }
+    options.sort();
+    Some((root, runroot, driver, options))
+}
+
 pub(crate) fn recovered_container_gone(
     config: &AgentConfig,
     attempt: &mcloving_agent_runtime::ReconciliationAttempt,
@@ -85,75 +163,48 @@ pub(crate) fn recovered_container_gone(
         return true;
     };
     let Some(runtime) = &config.podman_path else {
-        eprintln!(
-            "recovered attempt {}/{} fence {}: container {} cannot be reaped without a configured runtime",
-            attempt.organization_id, attempt.attempt_id, attempt.fence_token, name
-        );
         return false;
     };
-    let context = runtime_context(runtime);
-    if attempt.container_context.as_deref() != Some(context.as_str()) {
-        eprintln!(
-            "recovered attempt {}/{} fence {}: container {} was launched under runtime context {:?}, \
-             not the current {context:?}; absence cannot be proven here",
-            attempt.organization_id,
-            attempt.attempt_id,
-            attempt.fence_token,
-            name,
-            attempt.container_context.as_deref().unwrap_or("?")
-        );
+    // Re-resolve on each recovery pass. A cached session value cannot detect
+    // a later storage.conf edit, including while an agent remains connected.
+    let Some(current) = resolve(config) else {
+        return false;
+    };
+    if attempt.container_context.as_deref() != Some(current.identity(runtime).as_str()) {
+        eprintln!("recovered container {name}: effective store changed; absence unproven");
         return false;
     }
-    reap_recovered_container(runtime, name)
+    eprintln!(
+        "recovered container {name}: effective store matches journal; proving original-store absence"
+    );
+    reap_recovered_container(runtime, &current, name)
 }
-
-/// Removes a recovered attempt's container and proves it gone (PAR-011).
-///
-/// Restart recovery terminates the journaled process group, which is only
-/// the podman client; the container it started outlives that client. The
-/// journal recorded the container's name before the spawn, so only attempts
-/// that actually launched one reach here. Returns `true` only when
-/// `container exists` answers "no" afterwards; any other outcome leaves
-/// containment unverified and the caller parks the attempt.
-pub(crate) fn reap_recovered_container(runtime: &Path, name: &str) -> bool {
+fn reap_recovered_container(runtime: &Path, context: &PodmanContext, name: &str) -> bool {
+    if context.validate_configuration().is_err() {
+        return false;
+    }
     let removed = bounded_status(
-        runtime_command(runtime).args(["rm", "--force", "--time", "0", "--ignore", name]),
+        runtime_command(runtime, context).args(["rm", "--force", "--time", "0", "--ignore", name]),
         REAP_DEADLINE,
     );
-    if !removed.is_some_and(|status| status.success()) {
-        return false;
-    }
-    bounded_status(
-        runtime_command(runtime).args(["container", "exists", name]),
-        PROBE_DEADLINE,
-    )
-    .is_some_and(|status| status.code() == Some(1))
+    removed.is_some_and(|status| status.success())
+        && bounded_status(
+            runtime_command(runtime, context).args(["container", "exists", name]),
+            PROBE_DEADLINE,
+        )
+        .is_some_and(|status| status.code() == Some(1))
 }
-
-fn runtime_answers(runtime: &Path) -> bool {
-    bounded_status(runtime_command(runtime).arg("--version"), PROBE_DEADLINE)
-        .is_some_and(|status| status.success())
-}
-
-fn runtime_command(runtime: &Path) -> Command {
+fn runtime_command(runtime: &Path, context: &PodmanContext) -> Command {
     let mut command = Command::new(runtime);
     command
+        .args(context.arguments())
         .env_clear()
-        .env("PATH", PINNED_PATH)
-        .envs(std::env::vars_os().filter(|(key, _)| {
-            matches!(
-                key.to_str(),
-                Some("HOME" | "XDG_RUNTIME_DIR" | "USER" | "TMPDIR")
-            )
-        }))
+        .envs(context.environment())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     command
 }
-
-/// Runs a command with a hard deadline: a stalled runtime is killed and
-/// reported as no answer rather than blocking session open or recovery.
 fn bounded_status(command: &mut Command, deadline: Duration) -> Option<ExitStatus> {
     let mut child = command.spawn().ok()?;
     let started = Instant::now();
@@ -161,14 +212,9 @@ fn bounded_status(command: &mut Command, deadline: Duration) -> Option<ExitStatu
         match child.try_wait() {
             Ok(Some(status)) => return Some(status),
             Ok(None) if started.elapsed() < deadline => {
-                std::thread::sleep(Duration::from_millis(50));
+                std::thread::sleep(Duration::from_millis(25))
             }
-            Ok(None) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return None;
-            }
-            Err(_) => {
+            _ => {
                 let _ = child.kill();
                 let _ = child.wait();
                 return None;
@@ -176,67 +222,144 @@ fn bounded_status(command: &mut Command, deadline: Duration) -> Option<ExitStatu
         }
     }
 }
+fn bounded_output(command: &mut Command) -> Option<Vec<u8>> {
+    bounded_output_with_deadline(command, PROBE_DEADLINE)
+}
+
+fn bounded_output_with_deadline(command: &mut Command, deadline: Duration) -> Option<Vec<u8>> {
+    use std::io::Read;
+    command.stdout(Stdio::piped()).stderr(Stdio::null());
+    let mut child = command.spawn().ok()?;
+    let stdout = child.stdout.take()?;
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    let reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let result = stdout.take(MAX_INFO_BYTES + 1).read_to_end(&mut bytes);
+        let _ = sender.send((result, bytes));
+    });
+    let started = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => break,
+            Ok(None) if started.elapsed() < deadline => {
+                std::thread::sleep(Duration::from_millis(25))
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+    let (result, bytes) = receiver
+        .recv_timeout(deadline.saturating_sub(started.elapsed()))
+        .ok()?;
+    reader.join().ok()?;
+    if result.is_err() || bytes.len() as u64 > MAX_INFO_BYTES {
+        None
+    } else {
+        Some(bytes)
+    }
+}
 
 #[cfg(test)]
 mod tests {
-    #[cfg(unix)]
-    use super::bounded_status;
-    use super::{container_name, runtime_answers, runtime_context};
-    use std::path::Path;
-    #[cfg(unix)]
-    use std::process::Command;
-    #[cfg(unix)]
-    use std::time::Duration;
-
+    use super::*;
     #[test]
-    fn a_missing_runtime_does_not_answer() {
-        assert!(!runtime_answers(Path::new("/nonexistent/podman")));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn a_runtime_that_exits_nonzero_does_not_answer() {
-        assert!(!runtime_answers(Path::new("/bin/false")));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn a_runtime_that_exits_zero_answers() {
-        assert!(runtime_answers(Path::new("/bin/true")));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn a_stalled_runtime_is_killed_at_the_deadline() {
-        let started = std::time::Instant::now();
-        let status = bounded_status(
-            Command::new("/bin/sleep").arg("30"),
-            Duration::from_millis(300),
+    fn effective_store_preserves_mount_program_options_and_refuses_unknown_shapes() {
+        let root = tempfile::tempdir().unwrap();
+        let root_path = root.path().canonicalize().unwrap();
+        let graph_root = root_path.join("graph");
+        let run_root = root_path.join("run");
+        let mut store = serde_json::json!({
+            "graphRoot": graph_root,
+            "runRoot": run_root,
+            "graphDriverName": "overlay",
+            "graphOptions": {
+                "overlay.mount_program": {
+                    "Executable": "/usr/bin/fuse-overlayfs",
+                    "Version": "ignored presentation"
+                }
+            }
+        });
+        assert_eq!(
+            parse_store(&store).unwrap().3,
+            vec!["overlay.mount_program=/usr/bin/fuse-overlayfs"]
         );
-        assert!(status.is_none());
-        assert!(started.elapsed() < Duration::from_secs(5));
+        store["graphRoot"] = "relative".into();
+        assert!(parse_store(&store).is_none());
+        store["graphRoot"] = serde_json::json!(graph_root);
+        store["graphOptions"]["overlay.mount_program"] = serde_json::json!({"unknown":"value"});
+        assert!(parse_store(&store).is_none());
     }
-
-    /// PAR-011, from review. The context is compared byte-for-byte, so a
-    /// delimiter inside a value or a non-UTF-8 value must not collide with a
-    /// different context; the encoding is exact bytes, never lossy text.
-    #[test]
-    fn runtime_context_is_exact_bytes_with_no_delimiter_ambiguity() {
-        let context = runtime_context(Path::new("/usr/bin/pod|man"));
-        assert!(context.starts_with("v2|runtime=2f7573722f62696e2f706f647c6d616e|HOME="));
-        assert_eq!(context.matches('|').count(), 3);
-        assert!(context.contains("|XDG_RUNTIME_DIR="));
-        assert_ne!(
-            runtime_context(Path::new("/usr/bin/podman")),
-            runtime_context(Path::new("/usr/bin/podman ")),
-        );
-    }
-
     #[test]
     fn container_names_bind_attempt_and_step() {
-        assert_eq!(
-            container_name("2b3a5a1e-0000-4000-8000-000000000001", 2),
-            "mcloving-2b3a5a1e-0000-4000-8000-000000000001-2"
+        assert_eq!(container_name("attempt", 2), "mcloving-attempt-2");
+    }
+    #[cfg(unix)]
+    fn fake_runtime(script: &str) -> (tempfile::TempDir, PathBuf, PathBuf) {
+        use mcloving_agent_runtime::executor::podman::{
+            CONTAINERS_CONFIGURATION, STORAGE_CONFIGURATION,
+        };
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("controlled");
+        std::fs::create_dir_all(dir.join(".config/containers")).unwrap();
+        for ancestor in dir
+            .join(".config/containers")
+            .ancestors()
+            .take_while(|p| p.starts_with(root.path()))
+        {
+            std::fs::set_permissions(ancestor, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        for (path, bytes) in [
+            (dir.join("containers.conf"), CONTAINERS_CONFIGURATION),
+            (dir.join("storage.conf"), STORAGE_CONFIGURATION),
+            (dir.join(".config/containers/mounts.conf"), b"".as_slice()),
+        ] {
+            std::fs::write(&path, bytes).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400)).unwrap();
+        }
+        let runtime = root.path().join("runtime");
+        std::fs::write(&runtime, format!("#!/bin/sh\n{script}\n")).unwrap();
+        std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o700)).unwrap();
+        (root, runtime, dir.join("containers.conf"))
+    }
+    #[cfg(unix)]
+    #[test]
+    fn discovery_refuses_missing_and_nonzero_runtimes() {
+        let (_root, runtime, config) = fake_runtime("exit 1");
+        assert!(resolve_runtime(&runtime, &config).is_none());
+        assert!(resolve_runtime(Path::new("/nonexistent/podman"), &config).is_none());
+    }
+    #[cfg(unix)]
+    #[test]
+    fn discovery_refuses_malformed_info_and_oversize_output() {
+        let (_root, runtime, config) = fake_runtime("printf not-json");
+        assert!(resolve_runtime(&runtime, &config).is_none());
+        let (_root, runtime, config) = fake_runtime("head -c 65537 /dev/zero");
+        assert!(resolve_runtime(&runtime, &config).is_none());
+    }
+    #[cfg(unix)]
+    #[test]
+    fn discovery_confirms_an_effective_rootless_store_before_advertising() {
+        let (_root, runtime, config) = fake_runtime(
+            r#"printf '%s' '{"host":{"security":{"rootless":true}},"store":{"graphRoot":"/private/graph","runRoot":"/private/run","graphDriverName":"vfs","graphOptions":{}}}'"#,
         );
+        let context = resolve_runtime(&runtime, &config).unwrap();
+        assert_eq!(context.graph_root, Path::new("/private/graph"));
+        assert_eq!(context.run_root, Path::new("/private/run"));
+        assert_eq!(context.driver, "vfs");
+    }
+    #[cfg(unix)]
+    #[test]
+    fn a_stalled_discovery_is_killed_at_the_deadline() {
+        let (_root, runtime, _config) = fake_runtime("exec sleep 30");
+        let started = Instant::now();
+        assert!(
+            bounded_output_with_deadline(&mut Command::new(runtime), Duration::from_millis(300))
+                .is_none()
+        );
+        assert!(started.elapsed() < Duration::from_secs(5));
     }
 }
