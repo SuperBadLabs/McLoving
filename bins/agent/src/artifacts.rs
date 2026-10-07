@@ -16,9 +16,9 @@ use std::os::fd::OwnedFd;
 use std::path::Path;
 
 use mcloving_domain::artifacts::{
-    ArtifactSpec, MAX_ARTIFACT_FILES_PER_ATTEMPT, MAX_ARTIFACT_OBJECT_NAME_BYTES,
-    MAX_ARTIFACT_WALK_DEPTH, MAX_ARTIFACT_WALK_ENTRIES, MAX_ATTEMPT_ARTIFACT_BYTES,
-    pattern_may_descend,
+    ArtifactSpec, CompiledArtifacts, MAX_ARTIFACT_FILES_PER_ATTEMPT, MAX_ARTIFACT_MATCHING_CELLS,
+    MAX_ARTIFACT_OBJECT_NAME_BYTES, MAX_ARTIFACT_WALK_DEPTH, MAX_ARTIFACT_WALK_ENTRIES,
+    MAX_ATTEMPT_ARTIFACT_BYTES, MatchingBudget,
 };
 use nix::dir::Dir;
 use nix::fcntl::{AtFlags, OFlag, openat};
@@ -29,19 +29,25 @@ use nix::sys::stat::{FileStat, fstat, fstatat};
 const AGENT_SPOOL_DIRECTORY: &str = "spool";
 
 /// One regular file to upload: the object name it registers under, its
-/// length as identified at open, and the opened descriptor.
+/// length and inode identity. No descriptor is retained by collection.
 #[derive(Debug)]
 pub struct CollectedFile {
     pub name: String,
     pub relative_path: String,
     pub bytes: u64,
-    pub file: File,
+    pub device: u64,
+    pub inode: u64,
+    pub workspace_device: u64,
+    pub workspace_inode: u64,
 }
 
 /// Why a declared set is not collected. Every variant names its offender,
 /// so the attempt's failure reason says which path or bound refused it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CollectionRefusal {
+    MatchingBudget,
+    Cancelled,
+    ChangedLength(String),
     /// A link the declarations would collect or descend into, or a link
     /// standing where the attempt workspace itself should be.
     Link(String),
@@ -71,6 +77,9 @@ pub enum CollectionRefusal {
 impl fmt::Display for CollectionRefusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::MatchingBudget => write!(f, "artifact_refused:matching_budget"),
+            Self::Cancelled => write!(f, "artifact_collection_cancelled"),
+            Self::ChangedLength(path) => write!(f, "artifact_refused:changed_length:{path}"),
             Self::Link(path) => write!(f, "artifact_refused:link:{path}"),
             Self::NotRegular(path) => write!(f, "artifact_refused:not_regular:{path}"),
             Self::IdentityChanged(path) => {
@@ -116,7 +125,12 @@ impl From<CollectionRefusal> for CollectionError {
 }
 
 struct Walk<'a> {
-    specs: &'a [ArtifactSpec],
+    compiled: &'a CompiledArtifacts,
+    cancellation: &'a tokio_util::sync::CancellationToken,
+    budget: MatchingBudget,
+    workspace_identity: (u64, u64),
+    #[cfg(test)]
+    cancel_after_entries: Option<usize>,
     files: Vec<CollectedFile>,
     bytes: u64,
     entries: usize,
@@ -126,11 +140,47 @@ struct Walk<'a> {
 /// declaration matches. The agent-owned `workspace_root` is opened by path
 /// once, without following a link; the attempt workspace below it and
 /// everything under that are reached descriptor-relative with `O_NOFOLLOW`.
+#[cfg(test)]
 pub fn collect(
     workspace_root: &Path,
     workspace: &Path,
     specs: &[ArtifactSpec],
 ) -> Result<Vec<CollectedFile>, CollectionError> {
+    collect_cancellable(
+        workspace_root,
+        workspace,
+        specs,
+        &tokio_util::sync::CancellationToken::new(),
+    )
+}
+pub fn collect_cancellable(
+    workspace_root: &Path,
+    workspace: &Path,
+    specs: &[ArtifactSpec],
+    cancellation: &tokio_util::sync::CancellationToken,
+) -> Result<Vec<CollectedFile>, CollectionError> {
+    let root = open_workspace(workspace_root, workspace)?;
+    let identity = fstat(&root)?;
+    let compiled = CompiledArtifacts::new(specs);
+    let mut walk = Walk {
+        compiled: &compiled,
+        cancellation,
+        budget: MatchingBudget::new(MAX_ARTIFACT_MATCHING_CELLS),
+        workspace_identity: (identity.st_dev, identity.st_ino),
+        #[cfg(test)]
+        cancel_after_entries: None,
+        files: Vec::new(),
+        bytes: 0,
+        entries: 0,
+    };
+    walk_directory(&mut walk, &root, "", 0)?;
+    // Deterministic upload order, and a stable name for the first refusal
+    // a reviewer sees in the attempt's reason.
+    walk.files.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(walk.files)
+}
+
+fn open_workspace(workspace_root: &Path, workspace: &Path) -> Result<OwnedFd, CollectionError> {
     let mut root = open_directory_by_path(workspace_root)?;
     let mut reached = String::new();
     for component in workspace.components() {
@@ -168,17 +218,47 @@ pub fn collect(
             }
         };
     }
-    let mut walk = Walk {
-        specs,
-        files: Vec::new(),
-        bytes: 0,
-        entries: 0,
-    };
-    walk_directory(&mut walk, &root, "", 0)?;
-    // Deterministic upload order, and a stable name for the first refusal
-    // a reviewer sees in the attempt's reason.
-    walk.files.sort_by(|a, b| a.name.cmp(&b.name));
-    Ok(walk.files)
+    Ok(root)
+}
+/// Reopen only the active upload, anchored to the re-identified workspace.
+pub fn reopen(
+    workspace_root: &Path,
+    workspace: &Path,
+    record: &CollectedFile,
+) -> Result<File, CollectionError> {
+    let mut directory = open_workspace(workspace_root, workspace)?;
+    let stat = fstat(&directory)?;
+    if (stat.st_dev, stat.st_ino) != (record.workspace_device, record.workspace_inode) {
+        return Err(CollectionRefusal::IdentityChanged(record.relative_path.clone()).into());
+    }
+    let segments: Vec<&str> = record.relative_path.split('/').collect();
+    for segment in &segments[..segments.len() - 1] {
+        let raw = std::ffi::CString::new(*segment)
+            .map_err(|_| std::io::Error::other("invalid artifact path"))?;
+        directory = openat(
+            &directory,
+            raw.as_c_str(),
+            OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+            nix::sys::stat::Mode::empty(),
+        )
+        .map_err(|e| CollectionRefusal::Unreadable(record.relative_path.clone(), e.to_string()))?;
+    }
+    let raw = std::ffi::CString::new(
+        *segments
+            .last()
+            .ok_or_else(|| std::io::Error::other("empty artifact path"))?,
+    )
+    .map_err(|_| std::io::Error::other("invalid artifact path"))?;
+    let fd = open_regular(&directory, raw.as_c_str())
+        .map_err(|e| CollectionRefusal::Unreadable(record.relative_path.clone(), e.to_string()))?;
+    let stat = fstat(&fd)?;
+    if !is_regular(&stat) || (stat.st_dev, stat.st_ino) != (record.device, record.inode) {
+        return Err(CollectionRefusal::IdentityChanged(record.relative_path.clone()).into());
+    }
+    if u64::try_from(stat.st_size).unwrap_or(u64::MAX) != record.bytes {
+        return Err(CollectionRefusal::ChangedLength(record.relative_path.clone()).into());
+    }
+    Ok(File::from(fd))
 }
 
 fn walk_directory(
@@ -195,6 +275,13 @@ fn walk_directory(
         ))
     };
     for entry in reader.iter() {
+        #[cfg(test)]
+        if walk.cancel_after_entries == Some(walk.entries) {
+            walk.cancellation.cancel();
+        }
+        if walk.cancellation.is_cancelled() {
+            return Err(CollectionRefusal::Cancelled.into());
+        }
         let entry = entry.map_err(|error| unreadable(prefix, error))?;
         let raw_name = entry.file_name();
         if raw_name.to_bytes() == b"." || raw_name.to_bytes() == b".." {
@@ -213,12 +300,19 @@ fn walk_directory(
         if depth == 0 && display_name == AGENT_SPOOL_DIRECTORY {
             continue;
         }
-        let collects = walk.specs.iter().any(|spec| spec.matches(&path));
-        let descends = walk.specs.iter().any(|spec| {
-            spec.paths
-                .iter()
-                .any(|pattern| pattern_may_descend(pattern, &path))
-        });
+        let (matched, descends) = walk
+            .compiled
+            .classify(&path, &mut walk.budget)
+            .map_err(|_| CollectionRefusal::MatchingBudget)?;
+        // Test-owned observation interrupts a removed-budget mutant after one
+        // finite entry; it cannot run the entire10^11-cell workload. This is an
+        // assertion only in the agent test build, never a production bypass.
+        #[cfg(test)]
+        assert!(
+            walk.budget.spent() <= 8_388_608,
+            "aggregate matching exceeded original allowed charged-cell/token budget"
+        );
+        let collects = !matched.is_empty();
         // An entry whose name is not UTF-8 has no exact object name: if a
         // declaration would collect it or look below it, the set is refused
         // before anything is matched against its lossy spelling; otherwise
@@ -264,26 +358,21 @@ fn walk_directory(
         if !is_regular(&stat) {
             return Err(CollectionRefusal::NotRegular(path).into());
         }
-        let opened = open_regular(directory, raw_name).map_err(|error| unreadable(&path, error))?;
-        let opened_stat = fstat(&opened).map_err(|error| unreadable(&path, error))?;
-        if !same_identity(&stat, &opened_stat) || !is_regular(&opened_stat) {
-            return Err(CollectionRefusal::IdentityChanged(path).into());
-        }
-        let bytes = u64::try_from(opened_stat.st_size).unwrap_or(u64::MAX);
+        let bytes = u64::try_from(stat.st_size).unwrap_or(u64::MAX);
         // One object per declaration that matches: declarations may
         // overlap on purpose, and the object's identity includes the
         // declaration's name, so each emitted object counts against the
-        // file and byte bounds. Each object gets its own open file
-        // description (a duplicated descriptor would share one offset) and
-        // is re-identified against the walk's entry like the first.
+        // file and byte bounds. Each upload later reopens its own file
+        // description and re-identifies it against this metadata; collection
+        // keeps no regular-file descriptor.
         // The object name must satisfy the controller's rules before a byte
         // is sent: a name it would refuse is a named refusal here, not an
         // RPC failure that ends the session.
         if path.chars().any(char::is_control) {
             return Err(CollectionRefusal::UnnameableEntry(path).into());
         }
-        for spec in walk.specs.iter().filter(|spec| spec.matches(&path)) {
-            let name = format!("{}/{path}", spec.name);
+        for declaration in matched {
+            let name = format!("{declaration}/{path}");
             if name.len() > MAX_ARTIFACT_OBJECT_NAME_BYTES {
                 return Err(CollectionRefusal::NameTooLong(path).into());
             }
@@ -294,22 +383,14 @@ fn walk_directory(
             if walk.bytes > MAX_ATTEMPT_ARTIFACT_BYTES {
                 return Err(CollectionRefusal::TooManyBytes(walk.bytes).into());
             }
-            let file = if walk.files.iter().any(|file| file.relative_path == path) {
-                let again =
-                    open_regular(directory, raw_name).map_err(|error| unreadable(&path, error))?;
-                let again_stat = fstat(&again).map_err(|error| unreadable(&path, error))?;
-                if !same_identity(&stat, &again_stat) || !is_regular(&again_stat) {
-                    return Err(CollectionRefusal::IdentityChanged(path).into());
-                }
-                File::from(again)
-            } else {
-                File::from(opened.try_clone()?)
-            };
             walk.files.push(CollectedFile {
                 name,
                 relative_path: path.clone(),
                 bytes,
-                file,
+                device: stat.st_dev,
+                inode: stat.st_ino,
+                workspace_device: walk.workspace_identity.0,
+                workspace_inode: walk.workspace_identity.1,
             });
         }
     }
@@ -455,8 +536,11 @@ mod tests {
             ]
         );
         let mut content = String::new();
-        let mut first = files.into_iter().next().unwrap();
-        first.file.read_to_string(&mut content).unwrap();
+        let first = files.into_iter().next().unwrap();
+        reopen(directory.path(), Path::new(WORKSPACE), &first)
+            .unwrap()
+            .read_to_string(&mut content)
+            .unwrap();
         assert_eq!(content, "top");
         assert_eq!(first.bytes, 3);
         assert_eq!(first.relative_path, "target/build.log");
@@ -573,7 +657,12 @@ mod tests {
             std::os::unix::fs::PermissionsExt::from_mode(0o000),
         )
         .unwrap();
-        let error = collect_in(&directory, &[spec("reports", &["other/*"])]).unwrap_err();
+        let files = collect_in(&directory, &[spec("reports", &["other/*"])]).unwrap();
+        let record = files
+            .iter()
+            .find(|f| f.relative_path == "other/secret.xml")
+            .unwrap();
+        let error = reopen(directory.path(), Path::new(WORKSPACE), record).unwrap_err();
         assert!(
             matches!(
                 &error,
@@ -632,9 +721,12 @@ mod tests {
         // Every emitted object reads its whole file: the descriptors do not
         // share an offset, so the second declaration's upload sees the same
         // bytes the first did.
-        for mut file in files {
+        for file in files {
             let mut content = Vec::new();
-            file.file.read_to_end(&mut content).unwrap();
+            reopen(directory.path(), Path::new(WORKSPACE), &file)
+                .unwrap()
+                .read_to_end(&mut content)
+                .unwrap();
             assert_eq!(content.len() as u64, file.bytes, "{}", file.name);
             assert!(!content.is_empty(), "{}", file.name);
         }
@@ -683,5 +775,141 @@ mod tests {
             error,
             CollectionError::Refused(CollectionRefusal::NameTooLong(_))
         ));
+    }
+}
+
+#[cfg(test)]
+mod agent012_proofs {
+    use super::*;
+    use tokio_util::sync::CancellationToken;
+    const WORKSPACE: &str = "org/attempt/1";
+    #[test]
+    fn legal_maxima_16_by_32_patterns_and_65536_entries_refuse_within_budget() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut leaf = tmp.path().join(WORKSPACE);
+        std::fs::create_dir_all(&leaf).unwrap();
+        // 31 directories plus 65,505 files = 65,536 legal walked entries;
+        // leaf files have exactly 32 path segments.
+        for _ in 0..31 {
+            leaf = leaf.join("x");
+            std::fs::create_dir(&leaf).unwrap();
+        }
+        for i in 0..(MAX_ARTIFACT_WALK_ENTRIES - 31) {
+            std::fs::write(leaf.join(format!("f{i}")), []).unwrap();
+        }
+        let mut pattern = String::from("**/x");
+        while pattern.len() + 5 <= 512 {
+            pattern.push_str("/**/x");
+        }
+        assert!(pattern.len() + 5 > 512);
+        mcloving_domain::artifacts::validate_pattern(&pattern).unwrap();
+        let specs = (0..16)
+            .map(|i| ArtifactSpec {
+                name: format!("set{i}"),
+                paths: vec![pattern.clone(); 32],
+            })
+            .collect::<Vec<_>>();
+        let started = std::time::Instant::now();
+        let error = collect(tmp.path(), Path::new(WORKSPACE), &specs).unwrap_err();
+        assert!(matches!(
+            error,
+            CollectionError::Refused(CollectionRefusal::MatchingBudget)
+        ));
+        assert_eq!(
+            CollectionRefusal::MatchingBudget.to_string(),
+            "artifact_refused:matching_budget"
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(30));
+    }
+    #[test]
+    fn execution_cancellation_stops_before_second_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join(WORKSPACE);
+        std::fs::create_dir_all(&root).unwrap();
+        for name in ["a", "b", "c"] {
+            std::fs::write(root.join(name), b"data").unwrap();
+        }
+        let fd = open_workspace(tmp.path(), Path::new(WORKSPACE)).unwrap();
+        let stat = fstat(&fd).unwrap();
+        let specs = [ArtifactSpec {
+            name: "all".into(),
+            paths: vec!["**".into()],
+        }];
+        let compiled = CompiledArtifacts::new(&specs);
+        let token = CancellationToken::new();
+        let mut walk = Walk {
+            compiled: &compiled,
+            cancellation: &token,
+            budget: MatchingBudget::new(MAX_ARTIFACT_MATCHING_CELLS),
+            workspace_identity: (stat.st_dev, stat.st_ino),
+            files: Vec::new(),
+            bytes: 0,
+            entries: 0,
+            cancel_after_entries: Some(1),
+        };
+        assert!(
+            matches!(
+                walk_directory(&mut walk, &fd, "", 0),
+                Err(CollectionError::Refused(CollectionRefusal::Cancelled))
+            ),
+            "walk consumed another entry after execution cancellation"
+        );
+        assert_eq!(walk.entries, 1);
+        assert_eq!(walk.files.len(), 1);
+    }
+    #[test]
+    fn reopen_refuses_a_replaced_inode_and_a_link_to_external_bytes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join(WORKSPACE);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("x"), b"before").unwrap();
+        let specs = [ArtifactSpec {
+            name: "all".into(),
+            paths: vec!["**".into()],
+        }];
+        let record = collect(tmp.path(), Path::new(WORKSPACE), &specs)
+            .unwrap()
+            .remove(0);
+        std::fs::rename(root.join("x"), root.join("old")).unwrap();
+        std::fs::write(root.join("x"), b"after!").unwrap();
+        assert!(matches!(
+            reopen(tmp.path(), Path::new(WORKSPACE), &record),
+            Err(CollectionError::Refused(
+                CollectionRefusal::IdentityChanged(_)
+            ))
+        ));
+        std::fs::remove_file(root.join("x")).unwrap();
+        std::os::unix::fs::symlink(root.join("old"), root.join("x")).unwrap();
+        assert!(reopen(tmp.path(), Path::new(WORKSPACE), &record).is_err());
+    }
+    #[test]
+    fn collect_1024_files_under_soft_descriptor_limit_1024() {
+        if std::env::var("MCLOVING_ARTIFACT_FD_DRIVER").as_deref() != Ok("1") {
+            let status=std::process::Command::new("/bin/sh").arg("-c").arg("ulimit -n 1024; exec \"$1\" \"$2\" --exact --nocapture").arg("agent012-fd-proof").arg(std::env::current_exe().unwrap()).arg("artifacts::agent012_proofs::collect_1024_files_under_soft_descriptor_limit_1024").env("MCLOVING_ARTIFACT_FD_DRIVER","1").output().unwrap();
+            assert!(
+                status.status.success(),
+                "FD child failed: {} {}",
+                String::from_utf8_lossy(&status.stdout),
+                String::from_utf8_lossy(&status.stderr)
+            );
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join(WORKSPACE);
+        std::fs::create_dir_all(&root).unwrap();
+        for i in 0..1024 {
+            std::fs::write(root.join(format!("f{i}")), b"x").unwrap();
+        }
+        let specs = [ArtifactSpec {
+            name: "all".into(),
+            paths: vec!["**".into()],
+        }];
+        let files = collect(tmp.path(), Path::new(WORKSPACE), &specs).unwrap();
+        assert_eq!(files.len(), 1024);
+        for record in files {
+            let file = reopen(tmp.path(), Path::new(WORKSPACE), &record).unwrap();
+            assert_eq!(file.metadata().unwrap().len(), 1);
+            drop(file);
+        }
     }
 }

@@ -16,7 +16,7 @@ service AgentControl {
   rpc CompleteWork(WorkCompletion) returns (WorkReceipt);
   // One declared artifact file (PAR-014): a header frame naming the object,
   // its length and digest under the attempt's work authority, then data
-  // frames in order. Only sent when artifact-upload-v1 was negotiated. The
+  // frames and explicit object-end, under negotiated artifact-set-v2. The
   // receipt's `accepted` is false when the attempt's fenced authority no
   // longer admits the registration.
   rpc UploadArtifact(stream ArtifactUploadFrame) returns (WorkReceipt);
@@ -26,6 +26,10 @@ message ArtifactUploadFrame {
   oneof frame {
     ArtifactUploadHeader header = 1;
     bytes data = 2;
+    ArtifactSetBegin begin_set = 3;
+    ArtifactSetControl commit_set = 4;
+    ArtifactSetControl abort_set = 5;
+    ArtifactObjectEnd object_end = 6;
   }
 }
 
@@ -36,7 +40,15 @@ message ArtifactUploadHeader {
   string media_type = 3;
   uint64 bytes = 4;
   bytes sha256 = 5;
+  bytes set_id = 6;
 }
+
+// All v2 operations use the existing authenticated artifact stream. No implicit
+// object-end: a zero-byte source must complete its growth probe successfully.
+message ArtifactObjectEnd {}
+message ArtifactManifestMember { string name = 1; uint64 bytes = 2; string media_type = 3; }
+message ArtifactSetBegin { WorkAuthority authority = 1; bytes set_id = 2; repeated ArtifactManifestMember members = 3; }
+message ArtifactSetControl { WorkAuthority authority = 1; bytes set_id = 2; uint64 bytes = 3; }
 
 message ProtocolOffer {
   uint32 major = 1;

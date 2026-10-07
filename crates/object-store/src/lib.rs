@@ -601,6 +601,24 @@ impl FilesystemObjectStore {
         Ok(())
     }
 
+    /// Idempotent abort of either durable token spelling. Never touches CAS.
+    /// A crashed receiver/abort can be retried without needing bytes to exist.
+    pub fn abort_existing_pending(&self, pending: &PendingObject) -> Result<(), ObjectStoreError> {
+        validate_pending_token(&pending.token)?;
+        let _lock = self.lock_quota()?;
+        for path in [
+            self.staging.join(&pending.token),
+            self.claimed_path(&pending.token),
+        ] {
+            match fs::remove_file(&path) {
+                Ok(()) => sync_directory(&self.staging)?,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Ok(())
+    }
+
     /// Reclaims crash-abandoned staging reservations older than `minimum_age`.
     ///
     /// Operators must choose an age greater than the longest permitted
@@ -1592,5 +1610,66 @@ mod tests {
             store.stage_artifact("../escape", b"no"),
             Err(ObjectStoreError::InvalidNamespace)
         ));
+    }
+}
+
+#[cfg(test)]
+mod agent012_tests {
+    use super::*;
+    #[test]
+    fn exact_pending_retry_at_total_quota_never_needs_second_copy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = FilesystemObjectStore::open(
+            tmp.path(),
+            Quota {
+                max_object_bytes: 8,
+                max_total_bytes: 8,
+                max_staged_objects: 4,
+            },
+        )
+        .unwrap();
+        let pending = store
+            .stage_artifact("tenant", b"12345678")
+            .unwrap()
+            .persist()
+            .unwrap();
+        let pending = store.claim_pending(&pending).unwrap();
+        assert!(matches!(
+            store.begin_artifact("tenant", 8),
+            Err(ObjectStoreError::TotalQuotaExceeded)
+        ));
+        let reopened = FilesystemObjectStore::open(tmp.path(), store.quota()).unwrap();
+        let retry = reopened.claim_pending(&pending).unwrap();
+        assert_eq!(retry.token(), pending.token());
+        let reference = reopened.commit_pending(retry).unwrap();
+        let retry = reopened.claim_pending(&pending).unwrap();
+        assert_eq!(reopened.commit_pending(retry).unwrap(), reference);
+        assert_eq!(reopened.read_verified(&reference).unwrap(), b"12345678");
+    }
+    #[test]
+    fn refused_batch_claim_cleanup_is_idempotent_and_preserves_shared_immutable_bytes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = FilesystemObjectStore::open(
+            tmp.path(),
+            Quota {
+                max_object_bytes: 8,
+                max_total_bytes: 32,
+                max_staged_objects: 4,
+            },
+        )
+        .unwrap();
+        let shared = store
+            .commit(store.stage_artifact("public", b"abc").unwrap())
+            .unwrap();
+        let pending = store
+            .stage_artifact("failed-set", b"abc")
+            .unwrap()
+            .persist()
+            .unwrap();
+        let pending = store.claim_pending(&pending).unwrap();
+        store.abort_existing_pending(&pending).unwrap();
+        store.abort_existing_pending(&pending).unwrap();
+        assert_eq!(store.read_verified(&shared).unwrap(), b"abc");
+        assert_eq!(staged_bytes(&store.staging).unwrap(), 0);
     }
 }

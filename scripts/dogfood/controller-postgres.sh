@@ -53,7 +53,7 @@ bash scripts/run-verified-rust-test.sh 2 capability-vocabulary --require-postgre
 cargo "+${RUST_TOOLCHAIN}" build --locked -p mcloving-controller -p mcloving-cache -p mcloving-input-adapter
 export MCLOVING_CONTROLLER_BINARY="${dogfood_repo}/target/debug/mcloving-controller"
 export MCLOVING_TEST_PODMAN=1
-bash scripts/run-verified-rust-test.sh 9 remote-work --require-postgres \
+bash scripts/run-verified-rust-test.sh 13 remote-work --require-postgres \
   cargo "+${RUST_TOOLCHAIN}" test --locked -p mcloving-agent --test remote_work -- --test-threads=1
 bash scripts/run-verified-rust-test.sh 1 identity-collision --require-postgres \
   cargo "+${RUST_TOOLCHAIN}" test --locked -p mcloving-agent --test identity_collision -- --test-threads=1
