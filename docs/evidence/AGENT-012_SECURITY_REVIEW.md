@@ -240,3 +240,149 @@ runtime/native/process fixtures/PG/Podman/Git ran. Full original19/four order/
 all25 controls and remote13 remain, native positive/RED/restored/full root
 review and separate protected standalone publication owed. Historical prefixes,
 inputs, negatives and intermediate source snapshots remain untouched.
+
+
+## Full implementation closure review observation (2026-10-07 UTC)
+
+The original AGENT-012 acceptance is retained in full. This receipt closes the
+artifact matching, collection, upload and whole-set publication work described
+by its literal board row; it does not narrow that row to the collector alone.
+Protected implementation PR [#186](https://github.com/SuperBadLabs/McLoving/pull/186)
+merged as `342e3348313f1d35805542f5cfb95ba8615896b7`. At the dated observation
+above, that implementation passed push Foundation
+[37590001445](https://github.com/SuperBadLabs/McLoving/actions/runs/37590001445)
+(attempt 2 reran only the failed history scan and aggregate) and actual native
+Windows [37590001554](https://github.com/SuperBadLabs/McLoving/actions/runs/37590001554).
+The historical scan failure matched old harmless prose in a previously fetched
+topic commit; its actual negative remains retained and no scanner rule changed.
+At the later observed protected commit
+`a00c1b8f26d96cd10d9dd58ff744556f4c95a2dc`, all twenty-six artifact paths outside
+this four-file closure set were byte-identical to the independently reviewed
+standalone source. Foundation
+[37595610196](https://github.com/SuperBadLabs/McLoving/actions/runs/37595610196),
+Windows [37595610108](https://github.com/SuperBadLabs/McLoving/actions/runs/37595610108)
+and isolated Linux [37598040483](https://github.com/SuperBadLabs/McLoving/actions/runs/37598040483)
+succeeded. The Windows agent job actually executed all twenty-three steps,
+including debug and release service/crash-recovery gates; no classifier skip
+substitutes for that native observation.
+
+### Original acceptance and adverse witnesses
+
+Patterns compile once per stage. Literal matcher cells/tokens share a bounded
+attempt budget and return the named matching refusal; execution cancellation
+is checked between entries. The legal sixteen-by-thirty-two maximal-pattern
+matrix over 65,536 entries is tested against the original charged bound.
+Collected empty files receive a post-collection/opened-file growth probe and
+named changed_length refusal. The collector records identity, reopens and
+reidentifies one descriptor for each upload, and succeeds for 1,024 files
+under the real soft descriptor limit of 1,024; the service declares that limit.
+Digest reads check execution and authority cancellation. Reader joins remain
+bounded while retaining descriptor/workspace custody until a stalled read ends.
+
+Controller frame writes and final fsync run on the blocking pool. A pending set
+does not expose individual members; availability commits the whole declared
+set atomically, and late unreadable or changed-length members abort it. One
+end-to-end authority deadline includes receive, finish, registration and
+availability; the actual delayed registration test retains its original
+35-second delay, 32-second lease assertion and 90-second completion bound.
+The store and in-flight ledger hand off each charge exactly once: actual
+concurrent 128 MiB members fit the 256 MiB reservation. Object/store quota
+ResourceExhausted answers become named artifact refusals while the same agent
+session remains available. Exact available/pending retries reuse the existing
+physical claim or recognize its committed digest at full physical capacity;
+uncertain registration retains its pending custody rather than deleting it.
+
+The full requirement-to-source/driver/edit matrix remains
+`docs/evidence/agent012-source-candidate/proof-map.json`. The following original
+clause identities and diagnostics bind the actual reviewed campaign:
+
+| Original clause | Named guard driver | Required semantic RED diagnostic |
+|---|---|---|
+| `compiled_patterns` | `shared_patterns_charge_matching_and_descent_without_recompilation` | `matching/descent recompiled a pattern` |
+| `aggregate_matching_budget` | `literal_token_backtracking_cannot_bypass_aggregate_budget` | `literal token matcher failed to refuse exhausted aggregate budget` |
+| `walk_cancellation` | `execution_cancellation_stops_before_second_entry` | `walk consumed another entry after execution cancellation` |
+| `zero_byte_growth` | `zero_byte_append_after_digest_refuses_before_object_end` | `zero byte stream accepted growth instead of changed_length` |
+| `descriptor_bound` | `collect_1024_files_under_soft_descriptor_limit_1024` | `FD child failed:.*(Too many open files\|EMFILE)` |
+| `deployment_descriptor_limit` | `deployment_declares_descriptor_headroom` | `deployment descriptor limit lost required1024 soft descriptors` |
+| `blocking_finalization` | `actual_zero_byte_finish_runs_off_runtime_thread` | `actual finish moved back onto the runtime worker` |
+| `whole_set_atomicity` | `agent012_all_members_hidden_until_atomic_batch_commit_and_legacy_cannot_publish_one` | `pending batch member became visible before whole-set commit` |
+| `digest_cancellation` | `digest_observes_execution_and_authority_between_actual_reads` | `digest consumed beyond execution/authority cancellation` |
+| `deadline_headroom` | `registration_after_receive_budget_keeps_actual_rpc_and_lease_alive` | `AGENT012_ARTIFACT_RPC_HEADROOM_EXPIRED: actual authority RPC deadline ended delayed registration` |
+| `bounded_reader_join` | `stalled_read_keeps_fd_permit_workspace_and_durable_park_until_completion` | `bounded reader join did not return while owned file stalled` |
+| `blocking_frame_writes` | `actual_writer_and_finish_leave_runtime_progress_available` | `actual write/finish moved back onto the runtime worker` |
+| `quota_ledger_handoff` | `agent012_two_128_mib_members_fit_once_and_concurrent_exact_retry_serializes` | `registered members were counted twice against whole-set reservation` |
+| `named_object_quota_refusal` | `physical_object_and_total_quota_answers_stay_resource_exhausted` | `physical object quota must map to ResourceExhausted` |
+| `available_exact_retry` | `artifact_object_and_total_quota_refusals_keep_same_session_available` | `pending replay must recover exact claim at full physical quota` |
+| `pending_exact_retry_custody` | `artifact_object_and_total_quota_refusals_keep_same_session_available` | `pending replay must recover exact claim at full physical quota` |
+| `proof_matching_maxima` | `legal_maxima_16_by_32_patterns_and_65536_entries_refuse_within_budget` | `aggregate matching exceeded original allowed charged-cell/token budget` |
+| `proof_zero_byte_append` | `zero_byte_appended_after_collection_is_refused_by_original_path` | `zero-byte collection append escaped changed_length refusal` |
+| `proof_descriptor_limit` | `collect_1024_files_under_soft_descriptor_limit_1024` | `FD child failed:.*(Too many open files\|EMFILE)` |
+
+Two additional guard controls retain the stalled-reader workspace permit and
+the pending registration token. They are additional controls of their original
+clauses, not replacements for a missing requirement. The four ordering
+adversaries retain actual transactions, held member ownership and queued
+writers; session/restore witnesses require the writer to finish before member
+release, and expiry re-evaluates changed restore authority after set ownership:
+
+- `lock_legacy_commit_member_abort`: `agent012_actual_legacy_commit_and_member_abort_do_not_deadlock`; diagnostic `AGENT012_LOCK_ORDER_40P01: actual Store transaction formed a PostgreSQL deadlock`.
+- `lock_session_queue`: `agent012_actual_queued_session_writer_does_not_cycle_with_member_owner`; diagnostic `AGENT012_SESSION_CHURN_BLOCKED_BY_MEMBER_WAIT: actual OpenSession writer queued behind commit while member ownership is held`.
+- `lock_restore_queue`: `agent012_actual_queued_restore_writer_does_not_cycle_with_member_owner`; diagnostic `AGENT012_RESTORE_CHURN_BLOCKED_BY_MEMBER_WAIT: actual restore writer queued behind commit while member ownership is held`.
+- `lock_expiry_restore_queue`: `agent012_expiry_owns_set_before_queued_restore_and_preserves_current_lease`; diagnostic `expiry failed to re-evaluate changed restore authority after set ownership`.
+
+### Source-bound execution evidence and limits
+
+Root qualified the standalone protected-f307 source freeze
+`f1efc0cc001bd3b88bb4988a00b0115764d83de29cdb88efd5765c512f63eec7`.
+Independent complete native review
+`/tmp/mcloving-milestones/M2/AGENT-012/protected-f307-full-native-independent-review.json`
+has SHA256 `ae917094015a8a1938c79232a54d5c884c26cddd238a066b675fbadb27235070`.
+It binds all twenty-six distinct named positives, each of twenty-five pristine
+positive → intended named semantic RED → byte-restored positive controls,
+strict thirteen-test remote transport, and release controller/agent build.
+Every mapped source stage and all 114 matrix metadata/build/test raw records
+were read and hash-checked in the bound independent matrix reviews. Actual
+compile, setup, watchdog, unrelated or unattributed nested output, generic
+failure and skip results never earn semantic RED. The two mapped soft-FD
+controls deliberately retain their source-owned current_exe child under
+ulimit1024 and its actual kernel EMFILE diagnostic; this owned child witness
+is not an unrelated diagnostic dump. Historical negatives and source
+snapshots remain retained.
+
+The separate full eligible PostgreSQL suite passed 77 tests with eight
+concurrent test threads. The two database-global restore adversaries own
+separate UUID databases, actual OIDs and private custody; no global restore
+epoch was reset and the original tests' assertions remain. The two deliberately
+ignored backup/restore drill tests are not credited by this suite. Normal tests
+remain concurrent. This fixture isolation is not a relaxation of restore
+fencing and uses no FORCE drop or foreign session termination.
+
+The actual unprivileged artifact-set RLS observations are rebound in
+`/tmp/mcloving-milestones/M2/AGENT-012/native-artifact-set-rls-current-f307-independent-source-binding.json`,
+SHA256 `1f9f364cbc8d0d43b6c26f3a247cfafab25bf7963627766e1ae0cdabfb96d715`.
+The twenty retained raw phases include direct reads and foreign INSERTs by
+the actual non-superuser, non-bypass tenant role. Missing/foreign tenant
+selection hides rows and own-tenant selection returns the expected set/member
+rows. Policy removal requires an administrative ALTER; its exposure query
+uses SET LOCAL ROLE to the tenant role, shows the foreign rows, and restoration
+hides them again. Actual foreign INSERT statements are refused. Privilege readbacks establish missing DELETE
+and TRUNCATE grants; they do not claim actual DELETE/TRUNCATE statement tests
+or an UPDATE-policy mutant. Store-admin positives alone do not establish RLS.
+
+Release marker/source elision review
+`/tmp/mcloving-milestones/M2/AGENT-012/protected-f307-release-elision-independent-review.json`,
+SHA256 `8b3bfd83b1c642bc9905a0fe00b71560ee9e29d8f6a1e9f9fc656d35fb27a48e`,
+binds the actual release binaries and absence of both actual injection marker
+literals. The bounded registration delay is compile-elided outside debug builds;
+the FD-driver hook is within cfg(test). Exactly two deployment scanner
+exclusions and LimitNOFILE=1024 remain. This proves those hook boundaries,
+not a broad production deployment or service-manager qualification.
+
+The later three-ticket interaction source and its controls remain separate
+unpublished evidence. It does not supply AGENT-010 or AGENT-011 closure here.
+This four-file candidate changes no production Rust, schema, protocol, quota,
+authority, test or deployment path. It preserves the historical candidate
+prefixes, all literal ticket acceptance/dependencies, existing earned closures
+and owner edits. The closure candidate's own review, checks, protected merge
+and resulting-main qualification are still unearned at this authoring
+observation; no future check or merge result is pre-claimed.
