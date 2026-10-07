@@ -1752,3 +1752,22 @@ and distinguishes current root-composed candidate custody from historical native
 receipts. No Cargo/native/full deployment ran in this continuation. Independent
 review, rerun CI and protected merge/post-merge remain root obligations. Original
 full acceptance stays ACTIVE, with the same finite-convergence/SSRF/tenant risks.
+
+
+### CTRL-007 2026-10-07 sanitized interpreter continuation
+
+Actual Foundation deployment job `112585000560` refused the NAT64 validator's
+direct `python3` invocation through the unchanged all-helper scanner. The narrow
+correction invokes existing `deployment_python` instead: trusted interpreter
+resolution and constructed child environment restore TM-013's boundary on
+TM-054 policy validation. RFC6052 payload/grammar, contract validation, source
+coverage, scanner refusal and floors remain unchanged. Exact scanner execution
+reproduced RED and then passed GREEN without an exemption. Thirty actual helper
+policy cases (six valid widths and nine malformed values in normal/hostile Python
+environments) passed; a direct-interpreter poison canary positively executed its
+private marker, while the corrected helper executed none. Disposable files were
+cleaned. Canonical evidence records raw hashes/current20 source custody and keeps
+prior native/CI receipts explicitly historical. No full deployment/native/service
+campaign or current-head CI success is asserted; independent review, protected
+merge/post-merge and full original ACTIVE acceptance remain root obligations.
+Finite reconciliation and network/tenant residuals are unchanged.

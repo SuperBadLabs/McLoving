@@ -277,3 +277,65 @@ no Cargo, native, Podman, SQL or full deployment ran in this source-only
 continuation. Root owns independent review, rerun CI/readback, publication,
 merge and post-merge checks. Full original acceptance remains ACTIVE; finite
 convergence and network/tenant residuals are unchanged.
+
+
+## 2026-10-07 continuation: sanitized NAT64 interpreter boundary
+
+Actual PR #179 Foundation deployment job `112585000560` failed on the existing
+all-helper direct-interpreter scanner. Cause: `mcloving-deploy-lib.sh:484` invoked
+`python3 - "$1" <<'NAT64'` directly instead of the existing `deployment_python`
+child-environment boundary. NAT64 guard/source-coverage cases had passed earlier;
+later fixture dumps and broken-pipe messages are not the cause. The actual log
+`/tmp/mcloving-milestones/M2/CTRL-007/currentbase-deployment-failure-112585000560.log`
+has SHA-256 `e504d49cd57a36711f8878828e049f2210f56fbca4a9d49b153cb53a3301d99d`.
+The coordinator supplied current committed candidate
+`1bf5f002315b543470264d04afdfcce3eeb9b531` (base abbreviation `00e`);
+this source-only agent did no Git operation or publication.
+
+The production correction replaces only that interpreter command name with
+`deployment_python`. The validator's Python payload, RFC6052 grammar, all
+configuration/contract guards, source coverage, helper scanner, test floors and
+public authority are unchanged. The existing wrapper chooses Python on a fixed
+trusted PATH and constructs the child environment with `env -i`; caller Python
+import/home/startup hooks cannot influence this validator. This narrowly restores
+the existing TM-013 interpreter boundary for the TM-054 policy admission path.
+
+The exact existing embedded `SANITIZED` scanner was extracted and executed over
+all actual `deploy/bin` helpers before editing: exit 1 identified only the direct
+NAT64 invocation (raw log SHA-256
+`4e6dd6e0bd95f499b32d52f7a30046d44feaa42db8b6a3f62f1a2b9af96d57b3`).
+After correction the identical scanner payload exited zero (empty log SHA-256
+`e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`).
+Scanner payload SHA-256 both times:
+`6afeda4df105a76a292a0bb2d4e1bcae6c8de02d4c9ccac82148a6f3056bddcc`.
+No scanner exemption or refusal change was introduced.
+
+Bounded actual helper execution checked the prior six named valid RFC6052 widths
+(/32,/40,/48,/56,/64,/96) and nine malformed values under both normal and hostile
+Python environments, for 30 policy cases. Malformed cases were empty, bad text,
+illegal /72, /96 host bits, local IPv6, documentation prefix, 6to4, trailing comma
+and overlapping prefixes; each refused with the named policy diagnostic.
+The hostile shell supplied invalid PYTHONHOME, PYTHONUSERBASE, PYTHONPATH,
+PYTHONSTARTUP, a fake `python3` ahead of the trusted executable and BASH_ENV/ENV
+hooks, all backed by private disposable files. A separate controlled direct
+Python import positively executed the harmless poison marker and failed; the
+sanitized helper produced all expected valid/refused outcomes without executing
+that marker. This proves the fixtures can observe poison execution. No service
+or service-manager environment was exercised, and this does not claim to extend
+the existing wrapper or its other boundaries. Private temporary files were
+removed after the bounded helper checks.
+
+`/tmp/mcloving-milestones/M2/CTRL-007/interpreter-boundary-continuation/` retains
+actual argv/raw logs and hashes for every scanner/canary/policy invocation,
+baseline helper, exact one-line source delta, before/current 20-file inventories
+and frozen handoff. Current helper SHA-256 is
+`9b18fcd2963173c18a13860121819cfdfd2831f6ab2d5d25e8ab2296cc9e6dc3`.
+The prior 17-file allocated-4fa native table, six mutations, earlier source20
+receipts and CI failures remain historical custody. No fresh Cargo/native,
+Podman, PostgreSQL/SQL, running service or full shipped deployment harness was
+executed here, and no current-head CI or closure success is asserted. Only the
+helper invocation and necessary dated canonical/threat receipts changed from
+this continuation's before20 bytes; the board and original complete acceptance
+remain unchanged and ACTIVE. Root owns independent review, CI/publication,
+merge/post-merge checks and closure. The finite-convergence/NAT64/network/tenant
+residuals previously recorded remain.

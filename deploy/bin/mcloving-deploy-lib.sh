@@ -481,7 +481,7 @@ require_secret_files() {
 # changes the SSRF interpretation of global IPv6 and is pinned to the contract,
 # even though it names no filesystem path.
 validate_notification_nat64_prefixes() {
-  python3 - "$1" <<'NAT64'
+  deployment_python - "$1" <<'NAT64'
 import ipaddress
 import sys
 value = sys.argv[1]
