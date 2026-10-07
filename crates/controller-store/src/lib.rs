@@ -11,6 +11,8 @@ use uuid::Uuid;
 
 mod admin_migration;
 mod affinity;
+mod artifact_sets;
+pub use artifact_sets::{ArtifactMemberClaim, ArtifactSetAuthority, ArtifactSetMember};
 mod audit;
 mod authorization_mapping;
 pub mod authz;
@@ -215,6 +217,7 @@ pub const PROJECT_ROLE_GRANTS_V41: &str =
 /// Mutable generation-bound native schedule slots (PAR-002).
 pub const SCHEDULE_SLOTS_V42: &str = include_str!("../migrations/0042_trigger_schedule_slots.sql");
 pub const WORKSPACE_AFFINITY_V43: &str = include_str!("../migrations/0043_workspace_affinity.sql");
+pub const ARTIFACT_SETS_V46: &str = include_str!("../migrations/0046_artifact_sets.sql");
 pub const LOG_ACCOUNTING_V44: &str = include_str!("../migrations/0044_log_accounting.sql");
 /// Leased, bounded delivered GitHub status observations (CTRL-007).
 pub const NOTIFICATION_RECONCILIATION_V45: &str =
@@ -728,6 +731,8 @@ impl TerminalOutcome {
 /// Transactional controller-store failure.
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
+    #[error("artifact quota exceeded")]
+    ArtifactQuota,
     #[error("database operation failed: {0}")]
     Database(#[from] sqlx::Error),
     #[error("idempotent build exists without its initial node or attempt")]
@@ -979,6 +984,8 @@ impl Store {
                    ('dead_letters', 'SELECT'), ('dead_letters', 'INSERT'),
                    ('attempt_objects', 'SELECT'), ('attempt_objects', 'INSERT'),
                    ('attempt_objects', 'UPDATE'),
+                   ('artifact_sets','SELECT'), ('artifact_sets','INSERT'), ('artifact_sets','UPDATE'),
+                   ('artifact_set_members','SELECT'), ('artifact_set_members','INSERT'), ('artifact_set_members','UPDATE'),
                    ('controller_metadata', 'SELECT'),
                    ('object_retention', 'SELECT'), ('object_retention', 'INSERT'),
                    ('object_retention', 'UPDATE'),
@@ -1370,7 +1377,7 @@ impl Store {
                    ('discovery_scan_results'), ('discovery_child_identities'),
                    ('discovery_observations'), ('discovery_children'),
                    ('component_packages'), ('attempt_log_chunks'), ('attempt_log_accounting'),
-                   ('attempt_effects'), ('dead_letters'), ('attempt_objects'),
+                   ('attempt_effects'), ('dead_letters'), ('attempt_objects'), ('artifact_sets'), ('artifact_set_members'),
                    ('state_transfer_receipts'), ('state_transfer_records'),
                    ('state_transfer_scm_evidence'), ('state_transfer_protections'),
                    ('object_retention'), ('legal_holds'), ('node_dependencies'),
@@ -1566,6 +1573,7 @@ impl Store {
         apply_migration(&mut tx, 43, WORKSPACE_AFFINITY_V43).await?;
         apply_migration(&mut tx, 44, LOG_ACCOUNTING_V44).await?;
         apply_migration(&mut tx, 45, NOTIFICATION_RECONCILIATION_V45).await?;
+        apply_migration(&mut tx, 46, ARTIFACT_SETS_V46).await?;
         tx.commit().await?;
         Ok(())
     }
@@ -6078,21 +6086,9 @@ impl Store {
         fence: i64,
     ) -> Result<i64, StoreError> {
         let mut tx = self.tenant_transaction(organization_id).await?;
-        let count = sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*)
-             FROM attempt_objects
-             WHERE organization_id = $1
-               AND attempt_id = $2
-               AND fence = $3
-               AND kind = 'artifact'",
-        )
-        .bind(organization_id)
-        .bind(attempt_id)
-        .bind(fence)
-        .fetch_one(&mut *tx)
-        .await?;
+        let used = artifact_count_used(&mut tx, organization_id, attempt_id, fence).await?;
         tx.commit().await?;
-        Ok(count)
+        Ok(used)
     }
 
     /// The status (`pending` or `available`) under which exactly this
@@ -6241,14 +6237,6 @@ impl Store {
             return Ok(false);
         }
         let mut tx = self.tenant_transaction(organization_id).await?;
-        acquire_restore_fence_shared(&mut tx).await?;
-        if let Some(session_epoch) = session_epoch
-            && !Self::lock_agent_session(&mut tx, agent_id, session_epoch).await?
-        {
-            tx.rollback().await?;
-            return Ok(false);
-        }
-        acquire_object_deletion_fence(&mut tx, &digest).await?;
         // The attempt-scoped lock first (PAR-014): every registration for the
         // attempt, whatever its name, reads the quota and inserts under it,
         // so two concurrent uploads cannot each fit and together exceed it.
@@ -6259,6 +6247,16 @@ impl Store {
             ))
             .execute(&mut *tx)
             .await?;
+        // Admission ownership precedes short authority/deletion locks. Batch
+        // commit/abort wait for transport members without holding these fences.
+        acquire_restore_fence_shared(&mut tx).await?;
+        if let Some(session_epoch) = session_epoch
+            && !Self::lock_agent_session(&mut tx, agent_id, session_epoch).await?
+        {
+            tx.rollback().await?;
+            return Ok(false);
+        }
+        acquire_object_deletion_fence(&mut tx, &digest).await?;
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
             .bind(format!(
                 "mcloving.artifact.{organization_id}.{attempt_id}.{fence}.{name}"
@@ -6342,19 +6340,7 @@ impl Store {
         // The object-count quota too, at the protocol boundary rather than
         // only in the shipped collector, so an authenticated peer cannot
         // register unbounded rows under one live lease.
-        let count = sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*)
-             FROM attempt_objects
-             WHERE organization_id = $1
-               AND attempt_id = $2
-               AND fence = $3
-               AND kind = 'artifact'",
-        )
-        .bind(organization_id)
-        .bind(attempt_id)
-        .bind(fence)
-        .fetch_one(&mut *tx)
-        .await?;
+        let count = artifact_count_used(&mut tx, organization_id, attempt_id, fence).await?;
         if count
             >= i64::try_from(mcloving_domain::artifacts::MAX_ARTIFACT_FILES_PER_ATTEMPT)
                 .unwrap_or(i64::MAX)
@@ -6472,6 +6458,7 @@ impl Store {
         if bytes < 0 {
             return Ok(false);
         }
+        self.expire_artifact_sets(organization_id).await?;
         let mut tx = self.tenant_transaction(organization_id).await?;
         let active = sqlx::query_scalar::<_, bool>(
             "SELECT EXISTS (
@@ -6615,6 +6602,7 @@ impl Store {
                AND o.fence = $5
                AND o.kind = 'artifact'
                AND o.name = $6
+               AND o.artifact_set_id IS NULL
                AND o.object_digest = $7
                AND o.bytes = $8
                AND o.media_type = $9
@@ -6715,6 +6703,7 @@ impl Store {
                AND b.project_id = $2
                AND b.id = $3
                AND o.kind = 'artifact'
+               AND (o.artifact_set_id IS NULL OR EXISTS(SELECT 1 FROM artifact_sets s WHERE s.organization_id=o.organization_id AND s.attempt_id=o.attempt_id AND s.fence=o.fence AND s.set_id=o.artifact_set_id AND s.state='available'))
              ORDER BY n.node_key, a.ordinal, o.name",
         )
         .bind(organization_id)
@@ -6783,14 +6772,14 @@ impl Store {
                AND object_digest = $6
                AND (
                  $7 <> 'available'
-                 OR mcloving_owned_object_publication_allowed(
+                 OR ((artifact_set_id IS NULL OR EXISTS(SELECT 1 FROM artifact_sets s WHERE s.organization_id=attempt_objects.organization_id AND s.attempt_id=attempt_objects.attempt_id AND s.fence=attempt_objects.fence AND s.set_id=attempt_objects.artifact_set_id AND s.state='available')) AND mcloving_owned_object_publication_allowed(
                       organization_id,
                       attempt_id,
                       fence,
                       kind,
                       name,
                       object_digest
-                    )
+                    ))
                )
              RETURNING name",
         )
@@ -6829,6 +6818,7 @@ impl Store {
              WHERE o.organization_id = $1
                AND b.project_id = $2
                AND b.id = $3
+               AND (o.artifact_set_id IS NULL OR EXISTS(SELECT 1 FROM artifact_sets s WHERE s.organization_id=o.organization_id AND s.attempt_id=o.attempt_id AND s.fence=o.fence AND s.set_id=o.artifact_set_id AND s.state='available'))
              ORDER BY a.ordinal, o.kind, o.name",
         )
         .bind(organization_id)
@@ -8510,24 +8500,22 @@ pub(crate) async fn acquire_restore_fence_shared(
 }
 
 async fn artifact_bytes_used(
-    tx: &mut sqlx::Transaction<'_, Postgres>,
+    tx: &mut Transaction<'_, Postgres>,
     organization_id: Uuid,
     attempt_id: Uuid,
     fence: i64,
 ) -> Result<i64, StoreError> {
-    Ok(sqlx::query_scalar::<_, i64>(
-        "SELECT COALESCE(SUM(bytes), 0)::bigint
-         FROM attempt_objects
-         WHERE organization_id = $1
-           AND attempt_id = $2
-           AND fence = $3
-           AND kind = 'artifact'",
-    )
-    .bind(organization_id)
-    .bind(attempt_id)
-    .bind(fence)
-    .fetch_one(&mut **tx)
-    .await?)
+    Ok(sqlx::query_scalar::<_,i64>("SELECT (SELECT COALESCE(SUM(bytes),0)::bigint FROM attempt_objects WHERE organization_id=$1 AND attempt_id=$2 AND fence=$3 AND kind='artifact' AND artifact_set_id IS NULL)+(SELECT COALESCE(SUM(bytes),0)::bigint FROM artifact_sets WHERE organization_id=$1 AND attempt_id=$2 AND fence=$3 AND state<>'aborted')")
+        .bind(organization_id).bind(attempt_id).bind(fence).fetch_one(&mut **tx).await?)
+}
+async fn artifact_count_used(
+    tx: &mut Transaction<'_, Postgres>,
+    organization_id: Uuid,
+    attempt_id: Uuid,
+    fence: i64,
+) -> Result<i64, StoreError> {
+    Ok(sqlx::query_scalar::<_,i64>("SELECT (SELECT count(*) FROM attempt_objects WHERE organization_id=$1 AND attempt_id=$2 AND fence=$3 AND kind='artifact' AND artifact_set_id IS NULL)+(SELECT COALESCE(SUM(objects),0)::bigint FROM artifact_sets WHERE organization_id=$1 AND attempt_id=$2 AND fence=$3 AND state<>'aborted')")
+        .bind(organization_id).bind(attempt_id).bind(fence).fetch_one(&mut **tx).await?)
 }
 
 async fn acquire_object_deletion_fence(

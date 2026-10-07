@@ -44,6 +44,8 @@ UnsetEnvironment=BASH_ENV ENV SHELLOPTS BASHOPTS LD_PRELOAD LD_LIBRARY_PATH LD_A
 # deploy/test-deployment.sh fails if the two drift.
 Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 Type=exec
+# Metadata-only collection: one active artifact FD plus depth-32 walk and runtime headroom.
+LimitNOFILE=1024
 # EnvironmentFile without "-" fails the unit when the contract file is absent.
 EnvironmentFile=%h/.config/mcloving/agent.env
 # Fail fast on unset or placeholder variables before the binary starts.

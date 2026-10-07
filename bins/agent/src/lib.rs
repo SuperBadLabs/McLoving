@@ -220,7 +220,7 @@ impl SessionFeatures {
             artifact_upload: cfg!(unix)
                 && features
                     .iter()
-                    .any(|feature| feature == mcloving_domain::artifacts::ARTIFACT_UPLOAD_FEATURE),
+                    .any(|feature| feature == mcloving_domain::artifacts::ARTIFACT_SET_FEATURE),
         }
     }
 }
@@ -650,6 +650,7 @@ async fn open_session(
                     mcloving_domain::multi_step::MULTI_STEP_EXECUTION_FEATURE.to_owned(),
                     mcloving_domain::live_logs::LIVE_LOG_STREAM_FEATURE.to_owned(),
                     mcloving_domain::artifacts::ARTIFACT_UPLOAD_FEATURE.to_owned(),
+                    mcloving_domain::artifacts::ARTIFACT_SET_FEATURE.to_owned(),
                 ]),
             }),
             trust_pool: config.trust_pool.clone(),
@@ -2353,5 +2354,35 @@ mod tests {
             result: None,
         };
         assert!(!cancellation_targets(&cancelled, &attempt));
+    }
+}
+
+#[cfg(test)]
+mod artifact_set_negotiation_tests {
+    use super::*;
+    #[test]
+    fn legacy_artifact_feature_does_not_admit_declared_set_execution() {
+        assert!(
+            !SessionFeatures::from_negotiated(&[
+                mcloving_domain::artifacts::ARTIFACT_UPLOAD_FEATURE.into()
+            ])
+            .artifact_upload
+        );
+        assert_eq!(
+            SessionFeatures::from_negotiated(&[
+                mcloving_domain::artifacts::ARTIFACT_SET_FEATURE.into()
+            ])
+            .artifact_upload,
+            cfg!(unix)
+        );
+    }
+    #[test]
+    fn deployment_declares_descriptor_headroom() {
+        assert!(
+            include_str!("../../../deploy/systemd/mcloving-agent.service")
+                .lines()
+                .any(|line| line == "LimitNOFILE=1024"),
+            "deployment descriptor limit lost required1024 soft descriptors"
+        );
     }
 }

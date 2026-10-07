@@ -1,3 +1,6 @@
+#[path = "support/artifact_set_proxy.rs"]
+mod artifact_set_proxy;
+
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::Command as StdCommand;
@@ -1361,6 +1364,13 @@ struct MultiStepHarness {
 }
 
 async fn multi_step_harness(agent_id: &str, slug: &str) -> Option<MultiStepHarness> {
+    multi_step_harness_with_controller_env(agent_id, slug, &[]).await
+}
+async fn multi_step_harness_with_controller_env(
+    agent_id: &str,
+    slug: &str,
+    overrides: &[(&str, &str)],
+) -> Option<MultiStepHarness> {
     let Ok(migration_url) = std::env::var("MCLOVING_TEST_DATABASE_URL") else {
         eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
         return None;
@@ -1399,7 +1409,12 @@ async fn multi_step_harness(agent_id: &str, slug: &str) -> Option<MultiStepHarne
     std::fs::create_dir(&workspace).expect("create remote workspace root");
     let scratch = directory.path().join("scratch");
     std::fs::create_dir(&scratch).expect("create scratch root");
-    let controller = Command::new(controller_binary)
+    let mut controller_command = Command::new(controller_binary);
+    controller_command.env_remove("MCLOVING_TEST_ARTIFACT_REGISTER_DELAY_MILLISECONDS");
+    for (name, value) in overrides {
+        controller_command.env(name, value);
+    }
+    let controller = controller_command
         .env("MCLOVING_MIGRATION_DATABASE_URL", &migration_url)
         .env("MCLOVING_DATABASE_URL", &runtime_url)
         .env("MCLOVING_API_TOKEN", TOKEN)
@@ -1461,7 +1476,23 @@ async fn wait_for_terminal(
     project_id: Uuid,
     build_id: Uuid,
 ) -> mcloving_controller_api::BuildResponse {
-    tokio::time::timeout(Duration::from_secs(30), async {
+    wait_for_terminal_with_bound(
+        client,
+        organization_id,
+        project_id,
+        build_id,
+        Duration::from_secs(30),
+    )
+    .await
+}
+async fn wait_for_terminal_with_bound(
+    client: &Client,
+    organization_id: Uuid,
+    project_id: Uuid,
+    build_id: Uuid,
+    bound: Duration,
+) -> mcloving_controller_api::BuildResponse {
+    tokio::time::timeout(bound, async {
         loop {
             let status = client
                 .status(organization_id, project_id, build_id)
@@ -2048,20 +2079,45 @@ stages:
 
 #[tokio::test]
 async fn declared_artifacts_are_uploaded_and_downloadable() {
-    let Some(mut harness) = multi_step_harness("artifact-agent", "artifacts").await else {
+    artifact_round_trip_with_registration_delay(false).await;
+}
+#[cfg(debug_assertions)]
+#[tokio::test]
+async fn registration_after_receive_budget_keeps_actual_rpc_and_lease_alive() {
+    artifact_round_trip_with_registration_delay(true).await;
+}
+async fn artifact_round_trip_with_registration_delay(delayed: bool) {
+    let overrides = if delayed {
+        vec![(
+            "MCLOVING_TEST_ARTIFACT_REGISTER_DELAY_MILLISECONDS",
+            "35000",
+        )]
+    } else {
+        vec![]
+    };
+    let Some(mut harness) =
+        multi_step_harness_with_controller_env("artifact-agent", "artifacts", &overrides).await
+    else {
         return;
     };
-    let mut agent = agent_command(
+    let deadline_agent_log = harness._directory.path().join("deadline-agent.stderr");
+    let mut command = agent_command(
         "artifact-agent",
         harness.organization_id,
         harness.agent_port,
         &harness.tls,
         &harness.journal,
         &harness.workspace,
-    )
-    .kill_on_drop(true)
-    .spawn()
-    .expect("start shipped remote agent");
+    );
+    if delayed {
+        command.stderr(Stdio::from(
+            std::fs::File::create(&deadline_agent_log).unwrap(),
+        ));
+    }
+    let mut agent = command
+        .kill_on_drop(true)
+        .spawn()
+        .expect("start shipped remote agent");
 
     let pipeline_id = Uuid::new_v4();
     harness
@@ -2109,13 +2165,48 @@ async fn declared_artifacts_are_uploaded_and_downloadable() {
         "{required:?}"
     );
 
-    let status = wait_for_terminal(
+    let started = tokio::time::Instant::now();
+    if delayed {
+        // At 32 seconds the old receive-only 31-second client deadline would
+        // already have fired; the real child must still own its current lease.
+        tokio::time::sleep(Duration::from_secs(32)).await;
+        assert!(agent.try_wait().unwrap().is_none());
+        let current:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM attempts a JOIN nodes n ON n.organization_id=a.organization_id AND n.id=a.node_id WHERE a.organization_id=$1 AND n.build_id=$2 AND a.lease_owner='artifact-agent' AND a.fence=1 AND a.lease_expires_at>clock_timestamp() AND a.status IN ('accepted','running','finalizing'))").bind(harness.organization_id).bind(admission.build_id).fetch_one(&harness.pool).await.unwrap();
+        assert!(
+            current,
+            "the real registration delay must preserve renewal and attempt authority"
+        );
+    }
+    // The observer consumes the existing terminal budget; it does not add a
+    // second timeout or extend the original 90-second completion bound.
+    let completion_deadline = tokio::time::Instant::now() + Duration::from_secs(90);
+    if delayed {
+        tokio::time::timeout_at(
+            completion_deadline,
+            agent012_observe_delayed_registration(
+                &harness,
+                admission.build_id,
+                &deadline_agent_log,
+            ),
+        )
+        .await
+        .expect("actual delayed registration boundary absent within existing completion bound");
+    }
+    let status = wait_for_terminal_with_bound(
         &harness.client,
         harness.organization_id,
         harness.project_id,
         admission.build_id,
+        completion_deadline.saturating_duration_since(tokio::time::Instant::now()),
     )
     .await;
+    if delayed {
+        assert!(
+            started.elapsed() >= Duration::from_secs(35),
+            "debug fixture did not reach the real delayed registration boundary"
+        );
+    }
+
     assert_eq!(status.status, "succeeded", "{:?}", status.terminal_summary);
     let mut artifacts = harness
         .client
@@ -2171,6 +2262,106 @@ async fn declared_artifacts_are_uploaded_and_downloadable() {
 
     stop(&mut agent).await;
     stop(&mut harness.controller).await;
+}
+
+/// Observe actual child deadline behavior before the generic terminal waiter.
+/// The caller charges this observer against its original completion deadline.
+async fn agent012_observe_delayed_registration(
+    harness: &MultiStepHarness,
+    build_id: Uuid,
+    agent_log: &Path,
+) {
+    use mcloving_agent_runtime::Journal;
+    let (attempt_id, restore_epoch, db_fence): (Uuid, i64, i64) = sqlx::query_as(
+        "SELECT a.id,a.restore_epoch,a.fence FROM attempts a JOIN nodes n ON n.organization_id=a.organization_id AND n.id=a.node_id WHERE a.organization_id=$1 AND n.build_id=$2 ORDER BY a.fence DESC LIMIT 1",
+    )
+    .bind(harness.organization_id)
+    .bind(build_id)
+    .fetch_one(&harness.pool)
+    .await
+    .expect("actual delayed attempt exists");
+    let journal = Journal::open(&harness.journal).unwrap();
+    let accepted = journal.reconcile().unwrap();
+    let accepted = accepted
+        .attempts
+        .iter()
+        .find(|row| {
+            row.organization_id == harness.organization_id.to_string()
+                && row.attempt_id == attempt_id.to_string()
+        })
+        .expect("actual delayed attempt is present in its journal");
+    let expected_session_epoch = accepted.session_epoch;
+    let authority = mcloving_agent_protocol::wire::WorkAuthority {
+        agent_id: "artifact-agent".into(),
+        session_epoch: expected_session_epoch,
+        organization_id: harness.organization_id.to_string(),
+        attempt_id: attempt_id.to_string(),
+        fence_token: accepted.fence_token,
+    };
+    let local_fence =
+        agent012_observed_local_fence(&harness.pool, harness.organization_id, &authority).await;
+    assert_eq!(local_fence, db_fence);
+    drop(journal);
+    loop {
+        let log = std::fs::read_to_string(agent_log).expect("read actual delayed child stderr");
+        let journal = Journal::open(&harness.journal).unwrap();
+        let rows = journal.reconcile().unwrap();
+        let phase = rows.attempts.iter().find(|row| {
+            row.organization_id == authority.organization_id
+                && row.attempt_id == authority.attempt_id
+                && row.fence_token == authority.fence_token
+        });
+        let phase = phase.map(|row| {
+            format!(
+                "{:?}/session={}/token={}",
+                row.phase, row.session_epoch, row.fence_token
+            )
+        });
+        drop(journal);
+        let observed = Journal::observe(&harness.journal).unwrap();
+        let state: String = sqlx::query_scalar(
+            "SELECT state FROM artifact_sets WHERE organization_id=$1 AND attempt_id=$2 AND fence=$3 AND restore_epoch=$4",
+        )
+        .bind(harness.organization_id)
+        .bind(attempt_id)
+        .bind(local_fence)
+        .bind(restore_epoch)
+        .fetch_one(&harness.pool)
+        .await
+        .expect("actual delayed set has exact validated attempt authority");
+        assert!(
+            !log.contains("authority RPC exceeded its bounded lease deadline"),
+            "AGENT012_ARTIFACT_RPC_HEADROOM_EXPIRED: actual authority RPC deadline ended delayed registration; attempt={attempt_id}, epoch={restore_epoch}, local_fence={local_fence}, wire_token={}, journal={phase:?}, session={}, set={state}; actual child stderr={log}",
+            authority.fence_token,
+            observed.session_epoch,
+        );
+        assert_eq!(
+            observed.session_epoch, expected_session_epoch,
+            "real delayed registration changed the same agent session"
+        );
+        if state == "available" {
+            return;
+        }
+        assert_eq!(
+            state, "staging",
+            "actual delayed set lost staging authority"
+        );
+        let current: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM attempts WHERE organization_id=$1 AND id=$2 AND fence=$3 AND restore_epoch=$4 AND lease_owner='artifact-agent' AND lease_expires_at>clock_timestamp() AND status IN ('accepted','running','finalizing'))",
+        )
+        .bind(harness.organization_id)
+        .bind(attempt_id)
+        .bind(local_fence)
+        .bind(restore_epoch)
+        .fetch_one(&harness.pool)
+        .await
+        .unwrap();
+        assert!(
+            current,
+            "the real registration delay must preserve renewal and attempt authority"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 }
 
 #[tokio::test]
@@ -3137,4 +3328,593 @@ async fn storage_configuration_drift_parks_recovery_while_original_container_sur
     );
     stop(&mut discharged).await;
     stop(&mut harness.controller).await;
+}
+
+/// Both server quota refusals cross the real mTLS stream into a named build
+/// outcome. The same shipped agent PID and session epoch then execute new work.
+#[tokio::test]
+async fn artifact_object_and_total_quota_refusals_keep_same_session_available() {
+    for (max_object, total, expected) in [
+        ("4", "4", "artifact_refused:object_quota:out/a.txt"),
+        ("8", "8", "artifact_refused:object_quota:target/debug/x.log"),
+    ] {
+        let Some(mut h) = multi_step_harness_with_controller_env(
+            "quota-agent",
+            "artifact-quota",
+            &[
+                ("MCLOVING_MAX_OBJECT_BYTES", max_object),
+                ("MCLOVING_MAX_TOTAL_OBJECT_BYTES", total),
+            ],
+        )
+        .await
+        else {
+            return;
+        };
+        let mut agent = agent_command(
+            "quota-agent",
+            h.organization_id,
+            h.agent_port,
+            &h.tls,
+            &h.journal,
+            &h.workspace,
+        )
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+        let pid = agent.id();
+        let failed = agent012_submit(&h, ARTIFACT_PIPELINE, "quota-artifacts").await;
+        let status = wait_for_terminal(&h.client, h.organization_id, h.project_id, failed).await;
+        assert_eq!(status.status, "failed");
+        assert_eq!(status.terminal_summary.unwrap()["reason"], expected);
+        assert!(
+            h.client
+                .artifacts(h.organization_id, h.project_id, failed)
+                .await
+                .unwrap()
+                .is_empty(),
+            "whole refused set stays invisible"
+        );
+        let epoch: i64 = sqlx::query_scalar(
+            "SELECT session_epoch FROM agent_sessions WHERE agent_id='quota-agent'",
+        )
+        .fetch_one(&h.pool)
+        .await
+        .unwrap();
+        assert!(agent.try_wait().unwrap().is_none());
+        assert_eq!(agent.id(), pid);
+        let next=agent012_submit(&h,"version: 1\nname: after-quota\nstages:\n  - id: next\n    name: Next\n    steps:\n      - process:\n          program: /bin/sh\n          args: [-c, 'true']\n          timeout_seconds: 10\n","after-quota").await;
+        let next = wait_for_terminal(&h.client, h.organization_id, h.project_id, next).await;
+        assert_eq!(next.status, "succeeded", "{:?}", next.terminal_summary);
+        let after: i64 = sqlx::query_scalar(
+            "SELECT session_epoch FROM agent_sessions WHERE agent_id='quota-agent'",
+        )
+        .fetch_one(&h.pool)
+        .await
+        .unwrap();
+        assert_eq!(after, epoch);
+        assert_eq!(agent.id(), pid);
+        assert!(agent.try_wait().unwrap().is_none());
+        stop(&mut agent).await;
+        stop(&mut h.controller).await;
+    }
+    agent012_actual_stage_replay_and_two_128_mib_capacity().await;
+    agent012_actual_late_file_refusal_aborts_prior_pending_member().await;
+}
+async fn agent012_submit(h: &MultiStepHarness, source: &str, slug: &str) -> Uuid {
+    let pipeline = Uuid::new_v4();
+    h.client
+        .put_pipeline(
+            h.organization_id,
+            h.project_id,
+            pipeline,
+            0,
+            &PipelineUpsertRequest {
+                slug: slug.into(),
+                source: source.into(),
+                parameters: Default::default(),
+            },
+        )
+        .await
+        .unwrap();
+    h.client
+        .submit_pipeline_on_platform_in_pool(
+            h.organization_id,
+            h.project_id,
+            pipeline,
+            slug,
+            "linux",
+            "trusted-linux",
+            &PipelineBuildRequest::default(),
+        )
+        .await
+        .unwrap()
+        .build_id
+}
+
+/// Actual controller UploadArtifact replay at full physical quota. This extends
+/// the same strict quota test population; no helper metadata replaces transport.
+async fn agent012_actual_stage_replay_and_two_128_mib_capacity() {
+    use mcloving_agent_protocol::wire::{
+        ArtifactObjectEnd, ArtifactSetBegin, ArtifactSetControl, ArtifactUploadFrame,
+        ArtifactUploadHeader, OpenSessionRequest, ProtocolOffer, WorkAuthority, WorkPoll,
+        agent_control_client::AgentControlClient, artifact_upload_frame::Frame,
+    };
+    use mcloving_domain::artifacts::{
+        ARTIFACT_MEDIA_TYPE, ARTIFACT_SET_FEATURE, ArtifactManifestMember, artifact_manifest_digest,
+    };
+    use tonic::transport::{Certificate, ClientTlsConfig, Endpoint, Identity};
+    let agent_id = "retry-capacity-agent";
+    let Some(mut h) = multi_step_harness_with_controller_env(
+        agent_id,
+        "retry-capacity",
+        &[
+            ("MCLOVING_MAX_OBJECT_BYTES", "134217728"),
+            ("MCLOVING_MAX_TOTAL_OBJECT_BYTES", "268435456"),
+        ],
+    )
+    .await
+    else {
+        return;
+    };
+    let tls = ClientTlsConfig::new()
+        .domain_name("controller.internal")
+        .ca_certificate(Certificate::from_pem(
+            std::fs::read(&h.tls.ca_certificate).unwrap(),
+        ))
+        .identity(Identity::from_pem(
+            std::fs::read(&h.tls.agent_certificate).unwrap(),
+            std::fs::read(&h.tls.agent_key).unwrap(),
+        ));
+    let channel = Endpoint::from_shared(format!("https://127.0.0.1:{}", h.agent_port))
+        .unwrap()
+        .tls_config(tls)
+        .unwrap()
+        .connect()
+        .await
+        .unwrap();
+    let mut client = AgentControlClient::new(channel);
+    let epoch: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(max(session_epoch),0)+1 FROM agent_sessions WHERE agent_id=$1",
+    )
+    .bind(agent_id)
+    .fetch_one(&h.pool)
+    .await
+    .unwrap();
+    let features = vec![
+        "journal-v1".into(),
+        "unix-process-group-v1".into(),
+        mcloving_agent_protocol::WORK_DELIVERY_FEATURE.into(),
+        mcloving_domain::multi_step::MULTI_STEP_EXECUTION_FEATURE.into(),
+        ARTIFACT_SET_FEATURE.into(),
+    ];
+    let opened = client
+        .open_session(OpenSessionRequest {
+            agent_id: agent_id.into(),
+            session_epoch: epoch as u64,
+            trust_pool: "trusted-linux".into(),
+            protocol: Some(ProtocolOffer {
+                major: 1,
+                minimum_minor: 0,
+                maximum_minor: 0,
+                features,
+            }),
+            capabilities: vec![
+                mcloving_domain::capability::platform_capability(
+                    mcloving_domain::capability::DEFAULT_PLATFORM,
+                ),
+                "multi-step-v1".into(),
+                "artifact-upload-v1".into(),
+            ],
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(opened.features.iter().any(|f| f == ARTIFACT_SET_FEATURE));
+    let build = agent012_submit(&h, ARTIFACT_PIPELINE, "replay-capacity").await;
+    let assignment = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let offer = client
+                .poll_work(WorkPoll {
+                    agent_id: agent_id.into(),
+                    session_epoch: epoch as u64,
+                    organization_id: h.organization_id.to_string(),
+                    lease_seconds: 300,
+                })
+                .await
+                .unwrap()
+                .into_inner();
+            if let Some(a) = offer.assignment {
+                break a;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let authority = WorkAuthority {
+        agent_id: agent_id.into(),
+        session_epoch: epoch as u64,
+        organization_id: assignment.organization_id,
+        attempt_id: assignment.attempt_id.clone(),
+        fence_token: assignment.fence_token,
+    };
+    let local_fence = agent012_observed_local_fence(&h.pool, h.organization_id, &authority).await;
+    assert!(
+        client
+            .accept_work(authority.clone())
+            .await
+            .unwrap()
+            .into_inner()
+            .accepted
+    );
+    assert!(
+        client
+            .start_work(authority.clone())
+            .await
+            .unwrap()
+            .into_inner()
+            .accepted
+    );
+    let renew_stop = tokio_util::sync::CancellationToken::new();
+    let stopped = renew_stop.clone();
+    let renewal_authority = authority.clone();
+    let mut renewal_client = client.clone();
+    let renewals = tokio::spawn(async move {
+        loop {
+            tokio::select! {() = stopped.cancelled() => break,() = tokio::time::sleep(Duration::from_secs(1)) =>{let renewal=renewal_client.renew_work_lease(mcloving_agent_protocol::wire::WorkLeaseRenewal{authority:Some(renewal_authority.clone()),lease_seconds:300}).await.unwrap().into_inner();assert!(renewal.accepted,"actual capacity/retry fixture lost fenced lease authority");}}
+        }
+    });
+    let bytes = 128 * 1_048_576_u64;
+    let manifest = ["outputs/a", "outputs/b"]
+        .into_iter()
+        .map(|name| ArtifactManifestMember {
+            name: name.into(),
+            bytes,
+            media_type: ARTIFACT_MEDIA_TYPE.into(),
+        })
+        .collect::<Vec<_>>();
+    let id = artifact_manifest_digest(&manifest);
+    let begin = Frame::BeginSet(ArtifactSetBegin {
+        authority: Some(authority.clone()),
+        set_id: id.to_vec(),
+        members: manifest
+            .iter()
+            .map(|m| mcloving_agent_protocol::wire::ArtifactManifestMember {
+                name: m.name.clone(),
+                bytes: m.bytes,
+                media_type: m.media_type.clone(),
+            })
+            .collect(),
+    });
+    assert!(
+        client
+            .upload_artifact(tokio_stream::iter([ArtifactUploadFrame {
+                frame: Some(begin)
+            }]))
+            .await
+            .unwrap()
+            .into_inner()
+            .accepted
+    );
+    let mut digests = Vec::new();
+    for (index, member) in manifest.iter().enumerate() {
+        let block = vec![index as u8; 1_048_576];
+        let mut hash = Sha256::new();
+        for _ in 0..128 {
+            hash.update(&block);
+        }
+        let digest: [u8; 32] = hash.finalize().into();
+        digests.push(digest);
+        let header = ArtifactUploadFrame {
+            frame: Some(Frame::Header(ArtifactUploadHeader {
+                authority: Some(authority.clone()),
+                name: member.name.clone(),
+                media_type: ARTIFACT_MEDIA_TYPE.into(),
+                bytes,
+                sha256: digest.to_vec(),
+                set_id: id.to_vec(),
+            })),
+        };
+        // Lazy frames bound fixture memory to one MiB plus transport buffers.
+        let frames = std::iter::once(header)
+            .chain((0..128).map(move |_| ArtifactUploadFrame {
+                frame: Some(Frame::Data(block.clone())),
+            }))
+            .chain(std::iter::once(ArtifactUploadFrame {
+                frame: Some(Frame::ObjectEnd(ArtifactObjectEnd {})),
+            }));
+        let receipt = tokio::time::timeout(
+            Duration::from_secs(240),
+            client.upload_artifact(tokio_stream::iter(frames)),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .into_inner();
+        assert!(
+            receipt.accepted,
+            "actual128MiB member did not fit its once-only reservation"
+        );
+    }
+    assert!(
+        h.client
+            .artifacts(h.organization_id, h.project_id, build)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let token:String=sqlx::query_scalar("SELECT pending_token FROM artifact_set_members WHERE organization_id=$1 AND attempt_id=$2 AND name='outputs/a'").bind(h.organization_id).bind(Uuid::parse_str(&assignment.attempt_id).unwrap()).fetch_one(&h.pool).await.unwrap();
+    // Both actual128MiB claim files already consume256MiB; re-staging even the
+    // first member must fail. Header-only exact replay must recover its token.
+    for available in [false, true] {
+        let header = ArtifactUploadFrame {
+            frame: Some(Frame::Header(ArtifactUploadHeader {
+                authority: Some(authority.clone()),
+                name: "outputs/a".into(),
+                media_type: ARTIFACT_MEDIA_TYPE.into(),
+                bytes,
+                sha256: digests[0].to_vec(),
+                set_id: id.to_vec(),
+            })),
+        };
+        let receipt = client
+            .upload_artifact(tokio_stream::iter([
+                header,
+                ArtifactUploadFrame {
+                    frame: Some(Frame::ObjectEnd(ArtifactObjectEnd {})),
+                },
+            ]))
+            .await
+            .expect("pending replay must recover exact claim at full physical quota")
+            .into_inner();
+        assert!(
+            receipt.accepted,
+            "exact pending/available replay attempted a second copy"
+        );
+        let after:String=sqlx::query_scalar("SELECT pending_token FROM artifact_set_members WHERE organization_id=$1 AND attempt_id=$2 AND name='outputs/a'").bind(h.organization_id).bind(Uuid::parse_str(&assignment.attempt_id).unwrap()).fetch_one(&h.pool).await.unwrap();
+        assert_eq!(after, token, "exact replay replaced durable claim identity");
+        if !available {
+            let commit = Frame::CommitSet(ArtifactSetControl {
+                authority: Some(authority.clone()),
+                set_id: id.to_vec(),
+                bytes: 2 * bytes,
+            });
+            assert!(
+                client
+                    .upload_artifact(tokio_stream::iter([ArtifactUploadFrame {
+                        frame: Some(commit)
+                    }]))
+                    .await
+                    .unwrap()
+                    .into_inner()
+                    .accepted
+            );
+            let listed = h
+                .client
+                .artifacts(h.organization_id, h.project_id, build)
+                .await
+                .unwrap();
+            assert_eq!(listed.len(), 2);
+            assert!(
+                listed
+                    .iter()
+                    .all(|m| m.bytes == bytes && m.status == "available")
+            );
+        }
+    }
+    let counted = Store::new(h.pool.clone())
+        .attempt_artifact_bytes(
+            h.organization_id,
+            Uuid::parse_str(&assignment.attempt_id).unwrap(),
+            local_fence,
+        )
+        .await
+        .unwrap();
+    assert_eq!(counted, 2 * bytes as i64);
+    // Independent physical reopen proves no secondcopy and both distinct CAS
+    // digests still verify after available retry, not just metadata row count.
+    let physical = mcloving_object_store::FilesystemObjectStore::open(
+        &h._directory.path().join("embedded-objects"),
+        mcloving_object_store::Quota {
+            max_object_bytes: bytes,
+            max_total_bytes: 2 * bytes,
+            max_staged_objects: 4096,
+        },
+    )
+    .unwrap();
+    for digest in digests {
+        assert_eq!(
+            physical
+                .read_verified(&mcloving_object_store::ObjectRef {
+                    sha256: digest,
+                    bytes
+                })
+                .unwrap()
+                .len() as u64,
+            bytes
+        );
+    }
+    assert!(physical.begin_artifact("second-copy", bytes).is_err());
+    renew_stop.cancel();
+    renewals.await.unwrap();
+    stop(&mut h.controller).await;
+}
+
+/// Direct database observations use the local fence, while every RPC keeps
+/// the complete restore-epoch/fence authority token. Establish both components
+/// from the actual attempt before binding the decoded fence to any observation.
+async fn agent012_observed_local_fence(
+    pool: &sqlx::PgPool,
+    organization_id: Uuid,
+    authority: &mcloving_agent_protocol::wire::WorkAuthority,
+) -> i64 {
+    assert_eq!(
+        Uuid::parse_str(&authority.organization_id).unwrap(),
+        organization_id,
+        "fixture authority must name the observed organization"
+    );
+    let actual: (i64, i64) = sqlx::query_as(
+        "SELECT restore_epoch,fence FROM attempts WHERE organization_id=$1 AND id=$2",
+    )
+    .bind(organization_id)
+    .bind(Uuid::parse_str(&authority.attempt_id).unwrap())
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    let decoded = (
+        i64::from((authority.fence_token >> 32) as u32),
+        i64::from((authority.fence_token & u64::from(u32::MAX)) as u32),
+    );
+    assert_eq!(
+        actual, decoded,
+        "packed wire authority does not match actual attempt restore epoch and local fence"
+    );
+    decoded.1
+}
+
+/// Couple a late local refusal to a real earlier pending registration. The
+/// shipped uploader collects both files before the fixture holds its first
+/// accepted stage response; only then does the fixture change the next file.
+async fn agent012_actual_late_file_refusal_aborts_prior_pending_member() {
+    use mcloving_agent_runtime::Journal;
+    use std::io::Write;
+    for changed_length in [true, false] {
+        let Some(mut h) = multi_step_harness("late-file-agent", "late-file").await else {
+            return;
+        };
+        let (port, barrier, proxy) = artifact_set_proxy::start(&h.tls, h.agent_port).await;
+        let proxy = artifact_set_proxy::ServerGuard(proxy);
+        let release = artifact_set_proxy::Release(barrier.clone());
+        let mut agent = agent_command(
+            "late-file-agent",
+            h.organization_id,
+            port,
+            &h.tls,
+            &h.journal,
+            &h.workspace,
+        )
+        .kill_on_drop(true)
+        .spawn()
+        .expect("start actual uploader through receipt barrier");
+        let pipeline = "version: 1\nname: late-file\nstages:\n  - id: build\n    name: Build\n    steps:\n      - process:\n          program: /bin/sh\n          args: [-c, 'mkdir out; printf aaa > out/a; printf bbb > out/b']\n          timeout_seconds: 10\n    artifacts:\n      - name: outputs\n        paths: ['out/*']\n";
+        let build = agent012_submit(&h, pipeline, "late-file").await;
+        tokio::time::timeout(Duration::from_secs(15), barrier.registered.notified())
+            .await
+            .expect("first actual stage must reach durable pending receipt barrier");
+        let header = barrier.first.lock().unwrap().clone().unwrap();
+        let authority = header.authority.as_ref().unwrap();
+        let attempt = Uuid::parse_str(&authority.attempt_id).unwrap();
+        let local_fence =
+            agent012_observed_local_fence(&h.pool, h.organization_id, authority).await;
+        let prior:(String,String,Vec<u8>,i64)=sqlx::query_as("SELECT o.status,m.pending_token,o.object_digest,o.bytes FROM artifact_set_members m JOIN attempt_objects o ON o.organization_id=m.organization_id AND o.attempt_id=m.attempt_id AND o.fence=m.fence AND o.artifact_set_id=m.set_id AND o.name=m.name AND o.kind='artifact' WHERE m.organization_id=$1 AND m.attempt_id=$2 AND m.fence=$3 AND m.set_id=$4 AND m.name=$5").bind(h.organization_id).bind(attempt).bind(local_fence).bind(&header.set_id).bind(&header.name).fetch_one(&h.pool).await.unwrap();
+        assert_eq!(
+            prior.0, "pending",
+            "late-refusal witness requires exact earlier registered member pending"
+        );
+        assert_eq!(prior.2, header.sha256);
+        assert_eq!(prior.3, header.bytes as i64);
+        let token = prior.1;
+        let counts:(i64,i64)=sqlx::query_as("SELECT count(*) FILTER(WHERE status='pending'),count(*) FILTER(WHERE status='available') FROM attempt_objects WHERE organization_id=$1 AND attempt_id=$2 AND fence=$3 AND artifact_set_id=$4 AND kind='artifact'").bind(h.organization_id).bind(attempt).bind(local_fence).bind(&header.set_id).fetch_one(&h.pool).await.unwrap();
+        assert_eq!(
+            counts,
+            (1, 0),
+            "late-refusal witness requires exactly one pending and no available batch member before mutation"
+        );
+        assert!(
+            h.client
+                .artifacts(h.organization_id, h.project_id, build)
+                .await
+                .unwrap()
+                .is_empty(),
+            "actual prior pending member leaked before late file refusal"
+        );
+        let observation = Journal::observe(&h.journal).unwrap();
+        assert_eq!(observation.session_epoch, authority.session_epoch);
+        let journal = Journal::open(&h.journal).unwrap();
+        let rows = journal.reconcile().unwrap();
+        let workspace = rows
+            .attempts
+            .iter()
+            .find(|a| a.attempt_id == authority.attempt_id)
+            .unwrap()
+            .workspace
+            .clone();
+        drop(journal);
+        let next = if header.name == "outputs/out/a" {
+            "out/b"
+        } else {
+            assert_eq!(header.name, "outputs/out/b");
+            "out/a"
+        };
+        let path = h.workspace.join(workspace).join(next);
+        if changed_length {
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap()
+                .write_all(b"changed")
+                .unwrap();
+        } else {
+            std::fs::remove_file(&path).unwrap();
+            assert!(
+                !path.exists(),
+                "late-unreadable fixture must confirm removed next file"
+            );
+        }
+        drop(release); // actual first receipt now reaches the shipped uploader
+        let status = wait_for_terminal(&h.client, h.organization_id, h.project_id, build).await;
+        assert_eq!(
+            status.status, "failed",
+            "actual late changed/unreadable file must refuse build"
+        );
+        let reason = status.terminal_summary.unwrap()["reason"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        if changed_length {
+            assert_eq!(
+                reason,
+                format!("artifact_refused:changed_length:{next}"),
+                "actual late length refusal must name changed file"
+            );
+        } else {
+            assert!(
+                reason.starts_with(&format!("artifact_refused:unreadable:{next}:")),
+                "actual late unreadable refusal must name missing file: {reason}"
+            );
+        }
+        assert!(
+            h.client
+                .artifacts(h.organization_id, h.project_id, build)
+                .await
+                .unwrap()
+                .is_empty(),
+            "late file refusal left earlier batch member publicly visible"
+        );
+        let state: String = sqlx::query_scalar(
+            "SELECT state FROM artifact_sets WHERE organization_id=$1 AND attempt_id=$2",
+        )
+        .bind(h.organization_id)
+        .bind(attempt)
+        .fetch_one(&h.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            state, "aborted",
+            "late local refusal must abort entire durable set"
+        );
+        let exposed:i64=sqlx::query_scalar("SELECT count(*) FROM attempt_objects WHERE organization_id=$1 AND attempt_id=$2 AND fence=$3 AND artifact_set_id=$4 AND kind='artifact' AND status IN ('pending','available')").bind(h.organization_id).bind(attempt).bind(local_fence).bind(&header.set_id).fetch_one(&h.pool).await.unwrap();
+        assert_eq!(
+            exposed, 0,
+            "late local refusal retained prior pending/available publication row"
+        );
+        let staging = h._directory.path().join("embedded-objects/staging");
+        assert!(
+            !staging.join(&token).exists() && !staging.join(format!("{token}.publishing")).exists(),
+            "late local refusal retained earlier physical publication claim"
+        );
+        stop(&mut agent).await;
+        drop(proxy);
+        stop(&mut h.controller).await;
+    }
 }
