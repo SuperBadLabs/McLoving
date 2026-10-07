@@ -9,13 +9,18 @@ from __future__ import annotations
 
 import ast
 import io
+import hashlib
+import os
 import re
 import tokenize
 from datetime import date, datetime
 from pathlib import Path
 
+from reviewed_handoff_archives import archive_scope, directory_fd, regular_bytes
+
 
 COMMIT = r"(?:`)?[0-9a-f]{7,40}(?:`)?"
+MAIN_SUBJECT = r"(?<![\w-])(?:protected[- ]main|main)(?![\w-])"
 HEAD_ASSERTIONS = (
     re.compile(
         rf"\b(?:current|present|latest|now)\s+(?:protected[- ]main\s+)?"
@@ -23,7 +28,7 @@ HEAD_ASSERTIONS = (
         re.IGNORECASE,
     ),
     re.compile(
-        rf"\b(?:protected[- ]main|main)\s+(?:head\s+)?(?:is|remains)\s+"
+        rf"{MAIN_SUBJECT}\s+(?:head\s+)?(?:is|remains)\s+"
         rf"(?:currently\s+|now\s+)?(?:at\s+|commit\s+)?{COMMIT}\b",
         re.IGNORECASE,
     ),
@@ -194,18 +199,20 @@ def head_claim_defects(path: Path, text: str) -> list[str]:
     return defects
 
 
-def governance_defects(current: Path, thaw: Path, today: date | None = None) -> list[str]:
+def governance_defects(
+    current: Path, thaw: Path, today: date | None = None, *, content: str | None = None
+) -> list[str]:
     """Check explicit present-tense governance windows in a document.
 
     An early lift is knowable from the retained thaw record. Other unrecorded
     owner decisions cannot honestly be inferred by a repository-only check.
     """
-    if not current.exists():
+    if content is None and not current.exists():
         return []
     if current.is_symlink():
         return [f"{current}: live governance handoff must be a regular file"]
     today = today or date.today()
-    text = current.read_text(encoding="utf-8")
+    text = content if content is not None else current.read_text(encoding="utf-8")
     defects: list[str] = []
     for line, block in prose_blocks(text):
         for match in GOVERNED_THROUGH.finditer(normalize_prose(block)):
@@ -280,21 +287,52 @@ def document_defects(
     handoffs = repository / "docs" / "handoffs"
     defects += governance_defects(
         repository / "docs" / "EXECUTION_BOARD.md",
-        handoffs / "2026-09-06-freeze-thaw.md", today=today,
+        handoffs / "2026-09-06-freeze-thaw.md", today=today, content=board_text,
     )
-    if handoffs.exists():
-        for path in sorted(handoffs.rglob("*.md")):
+    archive_digests, archive_defects = archive_scope(repository)
+    defects += archive_defects
+    try:
+        with directory_fd(repository, ("docs", "handoffs")):
+            pass
+    except FileNotFoundError:
+        return defects
+    except OSError as error:
+        return defects + [f"docs/handoffs: cannot scan handoff ancestors without symlinks: {error}"]
+
+    def walk_error(error: OSError) -> None:
+        defects.append(f"docs/handoffs: cannot enumerate handoff prose: {error}")
+
+    for folder, directories, files in os.walk(handoffs, followlinks=False, onerror=walk_error):
+        for name in sorted(directories[:]):
+            path = Path(folder) / name
+            if path.is_symlink():
+                directories.remove(name)
+                relative = path.relative_to(repository)
+                defects.append(f"{relative}: handoff directory symlink cannot be checked as repository prose")
+        for name in sorted(files):
+            path = Path(folder) / name
+            if path.suffix.lower() != ".md":
+                continue
             relative = path.relative_to(repository)
             if path.is_symlink():
                 defects.append(f"{relative}: handoff symlink cannot be checked as repository prose")
                 continue
             try:
-                content = path.read_text(encoding="utf-8")
-            except (OSError, UnicodeError) as error:
-                defects.append(f"{relative}: cannot read handoff: {error}")
+                data = regular_bytes(repository, relative.as_posix())
+                content = data.decode("utf-8")
+            except (OSError, ValueError, UnicodeError) as error:
+                defects.append(f"{relative}: cannot read handoff without symlink ancestors: {error}")
                 continue
+            expected = archive_digests.get(relative.as_posix())
+            if expected is not None:
+                if hashlib.sha256(data).hexdigest() != expected:
+                    defects.append(f"{relative}: archive scope Markdown digest differs from sealed manifest")
+                else:
+                    # The exact bytes just opened, hashed and classified are
+                    # the historical payload; there is no second path read.
+                    continue
             defects += head_claim_defects(relative, content)
             defects += governance_defects(
-                path, handoffs / "2026-09-06-freeze-thaw.md", today=today
+                path, handoffs / "2026-09-06-freeze-thaw.md", today=today, content=content
             )
     return defects

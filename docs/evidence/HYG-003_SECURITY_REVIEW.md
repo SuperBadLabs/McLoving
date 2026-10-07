@@ -80,7 +80,7 @@ through the production board entry point as green controls. The local history
 replay compares the seven complete texts for equality and the excerpt for exact
 containment against `git show <full-commit>:<path>`.
 
-## Candidate verification
+## Original implementation verification (historical)
 
 Current source and exact command outputs are retained in
 [`hyg-003/validation.json`](hyg-003/validation.json); source SHA-256 values bind
@@ -144,11 +144,117 @@ separately under a host AppArmor profile; this attempt is not a full
 Foundation pass. The unrelated source-acquirer failure is retained here, not
 counted as HYG-003 verification.
 
-Pending: independent source/threat/evidence review, protected exact-head checks,
-publication of the updated existing draft PR #157, protected merge, and post-merge
-Foundation and Windows observations. HYG-003 remains ACTIVE. Root owns those
-steps and closure; the no-change assessment remains candidate evidence.
+At that original implementation observation, independent review, protected
+checks, publication and merge were pending. PR #157 subsequently merged while
+HYG-003 remained ACTIVE: four owner-local archival false alarms still required
+a follow-up. The archive continuation below supplies candidate evidence for
+that follow-up; root owns publication, hosted checks, merge and closure.
 
 ## Current-base revalidation observation
 
 On 2026-10-05T18:27:15.917349+00:00, root rebased the complete independently reviewed HYG topic onto protected merge `178693dbb59b062739e6404c72017ebbf73727e4`. All non-overlapping reviewed source/test bytes remained identical. The composition retains the complete protected-main threat text, its jq/ripgrep runner dependency, both dogfood regression commands, and the HYG mutation command. Fresh candidate checks passed: 83 board tests, 85 closure tests, 25 mutation controls, eight Git-history comparisons, 13 workflow tests, both verifiers, shell syntax and diff checking. The lane verifier observed six lanes and 67 commands with the same one pre-existing declared omission. This supplements the earlier 65-command topic observation above; it does not replace it with a claim about a future main head. The validation JSON retains the earlier candidate hashes and outputs separately from this rebase observation. Exact-head hosted checks, protected merge and post-merge verification remained unearned at this observation.
+
+
+## Archive scope continuation on the 7ff63e54 base
+
+This follow-up preserves the seven acceptance clauses and the historical
+population/citations above. Its clean isolated base is
+`7ff63e54f70ea5d1110b72037e84fe6011f50d01`; earlier metrics and reports remain
+historical observations. Before editing production code, the new real-manifest
+integration test reproduced four actual owner-file refusals from the old
+checker. [`hyg-003/archive-scope-before.json`](hyg-003/archive-scope-before.json)
+retains that RED output and source identity. Two READINESS files said
+`recovered-main`, whose suffix is a recovery branch name rather than the live
+main subject. The other two START_HERE files retained historical current-head
+or standing-gate wording. Owner archive files are preserved byte for byte.
+
+`MAIN_SUBJECT` now requires a complete main/protected-main token rather than a
+hyphenated or identifier suffix. Bare main and protected-main assertions remain
+refused. A separately reviewed registry pins precisely three original seals:
+
+| Reviewed root below docs/handoffs | Seal | Manifest SHA-256 | Listed Markdown |
+|---|---|---|---:|
+| `2026-09-10-master-chief-mission/campaign-complete-v4` | `ARTIFACTS.sha256` | `bbba8731110c0adf2dc829bbde0541856ac26ba9417b135399f35df90998f143` | 6 |
+| `2026-09-10-next-master-chief-post-mission` | `SHA256SUMS` | `a4940f7721b356a3bc2a4bdbbdfc6da3a58f2b99387c5f6a07d074f4d86fa273` | 42 |
+| `2026-09-11-source-prerequisite-verified` | `SHA256SUMS` | `72e758c7ecdd546ca830b734d5b7953a0fdb1fcfeb817fcaf45f7da8abc0bd74` | 59 |
+
+The production eligible set is **107 listed Markdown files**, subject to each
+existing file matching its exact sealed digest. Root independently read all
+107 owner-local Markdown files and verified the original seals and digests;
+that readback is distinct from the focused fixture replay. The registry trusts
+these reviewed historical content commitments; it asserts no authorship,
+owner endorsement, current authority, or complete recovery of non-Markdown
+payloads. There is no whole-directory or archive-name exception. Unlisted,
+new, nested, untracked and live prose remains checked; a changed listed file
+adds an explicit digest denial and also receives ordinary prose checks.
+
+Descriptor traversal refuses symlink leaves and ancestors. Present registered
+units require regular, exact, well-formed seals. Duplicate paths/JSON keys,
+escaping or aliased paths, invalid commitments and overlapping roots are
+refused. Directory symlinks are diagnosed even when directory enumeration would
+not descend into them. Optional units may be absent on clean CI. Missing or
+invalid policy itself fails closed. Eligibility hashes and historical skipping
+use the **same opened Markdown bytes**; checking ordinary prose also consumes
+that same byte snapshot. This bounds one observation, not later file changes.
+
+`scripts/fixtures/hyg-003-owner-archives` retains three byte-exact complete
+original seals as losslessly compressed fixtures and four complete original
+Markdown files. The index binds decompressed bytes to original paths, lengths
+and SHA-256 values. This partial seven-file mirror uses the actual production
+registry and pins without override. It is a meaningful replay of the four
+false alarms, not a full archive-tree or owner-tree proof. Separate negative
+parser controls are expressly not evidence that a synthetic seal is trusted.
+The eight original history fixtures remain unchanged: seven full historical
+files and one byte-contained verifier excerpt, as described above. This
+continuation reruns their semantic RED/GREEN controls without running Git;
+the earlier independently verified Git provenance remains historical evidence.
+
+Fresh Python validation and exact source/hook hashes are in
+[`hyg-003/archive-scope-validation.json`](hyg-003/archive-scope-validation.json).
+The 33 archive tests exercise the real board entry point, restored historical
+scope, tampering, live prose, path/registry failures and snapshot identity.
+[`hyg-003/archive-scope-mutations.json`](hyg-003/archive-scope-mutations.json)
+retains all 43 named controls: the 25 original semantic mutations and 18 new
+archive/boundary controls. Each control actually passes unchanged, fails with
+one assertion failure and no test error after removing/weakening its guard,
+and passes again after restoration. Removal of the historical scope makes the
+real positive integration test RED. Actual dated and merged historical GREEN
+controls remain preserved.
+
+Foundation architecture, local validation and the dogfood architecture mirror
+add exactly one required command: `python3 scripts/test-stale-claims-archives.py`.
+Existing required commands and floors remain intact. The mirror verifier is
+GREEN; removal of this exact command from an isolated architecture mirror
+produces its specific required-command denial and restoration is GREEN.
+[`hyg-003/archive-scope-lane-mirror.json`](hyg-003/archive-scope-lane-mirror.json)
+retains those observations. The architecture shell and full Foundation script
+are not executed here: no native, database, source-transport or Git workloads
+are credited to this continuation.
+
+Independent final source/threat/evidence review, hosted exact-head checks,
+protected publication/merge, post-merge observations and closure remain
+root-owned. HYG-003 stays ACTIVE. The local fixture GREEN remains distinct
+from the actual owner-tree clause-seven proof below.
+
+
+## Actual owner-tree observation
+
+At 2026-10-07T00:07:42.596115+00:00, root independently ran the frozen candidate
+against the actual `/sn8100/work/forge/McLoving` owner tree observed at
+`4fa136de9515cf0ac6c423bfc9bd19d0ebc5c45a`. The source-bound wrapper verified all
+four frozen production hashes and ran the real board main entry point with the
+explicit local observation date 2026-10-06. It exited 0: 147 tickets, 15 remaining,
+one current slot, 10 parallel and five serial tickets. This resolves the four
+owner-archive false alarms on the actual tree while retaining the independently
+reviewed content boundary of 107 registered Markdown files and three seals.
+Root's before/after comparison found all 113 observed files unchanged in bytes
+and modes: those 110 archive files plus ROADMAP, Heman and the root planning
+handoff. Python used `-B`; no cache writes were credited.
+
+The full source-bound observation and preservation inventories are in
+[`hyg-003/archive-scope-root-owner-tree.json`](hyg-003/archive-scope-root-owner-tree.json),
+with its [raw log](hyg-003/archive-scope-root-owner-tree.log), SHA-256
+`75ff348166f359f22a20cb8ac613e9ec3c135ec55e74c6029dc996a4c53470e7`.
+This is a dated candidate-source readback against that owner-tree snapshot;
+it establishes no future head's result, hosted workflow success, publication,
+merge, authorship, operational authority or ticket closure. HYG-003 remains ACTIVE.

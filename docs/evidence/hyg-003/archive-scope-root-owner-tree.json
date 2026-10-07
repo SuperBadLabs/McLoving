@@ -1,0 +1,933 @@
+{
+  "observed_at_utc": "2026-10-07T00:07:42.596115+00:00",
+  "owner_repository": "/sn8100/work/forge/McLoving",
+  "owner_main": "4fa136de9515cf0ac6c423bfc9bd19d0ebc5c45a",
+  "candidate_worktree": "/tmp/mcloving-milestones/worktrees/hyg-003-archive-scope",
+  "candidate_source_sha256": {
+    "scripts/stale_claims.py": "c28723b48e560900502e7805f6d441f4853c00fc572b0d721981414043fd26da",
+    "scripts/reviewed_handoff_archives.py": "2407a88d0694fb5d855f4decc41792a25c8a0418c26c965d7b4b2cbc49b50f94",
+    "scripts/stale-claims-archives.json": "b5e4acf4b39e20f31db9e2f1d83c9d6d30cd50211523d6895130fb39c5af726f",
+    "scripts/verify-execution-board.py": "b1e88b89ea4997b7c59178023e1aaef6ca02a846a81af843b536a9e170aa3d49"
+  },
+  "wrapper_sha256": "06008e29b0fb56ed5b908f63ef76d511b09db2dad552883456029a93bbfc99be",
+  "actual_command": [
+    "python3",
+    "-B",
+    "/tmp/mcloving-milestones/M2/HYG-003/run-frozen-owner-tree.py"
+  ],
+  "today_override": "2026-10-06 America/Chicago currentdate",
+  "exit_code": 0,
+  "stdout": "source-bound-owner-tree=/sn8100/work/forge/McLoving\nexecution-board-ok tickets=147 remaining=15 current_slots=1 batch=0 parallel=10 serial=5\n",
+  "stderr": "",
+  "log_sha256": "75ff348166f359f22a20cb8ac613e9ec3c135ec55e74c6029dc996a4c53470e7",
+  "all113_preserved_bytes_and_modes": true,
+  "owner_before": {
+    "ROADMAP.md": {
+      "sha256": "1be58c8eeeb8767de70660f8fc00fff3318812c659a86276680d16f954ccda4a",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-master-chief-mission/campaign-complete-v4/ARTIFACTS.sha256": {
+      "sha256": "bbba8731110c0adf2dc829bbde0541856ac26ba9417b135399f35df90998f143",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-master-chief-mission/campaign-complete-v4/README.md": {
+      "sha256": "9cbd9cd20410231dec2bb2e2766d141bb12ea00ae5f638444469b34a8017ce99",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-master-chief-mission/campaign-complete-v4/coordination/corpus-v3-static-mismatch-review.md": {
+      "sha256": "1679cf02874f29cbc4e65da6acb352b32674d5c20792359a691eb9aeadec9d34",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-master-chief-mission/campaign-complete-v4/historical/corpus-six-diagnostic-v1/CORRECTION_PROPOSAL.md": {
+      "sha256": "7053f2ea0d14f6a4d075f5051bced6fadd9d7f2c285cd7cfcaacaf00d78ed644",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-master-chief-mission/campaign-complete-v4/historical/corpus-six-diagnostic-v1/README.md": {
+      "sha256": "cb3f8caeb4a27dc53a4b43376d3e2f0de438713f59829f9c62f61da97c94b389",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-master-chief-mission/campaign-complete-v4/historical/tooling-proof/INTERFACE_REVIEW.md": {
+      "sha256": "b5009fc2ebee8377830c92e52330865c402417511f97e1cafe17d89308eff878",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-master-chief-mission/campaign-complete-v4/historical/tooling-proof/READINESS.md": {
+      "sha256": "4ad85bd704c9e40bb5e32c772ca680b85ef9be7674149a57eb310058aef933a4",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-next-master-chief-post-mission/NEXT_MASTER_CHIEF_PROMPT.md": {
+      "sha256": "2a3c10cbd9029ee635b2107886affe1dbb5732da5bc9e0f1d09a6f6094c8dd52",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-next-master-chief-post-mission/REMAINING_ACTIONS.md": {
+      "sha256": "662031d8d98bc1da9ef66bed66bae6b1ae739b0fdaff57a17c4a91d339716a18",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-next-master-chief-post-mission/SHA256SUMS": {
+      "sha256": "a4940f7721b356a3bc2a4bdbbdfc6da3a58f2b99387c5f6a07d074f4d86fa273",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-next-master-chief-post-mission/START_HERE.md": {
+      "sha256": "fe3e1e5e539a15d24f6ddb82d4f13aa33cbb7f09444c6fe968cf64a2ced7ff71",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-next-master-chief-post-mission/STATUS.md": {
+      "sha256": "602e6b1cd24d084c23a68110cf8314fa28693f39791afd7e014abfc5c74cf1e3",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-next-master-chief-post-mission/mission/README.md": {
+      "sha256": "f5c2c7124585d302f9e0b0e99dcfa0e4efcf4988260ba9d8da327d8a8fcf0799",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-next-master-chief-post-mission/mission/campaign-complete-v4/README.md": {
+      "sha256": "9cbd9cd20410231dec2bb2e2766d141bb12ea00ae5f638444469b34a8017ce99",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-next-master-chief-post-mission/mission/campaign-complete-v4/coordination/corpus-v3-static-mismatch-review.md": {
+      "sha256": "1679cf02874f29cbc4e65da6acb352b32674d5c20792359a691eb9aeadec9d34",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-next-master-chief-post-mission/mission/campaign-complete-v4/historical/corpus-six-diagnostic-v1/CORRECTION_PROPOSAL.md": {
+      "sha256": "7053f2ea0d14f6a4d075f5051bced6fadd9d7f2c285cd7cfcaacaf00d78ed644",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-next-master-chief-post-mission/mission/campaign-complete-v4/historical/corpus-six-diagnostic-v1/README.md": {
+      "sha256": "cb3f8caeb4a27dc53a4b43376d3e2f0de438713f59829f9c62f61da97c94b389",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-next-master-chief-post-mission/mission/campaign-complete-v4/historical/tooling-proof/INTERFACE_REVIEW.md": {
+      "sha256": "b5009fc2ebee8377830c92e52330865c402417511f97e1cafe17d89308eff878",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-next-master-chief-post-mission/mission/campaign-complete-v4/historical/tooling-proof/READINESS.md": {
+      "sha256": "4ad85bd704c9e40bb5e32c772ca680b85ef9be7674149a57eb310058aef933a4",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-next-master-chief-post-mission/mission/classifier-validation-v1/PR135_BODY-at-publication.md": {
+      "sha256": "019979dc7db16a75396297216b51c07426669cd8f0b867adc269c7c13222adbe",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-next-master-chief-post-mission/mission/classifier-validation-v1/README.md": {
+      "sha256": "03164ed419bcada63626dcaff064e842554faf5e0daafcba31e0856155b0de90",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-next-master-chief-post-mission/mission/classifier-validation-v1/historical/corpus-six-diagnostic-v1/CORRECTION_PROPOSAL.md": {
+      "sha256": "7053f2ea0d14f6a4d075f5051bced6fadd9d7f2c285cd7cfcaacaf00d78ed644",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-next-master-chief-post-mission/mission/classifier-validation-v1/historical/corpus-six-diagnostic-v1/README.md": {
+      "sha256": "cb3f8caeb4a27dc53a4b43376d3e2f0de438713f59829f9c62f61da97c94b389",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-next-master-chief-post-mission/mission/classifier-validation-v1/historical/corpus-v3-static-mismatch-review.md": {
+      "sha256": "1679cf02874f29cbc4e65da6acb352b32674d5c20792359a691eb9aeadec9d34",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-next-master-chief-post-mission/mission/classifier-validation-v1/validation/pr-body-draft.md": {
+      "sha256": "019d438bdbcdcf10a5923bd8225875799283b7517c4da9908ffb6a2e469dd4b7",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-next-master-chief-post-mission/mission/classifier-validation-v1/validation/pr-body-final.md": {
+      "sha256": "a88cc0f15044c8e74eb2ccc4b650982dd3302a325f7c29d80fb6292b42a5968c",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-next-master-chief-post-mission/mission/finalpublication-recovery-v1/README.md": {
+      "sha256": "19da3838c6b369958298a0f5246db8a268182f83578e44f6e4729b9b7375cf7f",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-next-master-chief-post-mission/mission/mission-final-status/README.md": {
+      "sha256": "ff5bb639b7a6df717f3dea28479556e58d772e0cadebaca4dc254027c0827fb0",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-next-master-chief-post-mission/mission/resume-local-v1/README.md": {
+      "sha256": "9ad7f6334452f43de24660c1a2e2281077fa13ec58feea58b930410bb51cb028",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-next-master-chief-post-mission/mission/resume-local-v1/pending-jcomp003-closure/README.md": {
+      "sha256": "2f9e79620a28e8b95bafedbad8c76d48a39d75bcef942accb4194dcfdf2996ec",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-next-master-chief-post-mission/mission/runtime-classifier-c94-v1/README.md": {
+      "sha256": "6b4688a276bfeff6bc8f5bbedd762a3fab3f2274443ed8808038bf1613729e00",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-next-master-chief-post-mission/mission/runtime-classifier-c94-v1/evidence/pr-review-reply.md": {
+      "sha256": "ead0b71facd73133ee0ff5ffc81d21e2ac5b1bb04b5e1282634835df20afbd9d",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-next-master-chief-post-mission/mission/runtime-complete-v2/README.md": {
+      "sha256": "6659abcfdccbe5b0e116c1ef916ca4c812d9c31a014336d2878adb47b406ab77",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-next-master-chief-post-mission/mission/runtime-complete-v2/local-evidence/PR_BODY.md": {
+      "sha256": "3d22e53e2a0d8d0dff046c112a137ae81ce35ec539d73ec0bd8b0ca7740dcf97",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-next-master-chief-post-mission/mission/runtime-complete-v2/local-evidence/closure-draft/docs/EXECUTION_BOARD.md": {
+      "sha256": "5af865fb055305d40ee0f96c619702eb0a63fff0a458396448f30ff7d54ca66c",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-next-master-chief-post-mission/mission/runtime-complete-v2/local-evidence/closure-draft/docs/evidence/AGENT-007_SECURITY_REVIEW.md": {
+      "sha256": "9caa4743009a222e57af7bb480b7a458c3921173a664ba07041c77f6147a8473",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-next-master-chief-post-mission/mission/runtime-complete-v2/local-evidence/closure-draft/docs/evidence/JCOMP-002B_SECURITY_REVIEW.md": {
+      "sha256": "d99647b55c2e3d3c04324d7c4077059406444b8dc927684877a2f0fea630ba8a",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-next-master-chief-post-mission/mission/runtime-complete-v2/local-evidence/closure-draft/docs/handoffs/CURRENT.md": {
+      "sha256": "aac8c960a16fa6a45a814f245c02de234952f67369030c1e28e5d40ead4cef79",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-next-master-chief-post-mission/mission/runtime-complete-v2/local-evidence/closure-draft/docs/threat-model/README.md": {
+      "sha256": "5874f025e08a07d76ec78849be81bbe4215feec1191491587a0bbfe893d7c52d",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-next-master-chief-post-mission/mission/runtime-complete-v2/local-evidence/short-budget/PR_BODY.md": {
+      "sha256": "287d0aab313d7b8748cdc6d87c7fa6bdf37d19a8536a926d975f67f7c9a56e1f",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-next-master-chief-post-mission/mission/runtime-complete-v2/local-evidence/short-budget/REVIEW_REPLY.md": {
+      "sha256": "c5eac0ad79eaa2fd435064dca11380bda71655d48823620b1cf457682a8eb29f",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-next-master-chief-post-mission/mission/runtime-interim-v1/README.md": {
+      "sha256": "db0b8c6c63a9fae8eec533c40ffb0a86702b9f7d3e9193ec419930e56a77132a",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-next-master-chief-post-mission/mission/runtime-interim-v1/local-evidence/PR_BODY.md": {
+      "sha256": "3d22e53e2a0d8d0dff046c112a137ae81ce35ec539d73ec0bd8b0ca7740dcf97",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-next-master-chief-post-mission/mission/runtime-interim-v1/local-evidence/closure-draft/docs/EXECUTION_BOARD.md": {
+      "sha256": "5af865fb055305d40ee0f96c619702eb0a63fff0a458396448f30ff7d54ca66c",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-next-master-chief-post-mission/mission/runtime-interim-v1/local-evidence/closure-draft/docs/evidence/AGENT-007_SECURITY_REVIEW.md": {
+      "sha256": "9caa4743009a222e57af7bb480b7a458c3921173a664ba07041c77f6147a8473",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-next-master-chief-post-mission/mission/runtime-interim-v1/local-evidence/closure-draft/docs/evidence/JCOMP-002B_SECURITY_REVIEW.md": {
+      "sha256": "d99647b55c2e3d3c04324d7c4077059406444b8dc927684877a2f0fea630ba8a",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-next-master-chief-post-mission/mission/runtime-interim-v1/local-evidence/closure-draft/docs/handoffs/CURRENT.md": {
+      "sha256": "aac8c960a16fa6a45a814f245c02de234952f67369030c1e28e5d40ead4cef79",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-next-master-chief-post-mission/mission/runtime-interim-v1/local-evidence/closure-draft/docs/threat-model/README.md": {
+      "sha256": "5874f025e08a07d76ec78849be81bbe4215feec1191491587a0bbfe893d7c52d",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-next-master-chief-post-mission/mission/runtime-interim-v1/local-evidence/short-budget/PR_BODY.md": {
+      "sha256": "287d0aab313d7b8748cdc6d87c7fa6bdf37d19a8536a926d975f67f7c9a56e1f",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-next-master-chief-post-mission/mission/runtime-interim-v1/local-evidence/short-budget/REVIEW_REPLY.md": {
+      "sha256": "c5eac0ad79eaa2fd435064dca11380bda71655d48823620b1cf457682a8eb29f",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/FINALIZATION_DEPENDENCIES.md": {
+      "sha256": "983da4743493271fc8fadbdb1a44f514e38bf1f0c6442b7dd38b91f480370888",
+      "mode": "0o600"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/NEXT_MISSION.md": {
+      "sha256": "cd0baab78c6a2b5fec0c2f5e129c40824f1e2d8cd83b326d3c53e4faf9ed9328",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/PREMERGE_STATUS.md": {
+      "sha256": "fa98f26443baec2bfb68e2add6ae23fbc1a6a44ef6e5e33bb73187a979e19ef4",
+      "mode": "0o600"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/RECOVERY.md": {
+      "sha256": "7c4cdf19bf286a5273cebc6941db144a745d365f71cc1bf93c52728a1f7ab57e",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/SHA256SUMS": {
+      "sha256": "72e758c7ecdd546ca830b734d5b7953a0fdb1fcfeb817fcaf45f7da8abc0bd74",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/START_HERE.md": {
+      "sha256": "0548ec5644b81f86126f95cd5101c8b9ff266b055a27ed048ff17a306a39d733",
+      "mode": "0o600"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/adopted-parity-main/ADR0016.md": {
+      "sha256": "140b451e44a795441ef708e244789bdadef4269e22dc4d236a009f70f768b7e5",
+      "mode": "0o600"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/adopted-parity-main/CURRENT.md": {
+      "sha256": "b0b1d862e070dfa63e85a678865532d38287681781920fa4a54de5f157847111",
+      "mode": "0o600"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/adopted-parity-main/EXECUTION_BOARD.md": {
+      "sha256": "3623e9dc3798186c839bf404a30908eb3a4716ba6e2d27bc429a8328228bcaac",
+      "mode": "0o600"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/correction-v2/source-snapshot/docs/architecture/SOURCE_CONTAINMENT_V1.md": {
+      "sha256": "0775d0c81a0d20fbfa68fc965644f8a6763f8687282030c44dd6feec287b5962",
+      "mode": "0o600"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/correction-v2/source-snapshot/docs/evidence/EXEC-005_SECURITY_REVIEW.md": {
+      "sha256": "0484bb9b23942288933a5100302c5adfda9ea207837c3956a3256b65aa06389d",
+      "mode": "0o600"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/evidence/pr143-proposed-ADR0016.md": {
+      "sha256": "f8a129c9f22288a8530cb8df7ab5f7a738db4629359db6f32049e0105e02e71c",
+      "mode": "0o600"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/evidence/pr143-proposed-CURRENT.md": {
+      "sha256": "b0b1d862e070dfa63e85a678865532d38287681781920fa4a54de5f157847111",
+      "mode": "0o600"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/final-policy/ADR0016.md": {
+      "sha256": "140b451e44a795441ef708e244789bdadef4269e22dc4d236a009f70f768b7e5",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/final-policy/CURRENT.md": {
+      "sha256": "b0b1d862e070dfa63e85a678865532d38287681781920fa4a54de5f157847111",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/final-policy/EXECUTION_BOARD.md": {
+      "sha256": "d5dd7ef7eb41d3cab9b4ce56e86f5ca9d6d51387ad21c0d5901687c75cc717ff",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/historical-navigation-before-approved-publication/PREMERGE_STATUS.md": {
+      "sha256": "223b61bc5816b5a892042bc502d7d77562de3d2db7aa15e53089ec9530ef9d51",
+      "mode": "0o600"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/historical-navigation-before-approved-publication/START_HERE.md": {
+      "sha256": "8243e3d6995c741c23341c9ae7232fa3dc786de6595d5d34463f6f3083341f11",
+      "mode": "0o600"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/historical-navigation-before-approved-publication/notes/NEXT_MISSION.md": {
+      "sha256": "698d53d2b33dd8eece6e55b2e8a26c66acd0eb67d735981475b8f08a92d3a90e",
+      "mode": "0o600"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/historical-navigation-before-approved-publication/notes/RECOVERY.md": {
+      "sha256": "7c83785fd5d6d620a7d2238da85bd64b9b869fd9020dda0adfa9c2af2a1c3486",
+      "mode": "0o600"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/historical-navigation-before-approved-publication/notes/START_HERE.md": {
+      "sha256": "45ddaca317d1376b20f2b585ed38cbed1714c271b18a4a1e07b23d799c048c2e",
+      "mode": "0o600"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/historical-navigation-before-bee2/FINALIZATION_DEPENDENCIES.md": {
+      "sha256": "a307c5154f96169ae6fc4059c16fdc10e8e8b2588637fb3ccea371d28686c8e7",
+      "mode": "0o600"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/historical-navigation-before-bee2/PREMERGE_STATUS.md": {
+      "sha256": "19cc7906292d99fa803dc8c32eaa460512bdd85686192e959eb03c87327be179",
+      "mode": "0o600"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/historical-navigation-before-bee2/START_HERE.md": {
+      "sha256": "c620064effa3791196841b11cbdcc3f755a114e09ed7c50c83267c568a4a7cd2",
+      "mode": "0o600"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/historical-navigation-before-bee2/notes/RECOVERY.md": {
+      "sha256": "f0f19ff6d4847c3ebaccae1c04b9a1f180be66272df75a5b4237654e3a897016",
+      "mode": "0o600"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/historical-navigation-before-bee2/notes/START_HERE.md": {
+      "sha256": "2391f0fb86f7d593a3caea936fddfb1f10839215f09e0e74f870332fe2f688cb",
+      "mode": "0o600"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/historical-navigation-before-correction-final-status/PREMERGE_STATUS.md": {
+      "sha256": "1ab8477e39a31873079a17c18c0730b7eda0fc5aee392dac27ed325e8283a320",
+      "mode": "0o600"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/historical-navigation-before-correction-final-status/notes/NEXT_MISSION.md": {
+      "sha256": "03bbf2bd1f3c700802be27c7559681fc37f5e00d3df36878742afde4511d788d",
+      "mode": "0o600"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/historical-navigation-before-correction-final-status/notes/RECOVERY.md": {
+      "sha256": "207cd8a9f6af9381ef212e48c7047007b6e021a9b7aec4e2432b815a018fe270",
+      "mode": "0o600"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/historical-navigation-before-correction-final-status/notes/START_HERE.md": {
+      "sha256": "377044ef07608568024940af245638ee60844bbd8ffe1823cd0eaefe4b314037",
+      "mode": "0o600"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/historical-navigation-before-exact-main-pass/FINALIZATION_DEPENDENCIES.md": {
+      "sha256": "567401851535e7ec87150bb73e3b0a4d76ed1e99bd462ac4a8c302e6e63c2936",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/historical-navigation-before-exact-main-pass/NEXT_MISSION.md": {
+      "sha256": "bd218850a712f4b5592187f0ba5873edea18b6935e50edf8eeedd242a6a3b004",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/historical-navigation-before-exact-main-pass/PREMERGE_STATUS.md": {
+      "sha256": "be2710855ad210aad3776a971573d197c92f93f5afb70d0e2e82e84068c20e82",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/historical-navigation-before-exact-main-pass/RECOVERY.md": {
+      "sha256": "cabb6367e73ff7ec9be35d2a01d62a3a0c7c6480dbdcaf89b466a5808f9ee224",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/historical-navigation-before-exact-main-pass/START_HERE.md": {
+      "sha256": "41f9fc2499541ada4c28e22c1ae6b4f3b9a1a2fb19ce61682cead6611f598409",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/historical-navigation-before-exact-main-pass/notes/RECOVERY.md": {
+      "sha256": "934e5523ee718898f728a6995e34f45ca5b59913fbea3e23f94678ce0aaf6d09",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/historical-navigation-before-exact-main-pass/notes/START_HERE.md": {
+      "sha256": "fedcbf517efa34583a655c929ccbbaf7d5118606718f1bfa18d2b53efacd9560",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/historical-navigation-before-merge/FINALIZATION_DEPENDENCIES.md": {
+      "sha256": "2db23832abce844d0feb9a8d87bda61937f03988a1ceaf8e22a68197aa017479",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/historical-navigation-before-merge/PREMERGE_STATUS.md": {
+      "sha256": "f0c1a0492408ba8153bcff5231d503d4ba6d12d5c3bdf8f539ede8e166c57c3d",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/historical-navigation-before-merge/START_HERE.md": {
+      "sha256": "94777c969aac35787f60519730dcc732d02acb38b67ad1a01635565bf0a6376c",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/historical-navigation-before-parity-adoption/FINALIZATION_DEPENDENCIES.md": {
+      "sha256": "2122b8cf704ac2875b1ae7fb3f2004b909dd663b212de34f04baa18f8b354cd6",
+      "mode": "0o600"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/historical-navigation-before-parity-adoption/PREMERGE_STATUS.md": {
+      "sha256": "a2e6bbaaa061d9d3251f93bc19fe88aecc8ea746bf096936535679b4de6847a4",
+      "mode": "0o600"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/historical-navigation-before-parity-adoption/START_HERE.md": {
+      "sha256": "4f0c8a36997b6c55e28751d63cad4a083b514cf82a3c3b91d9898f6c2abc8eb5",
+      "mode": "0o600"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/historical-navigation-before-parity-adoption/notes/NEXT_MISSION.md": {
+      "sha256": "42b4a921d24b7f0cee00a55b946d8e6010549cf2d12c0875c6d43cfbf553cc41",
+      "mode": "0o600"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/historical-navigation-before-parity-adoption/notes/RECOVERY.md": {
+      "sha256": "cc8daacf0df0ad9ff8a25e39bffb1b0e2c535c287edd8d91ad3d0d9783d39696",
+      "mode": "0o600"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/historical-navigation-before-parity-adoption/notes/START_HERE.md": {
+      "sha256": "5383a6b6cc4d0ddbe85706c9788103428b13c82ef03b2078eceae8740219ca3b",
+      "mode": "0o600"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/historical-navigation-before-path-fix/notes/NEXT_MISSION.md": {
+      "sha256": "cb56a5762a6110db94cedd8ff568da8ea45adc9a0fea4d4e8dda64efa756ec17",
+      "mode": "0o600"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/mission/pr-body-draft.md": {
+      "sha256": "3282975d5aaa7eedfd90bd7b0ce7c5522b73ba9a02a00e966a32012755413866",
+      "mode": "0o600"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/notes/ADOPTED_PARITY_POLICY.md": {
+      "sha256": "55551b43161382825c3eac7942dcc28a8c4be99d2fedc6cadec8ad9240c7a809",
+      "mode": "0o600"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/notes/CONDITIONAL_PARITY_DELTA.md": {
+      "sha256": "0e91f2a32fe073d03074502aeff9f1b4bfcc20c4920a07fd88ebe5596d0f4a16",
+      "mode": "0o600"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/notes/NEXT_MISSION.md": {
+      "sha256": "fab6a08b0562a59c8c13bc6dde8e27fb4033c14fcc10cb0a400dc6ebf0b86a0a",
+      "mode": "0o600"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/notes/PACKAGING_PLAN.md": {
+      "sha256": "374f40c66c27d2ae599cb374a2cfa077767d17183db2fdbf6bd82da1ef268085",
+      "mode": "0o600"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/notes/RECOVERY.md": {
+      "sha256": "0c258eef4f33e0e13be83fbdce5c6e839619b6316b8c414d202c404bb53338bf",
+      "mode": "0o600"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/notes/START_HERE.md": {
+      "sha256": "ce430c5507fb5b36555766210e9802b317969d00409384cf71c013d28cdd5975",
+      "mode": "0o600"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/review-sealed-memfd-probe/QUALIFICATION.md": {
+      "sha256": "3aa87e3d466753a1203315d39b520cbdefd5b794befd3c9057c0c81c4938392c",
+      "mode": "0o600"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/runners/foundation-plan/POSTGRES.md": {
+      "sha256": "33308cf1c2f641e5d2c4c98eb2fee39240bd53c35ece58e886627ef8922e8bf0",
+      "mode": "0o600"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/runners/foundation-plan/README.md": {
+      "sha256": "874c5f7a609088ef1264ff9bf1ef443243721e414151102e0837e7934d294447",
+      "mode": "0o600"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/upstream-reference/RECOVERY.md": {
+      "sha256": "63733adc23780153f88830fafb6e7e91fc802411d949649db6b95e3f5bf2fc93",
+      "mode": "0o600"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/upstream-reference/SOURCE_INTEGRATION_PLAN.md": {
+      "sha256": "0b9a6c4404949708a94313a962e82622398f937e82a47883ba8f66da3887e273",
+      "mode": "0o600"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/upstream-reference/START_HERE.md": {
+      "sha256": "903fea30a5a830d799ecc8d4b468d20355b4cbabf55cb4abd13ccf4912bbc67a",
+      "mode": "0o600"
+    },
+    "docs/handoffs/MILESTONE_EXECUTION_2026-10-05.md": {
+      "sha256": "dd41fc99dbb6c45704287a7737a684ae01ccdf3516d7740525371ba0b9c9e67a",
+      "mode": "0o664"
+    },
+    "scripts/dogfood/heman-up.sh": {
+      "sha256": "1289992c45ec0e018f54bca7866f1b681072c79b16828f1c7c99f0c3ff751382",
+      "mode": "0o775"
+    }
+  },
+  "owner_after": {
+    "ROADMAP.md": {
+      "sha256": "1be58c8eeeb8767de70660f8fc00fff3318812c659a86276680d16f954ccda4a",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-master-chief-mission/campaign-complete-v4/ARTIFACTS.sha256": {
+      "sha256": "bbba8731110c0adf2dc829bbde0541856ac26ba9417b135399f35df90998f143",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-master-chief-mission/campaign-complete-v4/README.md": {
+      "sha256": "9cbd9cd20410231dec2bb2e2766d141bb12ea00ae5f638444469b34a8017ce99",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-master-chief-mission/campaign-complete-v4/coordination/corpus-v3-static-mismatch-review.md": {
+      "sha256": "1679cf02874f29cbc4e65da6acb352b32674d5c20792359a691eb9aeadec9d34",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-master-chief-mission/campaign-complete-v4/historical/corpus-six-diagnostic-v1/CORRECTION_PROPOSAL.md": {
+      "sha256": "7053f2ea0d14f6a4d075f5051bced6fadd9d7f2c285cd7cfcaacaf00d78ed644",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-master-chief-mission/campaign-complete-v4/historical/corpus-six-diagnostic-v1/README.md": {
+      "sha256": "cb3f8caeb4a27dc53a4b43376d3e2f0de438713f59829f9c62f61da97c94b389",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-master-chief-mission/campaign-complete-v4/historical/tooling-proof/INTERFACE_REVIEW.md": {
+      "sha256": "b5009fc2ebee8377830c92e52330865c402417511f97e1cafe17d89308eff878",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-master-chief-mission/campaign-complete-v4/historical/tooling-proof/READINESS.md": {
+      "sha256": "4ad85bd704c9e40bb5e32c772ca680b85ef9be7674149a57eb310058aef933a4",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-next-master-chief-post-mission/NEXT_MASTER_CHIEF_PROMPT.md": {
+      "sha256": "2a3c10cbd9029ee635b2107886affe1dbb5732da5bc9e0f1d09a6f6094c8dd52",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-next-master-chief-post-mission/REMAINING_ACTIONS.md": {
+      "sha256": "662031d8d98bc1da9ef66bed66bae6b1ae739b0fdaff57a17c4a91d339716a18",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-next-master-chief-post-mission/SHA256SUMS": {
+      "sha256": "a4940f7721b356a3bc2a4bdbbdfc6da3a58f2b99387c5f6a07d074f4d86fa273",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-next-master-chief-post-mission/START_HERE.md": {
+      "sha256": "fe3e1e5e539a15d24f6ddb82d4f13aa33cbb7f09444c6fe968cf64a2ced7ff71",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-next-master-chief-post-mission/STATUS.md": {
+      "sha256": "602e6b1cd24d084c23a68110cf8314fa28693f39791afd7e014abfc5c74cf1e3",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-next-master-chief-post-mission/mission/README.md": {
+      "sha256": "f5c2c7124585d302f9e0b0e99dcfa0e4efcf4988260ba9d8da327d8a8fcf0799",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-next-master-chief-post-mission/mission/campaign-complete-v4/README.md": {
+      "sha256": "9cbd9cd20410231dec2bb2e2766d141bb12ea00ae5f638444469b34a8017ce99",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-next-master-chief-post-mission/mission/campaign-complete-v4/coordination/corpus-v3-static-mismatch-review.md": {
+      "sha256": "1679cf02874f29cbc4e65da6acb352b32674d5c20792359a691eb9aeadec9d34",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-next-master-chief-post-mission/mission/campaign-complete-v4/historical/corpus-six-diagnostic-v1/CORRECTION_PROPOSAL.md": {
+      "sha256": "7053f2ea0d14f6a4d075f5051bced6fadd9d7f2c285cd7cfcaacaf00d78ed644",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-next-master-chief-post-mission/mission/campaign-complete-v4/historical/corpus-six-diagnostic-v1/README.md": {
+      "sha256": "cb3f8caeb4a27dc53a4b43376d3e2f0de438713f59829f9c62f61da97c94b389",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-next-master-chief-post-mission/mission/campaign-complete-v4/historical/tooling-proof/INTERFACE_REVIEW.md": {
+      "sha256": "b5009fc2ebee8377830c92e52330865c402417511f97e1cafe17d89308eff878",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-next-master-chief-post-mission/mission/campaign-complete-v4/historical/tooling-proof/READINESS.md": {
+      "sha256": "4ad85bd704c9e40bb5e32c772ca680b85ef9be7674149a57eb310058aef933a4",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-next-master-chief-post-mission/mission/classifier-validation-v1/PR135_BODY-at-publication.md": {
+      "sha256": "019979dc7db16a75396297216b51c07426669cd8f0b867adc269c7c13222adbe",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-next-master-chief-post-mission/mission/classifier-validation-v1/README.md": {
+      "sha256": "03164ed419bcada63626dcaff064e842554faf5e0daafcba31e0856155b0de90",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-next-master-chief-post-mission/mission/classifier-validation-v1/historical/corpus-six-diagnostic-v1/CORRECTION_PROPOSAL.md": {
+      "sha256": "7053f2ea0d14f6a4d075f5051bced6fadd9d7f2c285cd7cfcaacaf00d78ed644",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-next-master-chief-post-mission/mission/classifier-validation-v1/historical/corpus-six-diagnostic-v1/README.md": {
+      "sha256": "cb3f8caeb4a27dc53a4b43376d3e2f0de438713f59829f9c62f61da97c94b389",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-next-master-chief-post-mission/mission/classifier-validation-v1/historical/corpus-v3-static-mismatch-review.md": {
+      "sha256": "1679cf02874f29cbc4e65da6acb352b32674d5c20792359a691eb9aeadec9d34",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-next-master-chief-post-mission/mission/classifier-validation-v1/validation/pr-body-draft.md": {
+      "sha256": "019d438bdbcdcf10a5923bd8225875799283b7517c4da9908ffb6a2e469dd4b7",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-next-master-chief-post-mission/mission/classifier-validation-v1/validation/pr-body-final.md": {
+      "sha256": "a88cc0f15044c8e74eb2ccc4b650982dd3302a325f7c29d80fb6292b42a5968c",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-next-master-chief-post-mission/mission/finalpublication-recovery-v1/README.md": {
+      "sha256": "19da3838c6b369958298a0f5246db8a268182f83578e44f6e4729b9b7375cf7f",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-next-master-chief-post-mission/mission/mission-final-status/README.md": {
+      "sha256": "ff5bb639b7a6df717f3dea28479556e58d772e0cadebaca4dc254027c0827fb0",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-next-master-chief-post-mission/mission/resume-local-v1/README.md": {
+      "sha256": "9ad7f6334452f43de24660c1a2e2281077fa13ec58feea58b930410bb51cb028",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-next-master-chief-post-mission/mission/resume-local-v1/pending-jcomp003-closure/README.md": {
+      "sha256": "2f9e79620a28e8b95bafedbad8c76d48a39d75bcef942accb4194dcfdf2996ec",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-next-master-chief-post-mission/mission/runtime-classifier-c94-v1/README.md": {
+      "sha256": "6b4688a276bfeff6bc8f5bbedd762a3fab3f2274443ed8808038bf1613729e00",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-next-master-chief-post-mission/mission/runtime-classifier-c94-v1/evidence/pr-review-reply.md": {
+      "sha256": "ead0b71facd73133ee0ff5ffc81d21e2ac5b1bb04b5e1282634835df20afbd9d",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-next-master-chief-post-mission/mission/runtime-complete-v2/README.md": {
+      "sha256": "6659abcfdccbe5b0e116c1ef916ca4c812d9c31a014336d2878adb47b406ab77",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-next-master-chief-post-mission/mission/runtime-complete-v2/local-evidence/PR_BODY.md": {
+      "sha256": "3d22e53e2a0d8d0dff046c112a137ae81ce35ec539d73ec0bd8b0ca7740dcf97",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-next-master-chief-post-mission/mission/runtime-complete-v2/local-evidence/closure-draft/docs/EXECUTION_BOARD.md": {
+      "sha256": "5af865fb055305d40ee0f96c619702eb0a63fff0a458396448f30ff7d54ca66c",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-next-master-chief-post-mission/mission/runtime-complete-v2/local-evidence/closure-draft/docs/evidence/AGENT-007_SECURITY_REVIEW.md": {
+      "sha256": "9caa4743009a222e57af7bb480b7a458c3921173a664ba07041c77f6147a8473",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-next-master-chief-post-mission/mission/runtime-complete-v2/local-evidence/closure-draft/docs/evidence/JCOMP-002B_SECURITY_REVIEW.md": {
+      "sha256": "d99647b55c2e3d3c04324d7c4077059406444b8dc927684877a2f0fea630ba8a",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-next-master-chief-post-mission/mission/runtime-complete-v2/local-evidence/closure-draft/docs/handoffs/CURRENT.md": {
+      "sha256": "aac8c960a16fa6a45a814f245c02de234952f67369030c1e28e5d40ead4cef79",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-next-master-chief-post-mission/mission/runtime-complete-v2/local-evidence/closure-draft/docs/threat-model/README.md": {
+      "sha256": "5874f025e08a07d76ec78849be81bbe4215feec1191491587a0bbfe893d7c52d",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-next-master-chief-post-mission/mission/runtime-complete-v2/local-evidence/short-budget/PR_BODY.md": {
+      "sha256": "287d0aab313d7b8748cdc6d87c7fa6bdf37d19a8536a926d975f67f7c9a56e1f",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-next-master-chief-post-mission/mission/runtime-complete-v2/local-evidence/short-budget/REVIEW_REPLY.md": {
+      "sha256": "c5eac0ad79eaa2fd435064dca11380bda71655d48823620b1cf457682a8eb29f",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-next-master-chief-post-mission/mission/runtime-interim-v1/README.md": {
+      "sha256": "db0b8c6c63a9fae8eec533c40ffb0a86702b9f7d3e9193ec419930e56a77132a",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-next-master-chief-post-mission/mission/runtime-interim-v1/local-evidence/PR_BODY.md": {
+      "sha256": "3d22e53e2a0d8d0dff046c112a137ae81ce35ec539d73ec0bd8b0ca7740dcf97",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-next-master-chief-post-mission/mission/runtime-interim-v1/local-evidence/closure-draft/docs/EXECUTION_BOARD.md": {
+      "sha256": "5af865fb055305d40ee0f96c619702eb0a63fff0a458396448f30ff7d54ca66c",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-next-master-chief-post-mission/mission/runtime-interim-v1/local-evidence/closure-draft/docs/evidence/AGENT-007_SECURITY_REVIEW.md": {
+      "sha256": "9caa4743009a222e57af7bb480b7a458c3921173a664ba07041c77f6147a8473",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-next-master-chief-post-mission/mission/runtime-interim-v1/local-evidence/closure-draft/docs/evidence/JCOMP-002B_SECURITY_REVIEW.md": {
+      "sha256": "d99647b55c2e3d3c04324d7c4077059406444b8dc927684877a2f0fea630ba8a",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-next-master-chief-post-mission/mission/runtime-interim-v1/local-evidence/closure-draft/docs/handoffs/CURRENT.md": {
+      "sha256": "aac8c960a16fa6a45a814f245c02de234952f67369030c1e28e5d40ead4cef79",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-next-master-chief-post-mission/mission/runtime-interim-v1/local-evidence/closure-draft/docs/threat-model/README.md": {
+      "sha256": "5874f025e08a07d76ec78849be81bbe4215feec1191491587a0bbfe893d7c52d",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-next-master-chief-post-mission/mission/runtime-interim-v1/local-evidence/short-budget/PR_BODY.md": {
+      "sha256": "287d0aab313d7b8748cdc6d87c7fa6bdf37d19a8536a926d975f67f7c9a56e1f",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-10-next-master-chief-post-mission/mission/runtime-interim-v1/local-evidence/short-budget/REVIEW_REPLY.md": {
+      "sha256": "c5eac0ad79eaa2fd435064dca11380bda71655d48823620b1cf457682a8eb29f",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/FINALIZATION_DEPENDENCIES.md": {
+      "sha256": "983da4743493271fc8fadbdb1a44f514e38bf1f0c6442b7dd38b91f480370888",
+      "mode": "0o600"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/NEXT_MISSION.md": {
+      "sha256": "cd0baab78c6a2b5fec0c2f5e129c40824f1e2d8cd83b326d3c53e4faf9ed9328",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/PREMERGE_STATUS.md": {
+      "sha256": "fa98f26443baec2bfb68e2add6ae23fbc1a6a44ef6e5e33bb73187a979e19ef4",
+      "mode": "0o600"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/RECOVERY.md": {
+      "sha256": "7c4cdf19bf286a5273cebc6941db144a745d365f71cc1bf93c52728a1f7ab57e",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/SHA256SUMS": {
+      "sha256": "72e758c7ecdd546ca830b734d5b7953a0fdb1fcfeb817fcaf45f7da8abc0bd74",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/START_HERE.md": {
+      "sha256": "0548ec5644b81f86126f95cd5101c8b9ff266b055a27ed048ff17a306a39d733",
+      "mode": "0o600"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/adopted-parity-main/ADR0016.md": {
+      "sha256": "140b451e44a795441ef708e244789bdadef4269e22dc4d236a009f70f768b7e5",
+      "mode": "0o600"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/adopted-parity-main/CURRENT.md": {
+      "sha256": "b0b1d862e070dfa63e85a678865532d38287681781920fa4a54de5f157847111",
+      "mode": "0o600"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/adopted-parity-main/EXECUTION_BOARD.md": {
+      "sha256": "3623e9dc3798186c839bf404a30908eb3a4716ba6e2d27bc429a8328228bcaac",
+      "mode": "0o600"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/correction-v2/source-snapshot/docs/architecture/SOURCE_CONTAINMENT_V1.md": {
+      "sha256": "0775d0c81a0d20fbfa68fc965644f8a6763f8687282030c44dd6feec287b5962",
+      "mode": "0o600"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/correction-v2/source-snapshot/docs/evidence/EXEC-005_SECURITY_REVIEW.md": {
+      "sha256": "0484bb9b23942288933a5100302c5adfda9ea207837c3956a3256b65aa06389d",
+      "mode": "0o600"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/evidence/pr143-proposed-ADR0016.md": {
+      "sha256": "f8a129c9f22288a8530cb8df7ab5f7a738db4629359db6f32049e0105e02e71c",
+      "mode": "0o600"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/evidence/pr143-proposed-CURRENT.md": {
+      "sha256": "b0b1d862e070dfa63e85a678865532d38287681781920fa4a54de5f157847111",
+      "mode": "0o600"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/final-policy/ADR0016.md": {
+      "sha256": "140b451e44a795441ef708e244789bdadef4269e22dc4d236a009f70f768b7e5",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/final-policy/CURRENT.md": {
+      "sha256": "b0b1d862e070dfa63e85a678865532d38287681781920fa4a54de5f157847111",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/final-policy/EXECUTION_BOARD.md": {
+      "sha256": "d5dd7ef7eb41d3cab9b4ce56e86f5ca9d6d51387ad21c0d5901687c75cc717ff",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/historical-navigation-before-approved-publication/PREMERGE_STATUS.md": {
+      "sha256": "223b61bc5816b5a892042bc502d7d77562de3d2db7aa15e53089ec9530ef9d51",
+      "mode": "0o600"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/historical-navigation-before-approved-publication/START_HERE.md": {
+      "sha256": "8243e3d6995c741c23341c9ae7232fa3dc786de6595d5d34463f6f3083341f11",
+      "mode": "0o600"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/historical-navigation-before-approved-publication/notes/NEXT_MISSION.md": {
+      "sha256": "698d53d2b33dd8eece6e55b2e8a26c66acd0eb67d735981475b8f08a92d3a90e",
+      "mode": "0o600"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/historical-navigation-before-approved-publication/notes/RECOVERY.md": {
+      "sha256": "7c83785fd5d6d620a7d2238da85bd64b9b869fd9020dda0adfa9c2af2a1c3486",
+      "mode": "0o600"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/historical-navigation-before-approved-publication/notes/START_HERE.md": {
+      "sha256": "45ddaca317d1376b20f2b585ed38cbed1714c271b18a4a1e07b23d799c048c2e",
+      "mode": "0o600"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/historical-navigation-before-bee2/FINALIZATION_DEPENDENCIES.md": {
+      "sha256": "a307c5154f96169ae6fc4059c16fdc10e8e8b2588637fb3ccea371d28686c8e7",
+      "mode": "0o600"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/historical-navigation-before-bee2/PREMERGE_STATUS.md": {
+      "sha256": "19cc7906292d99fa803dc8c32eaa460512bdd85686192e959eb03c87327be179",
+      "mode": "0o600"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/historical-navigation-before-bee2/START_HERE.md": {
+      "sha256": "c620064effa3791196841b11cbdcc3f755a114e09ed7c50c83267c568a4a7cd2",
+      "mode": "0o600"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/historical-navigation-before-bee2/notes/RECOVERY.md": {
+      "sha256": "f0f19ff6d4847c3ebaccae1c04b9a1f180be66272df75a5b4237654e3a897016",
+      "mode": "0o600"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/historical-navigation-before-bee2/notes/START_HERE.md": {
+      "sha256": "2391f0fb86f7d593a3caea936fddfb1f10839215f09e0e74f870332fe2f688cb",
+      "mode": "0o600"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/historical-navigation-before-correction-final-status/PREMERGE_STATUS.md": {
+      "sha256": "1ab8477e39a31873079a17c18c0730b7eda0fc5aee392dac27ed325e8283a320",
+      "mode": "0o600"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/historical-navigation-before-correction-final-status/notes/NEXT_MISSION.md": {
+      "sha256": "03bbf2bd1f3c700802be27c7559681fc37f5e00d3df36878742afde4511d788d",
+      "mode": "0o600"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/historical-navigation-before-correction-final-status/notes/RECOVERY.md": {
+      "sha256": "207cd8a9f6af9381ef212e48c7047007b6e021a9b7aec4e2432b815a018fe270",
+      "mode": "0o600"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/historical-navigation-before-correction-final-status/notes/START_HERE.md": {
+      "sha256": "377044ef07608568024940af245638ee60844bbd8ffe1823cd0eaefe4b314037",
+      "mode": "0o600"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/historical-navigation-before-exact-main-pass/FINALIZATION_DEPENDENCIES.md": {
+      "sha256": "567401851535e7ec87150bb73e3b0a4d76ed1e99bd462ac4a8c302e6e63c2936",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/historical-navigation-before-exact-main-pass/NEXT_MISSION.md": {
+      "sha256": "bd218850a712f4b5592187f0ba5873edea18b6935e50edf8eeedd242a6a3b004",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/historical-navigation-before-exact-main-pass/PREMERGE_STATUS.md": {
+      "sha256": "be2710855ad210aad3776a971573d197c92f93f5afb70d0e2e82e84068c20e82",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/historical-navigation-before-exact-main-pass/RECOVERY.md": {
+      "sha256": "cabb6367e73ff7ec9be35d2a01d62a3a0c7c6480dbdcaf89b466a5808f9ee224",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/historical-navigation-before-exact-main-pass/START_HERE.md": {
+      "sha256": "41f9fc2499541ada4c28e22c1ae6b4f3b9a1a2fb19ce61682cead6611f598409",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/historical-navigation-before-exact-main-pass/notes/RECOVERY.md": {
+      "sha256": "934e5523ee718898f728a6995e34f45ca5b59913fbea3e23f94678ce0aaf6d09",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/historical-navigation-before-exact-main-pass/notes/START_HERE.md": {
+      "sha256": "fedcbf517efa34583a655c929ccbbaf7d5118606718f1bfa18d2b53efacd9560",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/historical-navigation-before-merge/FINALIZATION_DEPENDENCIES.md": {
+      "sha256": "2db23832abce844d0feb9a8d87bda61937f03988a1ceaf8e22a68197aa017479",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/historical-navigation-before-merge/PREMERGE_STATUS.md": {
+      "sha256": "f0c1a0492408ba8153bcff5231d503d4ba6d12d5c3bdf8f539ede8e166c57c3d",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/historical-navigation-before-merge/START_HERE.md": {
+      "sha256": "94777c969aac35787f60519730dcc732d02acb38b67ad1a01635565bf0a6376c",
+      "mode": "0o664"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/historical-navigation-before-parity-adoption/FINALIZATION_DEPENDENCIES.md": {
+      "sha256": "2122b8cf704ac2875b1ae7fb3f2004b909dd663b212de34f04baa18f8b354cd6",
+      "mode": "0o600"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/historical-navigation-before-parity-adoption/PREMERGE_STATUS.md": {
+      "sha256": "a2e6bbaaa061d9d3251f93bc19fe88aecc8ea746bf096936535679b4de6847a4",
+      "mode": "0o600"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/historical-navigation-before-parity-adoption/START_HERE.md": {
+      "sha256": "4f0c8a36997b6c55e28751d63cad4a083b514cf82a3c3b91d9898f6c2abc8eb5",
+      "mode": "0o600"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/historical-navigation-before-parity-adoption/notes/NEXT_MISSION.md": {
+      "sha256": "42b4a921d24b7f0cee00a55b946d8e6010549cf2d12c0875c6d43cfbf553cc41",
+      "mode": "0o600"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/historical-navigation-before-parity-adoption/notes/RECOVERY.md": {
+      "sha256": "cc8daacf0df0ad9ff8a25e39bffb1b0e2c535c287edd8d91ad3d0d9783d39696",
+      "mode": "0o600"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/historical-navigation-before-parity-adoption/notes/START_HERE.md": {
+      "sha256": "5383a6b6cc4d0ddbe85706c9788103428b13c82ef03b2078eceae8740219ca3b",
+      "mode": "0o600"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/historical-navigation-before-path-fix/notes/NEXT_MISSION.md": {
+      "sha256": "cb56a5762a6110db94cedd8ff568da8ea45adc9a0fea4d4e8dda64efa756ec17",
+      "mode": "0o600"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/mission/pr-body-draft.md": {
+      "sha256": "3282975d5aaa7eedfd90bd7b0ce7c5522b73ba9a02a00e966a32012755413866",
+      "mode": "0o600"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/notes/ADOPTED_PARITY_POLICY.md": {
+      "sha256": "55551b43161382825c3eac7942dcc28a8c4be99d2fedc6cadec8ad9240c7a809",
+      "mode": "0o600"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/notes/CONDITIONAL_PARITY_DELTA.md": {
+      "sha256": "0e91f2a32fe073d03074502aeff9f1b4bfcc20c4920a07fd88ebe5596d0f4a16",
+      "mode": "0o600"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/notes/NEXT_MISSION.md": {
+      "sha256": "fab6a08b0562a59c8c13bc6dde8e27fb4033c14fcc10cb0a400dc6ebf0b86a0a",
+      "mode": "0o600"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/notes/PACKAGING_PLAN.md": {
+      "sha256": "374f40c66c27d2ae599cb374a2cfa077767d17183db2fdbf6bd82da1ef268085",
+      "mode": "0o600"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/notes/RECOVERY.md": {
+      "sha256": "0c258eef4f33e0e13be83fbdce5c6e839619b6316b8c414d202c404bb53338bf",
+      "mode": "0o600"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/notes/START_HERE.md": {
+      "sha256": "ce430c5507fb5b36555766210e9802b317969d00409384cf71c013d28cdd5975",
+      "mode": "0o600"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/review-sealed-memfd-probe/QUALIFICATION.md": {
+      "sha256": "3aa87e3d466753a1203315d39b520cbdefd5b794befd3c9057c0c81c4938392c",
+      "mode": "0o600"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/runners/foundation-plan/POSTGRES.md": {
+      "sha256": "33308cf1c2f641e5d2c4c98eb2fee39240bd53c35ece58e886627ef8922e8bf0",
+      "mode": "0o600"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/runners/foundation-plan/README.md": {
+      "sha256": "874c5f7a609088ef1264ff9bf1ef443243721e414151102e0837e7934d294447",
+      "mode": "0o600"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/upstream-reference/RECOVERY.md": {
+      "sha256": "63733adc23780153f88830fafb6e7e91fc802411d949649db6b95e3f5bf2fc93",
+      "mode": "0o600"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/upstream-reference/SOURCE_INTEGRATION_PLAN.md": {
+      "sha256": "0b9a6c4404949708a94313a962e82622398f937e82a47883ba8f66da3887e273",
+      "mode": "0o600"
+    },
+    "docs/handoffs/2026-09-11-source-prerequisite-verified/upstream-reference/START_HERE.md": {
+      "sha256": "903fea30a5a830d799ecc8d4b468d20355b4cbabf55cb4abd13ccf4912bbc67a",
+      "mode": "0o600"
+    },
+    "docs/handoffs/MILESTONE_EXECUTION_2026-10-05.md": {
+      "sha256": "dd41fc99dbb6c45704287a7737a684ae01ccdf3516d7740525371ba0b9c9e67a",
+      "mode": "0o664"
+    },
+    "scripts/dogfood/heman-up.sh": {
+      "sha256": "1289992c45ec0e018f54bca7866f1b681072c79b16828f1c7c99f0c3ff751382",
+      "mode": "0o775"
+    }
+  },
+  "scope": "Real current owner tree with all107registered historical Markdown, exact3manifests and3owner/planning files preserved; original4falsealarms addressed without ownerarchive edits. Bounded source-freeze actualproof, not candidatepublication/protectedmerge/ticketclosure."
+}

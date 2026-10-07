@@ -1,0 +1,55 @@
+{
+  "schema": "hyg-003-owner-archive-fixtures-v1",
+  "scope": "Seven exact supplied owner-archive source files: three whole seals, four Markdown files. This partial test mirror does not assert complete archive recovery. No invented manifest or registry pins.",
+  "files": [
+    {
+      "path": "docs/handoffs/2026-09-10-master-chief-mission/campaign-complete-v4/ARTIFACTS.sha256",
+      "sha256": "bbba8731110c0adf2dc829bbde0541856ac26ba9417b135399f35df90998f143",
+      "bytes": 202410,
+      "fixture": "0-manifest.gz",
+      "encoding": "gzip"
+    },
+    {
+      "path": "docs/handoffs/2026-09-10-master-chief-mission/campaign-complete-v4/historical/tooling-proof/READINESS.md",
+      "sha256": "4ad85bd704c9e40bb5e32c772ca680b85ef9be7674149a57eb310058aef933a4",
+      "bytes": 4935,
+      "fixture": "1-READINESS.md",
+      "encoding": "identity"
+    },
+    {
+      "path": "docs/handoffs/2026-09-10-next-master-chief-post-mission/SHA256SUMS",
+      "sha256": "a4940f7721b356a3bc2a4bdbbdfc6da3a58f2b99387c5f6a07d074f4d86fa273",
+      "bytes": 559239,
+      "fixture": "2-manifest.gz",
+      "encoding": "gzip"
+    },
+    {
+      "path": "docs/handoffs/2026-09-10-next-master-chief-post-mission/START_HERE.md",
+      "sha256": "fe3e1e5e539a15d24f6ddb82d4f13aa33cbb7f09444c6fe968cf64a2ced7ff71",
+      "bytes": 3480,
+      "fixture": "3-START_HERE.md",
+      "encoding": "identity"
+    },
+    {
+      "path": "docs/handoffs/2026-09-10-next-master-chief-post-mission/mission/campaign-complete-v4/historical/tooling-proof/READINESS.md",
+      "sha256": "4ad85bd704c9e40bb5e32c772ca680b85ef9be7674149a57eb310058aef933a4",
+      "bytes": 4935,
+      "fixture": "4-READINESS.md",
+      "encoding": "identity"
+    },
+    {
+      "path": "docs/handoffs/2026-09-11-source-prerequisite-verified/SHA256SUMS",
+      "sha256": "72e758c7ecdd546ca830b734d5b7953a0fdb1fcfeb817fcaf45f7da8abc0bd74",
+      "bytes": 51368,
+      "fixture": "5-manifest.gz",
+      "encoding": "gzip"
+    },
+    {
+      "path": "docs/handoffs/2026-09-11-source-prerequisite-verified/START_HERE.md",
+      "sha256": "0548ec5644b81f86126f95cd5101c8b9ff266b055a27ed048ff17a306a39d733",
+      "bytes": 3938,
+      "fixture": "6-START_HERE.md",
+      "encoding": "identity"
+    }
+  ]
+}

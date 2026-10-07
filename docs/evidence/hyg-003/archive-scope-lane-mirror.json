@@ -1,0 +1,45 @@
+{
+  "scope": "Isolated mirror alignment only; no architecture shell/native/database execution",
+  "removed_exact_line": "python3 scripts/test-stale-claims-archives.py\n",
+  "results": [
+    {
+      "state": "original",
+      "command": [
+        "python3",
+        "-B",
+        "scripts/dogfood/verify-lanes.py"
+      ],
+      "exit_code": 0,
+      "stdout": "dogfood-lanes-ok lanes=6 checked=68 unmirrored=1\n",
+      "stderr": ""
+    },
+    {
+      "state": "archive command removed",
+      "command": [
+        "python3",
+        "-B",
+        "scripts/dogfood/verify-lanes.py"
+      ],
+      "exit_code": 1,
+      "stdout": "dogfood-lanes error: architecture.sh: Foundation architecture runs `python3 scripts/test-stale-claims-archives.py` but the lane does not\n",
+      "stderr": ""
+    },
+    {
+      "state": "restored",
+      "command": [
+        "python3",
+        "-B",
+        "scripts/dogfood/verify-lanes.py"
+      ],
+      "exit_code": 0,
+      "stdout": "dogfood-lanes-ok lanes=6 checked=68 unmirrored=1\n",
+      "stderr": ""
+    }
+  ],
+  "source_sha256": {
+    ".github/workflows/foundation.yml": "74a79d56cb72bd32eedd3148676fd8bcc599655769ad416635da078bf8871623",
+    "scripts/dogfood/architecture.sh": "6d1152cea21b7cc1616b1cb8a50797e7d1cfe2fcb3765e2aabb5bcd911989b31",
+    "scripts/validate-foundation.sh": "1146661ad478df702894cc9bf1ec3f4379a64757f096e1218e32120ade68821b",
+    "scripts/dogfood/verify-lanes.py": "9d8a99876d38bd2d7f3f98b968a45b3055963302d10e6a4639ab5803c582a2a3"
+  }
+}

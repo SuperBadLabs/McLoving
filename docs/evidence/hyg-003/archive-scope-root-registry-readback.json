@@ -1,0 +1,30 @@
+{
+  "observed_at_utc": "2026-10-07T00:03:56.924006+00:00",
+  "scope": "Read-only manifest pin and exact Markdown population; candidate gate not executed/frozen; no archive edits",
+  "units": [
+    {
+      "root": "docs/handoffs/2026-09-10-master-chief-mission/campaign-complete-v4",
+      "manifest_sha256": "bbba8731110c0adf2dc829bbde0541856ac26ba9417b135399f35df90998f143",
+      "total_entries": 1898,
+      "listed_markdown": 6,
+      "missing_listed_markdown": 0,
+      "changed_listed_markdown": []
+    },
+    {
+      "root": "docs/handoffs/2026-09-10-next-master-chief-post-mission",
+      "manifest_sha256": "a4940f7721b356a3bc2a4bdbbdfc6da3a58f2b99387c5f6a07d074f4d86fa273",
+      "total_entries": 4140,
+      "listed_markdown": 42,
+      "missing_listed_markdown": 0,
+      "changed_listed_markdown": []
+    },
+    {
+      "root": "docs/handoffs/2026-09-11-source-prerequisite-verified",
+      "manifest_sha256": "72e758c7ecdd546ca830b734d5b7953a0fdb1fcfeb817fcaf45f7da8abc0bd74",
+      "total_entries": 431,
+      "listed_markdown": 59,
+      "missing_listed_markdown": 0,
+      "changed_listed_markdown": []
+    }
+  ]
+}

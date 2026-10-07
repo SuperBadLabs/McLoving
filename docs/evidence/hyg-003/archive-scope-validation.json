@@ -1,0 +1,123 @@
+{
+  "ticket": "HYG-003",
+  "base": "7ff63e54f70ea5d1110b72037e84fe6011f50d01",
+  "scope": "Clean isolated candidate; actual owner tree requires separate root-owned observation. No native/database/Git workloads.",
+  "results": [
+    {
+      "command": [
+        "python3",
+        "-B",
+        "scripts/test-execution-board.py"
+      ],
+      "exit_code": 0,
+      "stdout": "",
+      "stderr": "...................................................................................\n----------------------------------------------------------------------\nRan 83 tests in 4.107s\n\nOK\n"
+    },
+    {
+      "command": [
+        "python3",
+        "-B",
+        "scripts/test-ticket-closure-receipts.py"
+      ],
+      "exit_code": 0,
+      "stdout": "",
+      "stderr": ".....................................................................................\n----------------------------------------------------------------------\nRan 85 tests in 0.485s\n\nOK\n"
+    },
+    {
+      "command": [
+        "python3",
+        "-B",
+        "scripts/test-stale-claims-archives.py"
+      ],
+      "exit_code": 0,
+      "stdout": "",
+      "stderr": ".................................\n----------------------------------------------------------------------\nRan 33 tests in 1.572s\n\nOK\n"
+    },
+    {
+      "command": [
+        "python3",
+        "-B",
+        "scripts/verify-execution-board.py"
+      ],
+      "exit_code": 0,
+      "stdout": "execution-board-ok tickets=147 remaining=16 current_slots=1 batch=0 parallel=11 serial=5\n",
+      "stderr": ""
+    },
+    {
+      "command": [
+        "python3",
+        "-B",
+        "scripts/verify-ticket-closure-receipts.py"
+      ],
+      "exit_code": 0,
+      "stdout": "closure-receipts-ok done=108 receipted=53 reviewed=52 receipt_exempt=50 threat_model_exempt=24 debt=37\n",
+      "stderr": "closure-receipts debt: AGENT-001 is DONE but docs/threat-model/README.md attributes no review to it in the closure-attribution table [no document attributes a review; closed before the threat-model Working rule entered the board in abb7c91, so none was demanded at the time, and deliberately kept out of the pre-rule exemption so that losing this reference fails rather than passes silently -- which is what HYG-002 made it do]\nclosure-receipts debt: AGENT-002 is DONE but docs/threat-model/README.md attributes no review to it in the closure-attribution table [no document attributes a review; closed before the threat-model Working rule entered the board in abb7c91, so none was demanded at the time, and deliberately kept out of the pre-rule exemption so that losing this reference fails rather than passes silently -- which is what HYG-002 made it do]\nclosure-receipts debt: AGENT-003 is DONE but docs/threat-model/README.md attributes no review to it in the closure-attribution table [no document attributes a review; closed before the threat-model Working rule entered the board in abb7c91, so none was demanded at the time, and deliberately kept out of the pre-rule exemption so that losing this reference fails rather than passes silently -- which is what HYG-002 made it do]\nclosure-receipts debt: ALPHA-001 is DONE without docs/evidence/ALPHA-001_SECURITY_REVIEW.md [2026-08-17 c6a238a; board row names docs/ALPHA_DEMO.md as its closure, and the threat model carries an ALPHA-001 review section]\nclosure-receipts debt: ALPHA-001 is DONE but docs/threat-model/README.md attributes no review to it in the closure-attribution table [credited before HYG-002 by a closure-review heading in the threat model, while the document its board row cites as closure never names the ticket, so no document records a review of it]\nclosure-receipts debt: ARCH-001 is DONE but docs/threat-model/README.md attributes no review to it in the closure-attribution table [no document attributes a review; closed before the threat-model Working rule entered the board in abb7c91, so none was demanded at the time, and deliberately kept out of the pre-rule exemption so that losing this reference fails rather than passes silently -- which is what HYG-002 made it do]\nclosure-receipts debt: CACHE-001 is DONE but docs/threat-model/README.md attributes no review to it in the closure-attribution table [2026-08-10 3787b42; added TM-036 without naming the ticket, and the verification-ownership table has no entry for it]\nclosure-receipts debt: CI-001 is DONE but docs/threat-model/README.md attributes no review to it in the closure-attribution table [2026-07-31 1348e34; CI routing change, threat model untouched]\nclosure-receipts debt: CTRL-001 is DONE but docs/threat-model/README.md attributes no review to it in the closure-attribution table [no document attributes a review; closed before the threat-model Working rule entered the board in abb7c91, so none was demanded at the time, and deliberately kept out of the pre-rule exemption so that losing this reference fails rather than passes silently -- which is what HYG-002 made it do]\nclosure-receipts debt: DIFF-001 is DONE but docs/threat-model/README.md attributes no review to it in the closure-attribution table [credited before HYG-002 by a register verification cell whose only cited document is another ticket's closure evidence, so no row asserts that this ticket's own evidence verified the threat]\nclosure-receipts debt: DIFF-002 is DONE without docs/evidence/DIFF-002_SECURITY_REVIEW.md [2026-08-14 ec18c5d; board row names docs/architecture/STATE_POLICY_DIFFERENTIAL_V1.md as its closure]\nclosure-receipts debt: INV-001 is DONE but docs/threat-model/README.md attributes no review to it in the closure-attribution table [credited before HYG-002 only by the `Area | First implementation ticket` ownership table, which records which ticket first implemented an area and asserts nothing about a review having happened]\nclosure-receipts debt: INV-002 is DONE but docs/threat-model/README.md attributes no review to it in the closure-attribution table [credited before HYG-002 only by the `Area | First implementation ticket` ownership table, which records which ticket first implemented an area and asserts nothing about a review having happened]\nclosure-receipts debt: INV-003 is DONE but docs/threat-model/README.md attributes no review to it in the closure-attribution table [credited before HYG-002 only by the `Area | First implementation ticket` ownership table, which records which ticket first implemented an area and asserts nothing about a review having happened]\nclosure-receipts debt: INV-004 is DONE but docs/threat-model/README.md attributes no review to it in the closure-attribution table [credited before HYG-002 only by the `Area | First implementation ticket` ownership table, which records which ticket first implemented an area and asserts nothing about a review having happened]\nclosure-receipts debt: IR-001 is DONE but docs/threat-model/README.md attributes no review to it in the closure-attribution table [no document attributes a review; closed before the threat-model Working rule entered the board in abb7c91, so none was demanded at the time, and deliberately kept out of the pre-rule exemption so that losing this reference fails rather than passes silently -- which is what HYG-002 made it do]\nclosure-receipts debt: MIG-000 is DONE but docs/threat-model/README.md attributes no review to it in the closure-attribution table [credited before HYG-002 only by the `Area | First implementation ticket` ownership table, which records which ticket first implemented an area and asserts nothing about a review having happened]\nclosure-receipts debt: MIG-001 is DONE but docs/threat-model/README.md attributes no review to it in the closure-attribution table [2026-07-31 0d78b1a; compiler boundary, threat model untouched]\nclosure-receipts debt: MIG-002 is DONE but docs/threat-model/README.md attributes no review to it in the closure-attribution table [named in the threat register outside the Required verification column, so no row asserts that this ticket's evidence verified the threat]\nclosure-receipts debt: MIG-003 is DONE but docs/threat-model/README.md attributes no review to it in the closure-attribution table [2026-07-31 759b633; compiler boundary, threat model untouched]\nclosure-receipts debt: MIG-004 is DONE but docs/threat-model/README.md attributes no review to it in the closure-attribution table [2026-07-31 759b633; compiler boundary, threat model untouched]\nclosure-receipts debt: MIG-005 is DONE but docs/threat-model/README.md attributes no review to it in the closure-attribution table [2026-08-01 393c938; library compiler, threat model untouched]\nclosure-receipts debt: MIG-005A is DONE but docs/threat-model/README.md attributes no review to it in the closure-attribution table [credited before HYG-002 by a register verification cell whose only cited document is another ticket's closure evidence, so no row asserts that this ticket's own evidence verified the threat]\nclosure-receipts debt: MIG-006 is DONE without docs/evidence/MIG-006_SECURITY_REVIEW.md [2026-08-15 6ac9be9; board row names docs/architecture/DIFFERENTIAL_AGGREGATE_V1.md as its closure]\nclosure-receipts debt: MIG-006 is DONE but docs/threat-model/README.md attributes no review to it in the closure-attribution table [named in the threat register outside the Required verification column, so no row asserts that this ticket's evidence verified the threat]\nclosure-receipts debt: MIG-007 is DONE without docs/evidence/MIG-007_SECURITY_REVIEW.md [2026-08-16 4b2d38a; migration-package closure, no receipt]\nclosure-receipts debt: MIG-007 is DONE but docs/threat-model/README.md attributes no review to it in the closure-attribution table [named in the threat register outside the Required verification column, so no row asserts that this ticket's evidence verified the threat]\nclosure-receipts debt: OPS-001 is DONE but docs/threat-model/README.md attributes no review to it in the closure-attribution table [no document attributes a review; closed before the threat-model Working rule entered the board in abb7c91, so none was demanded at the time, and deliberately kept out of the pre-rule exemption so that losing this reference fails rather than passes silently -- which is what HYG-002 made it do]\nclosure-receipts debt: OPS-002 is DONE but docs/threat-model/README.md attributes no review to it in the closure-attribution table [no document attributes a review; closed before the threat-model Working rule entered the board in abb7c91, so none was demanded at the time, and deliberately kept out of the pre-rule exemption so that losing this reference fails rather than passes silently -- which is what HYG-002 made it do]\nclosure-receipts debt: SCM-001 is DONE but docs/threat-model/README.md attributes no review to it in the closure-attribution table [2026-08-08 0ca0142; source-acquisition boundary closed without touching the threat model at all]\nclosure-receipts debt: SEC-002 is DONE but docs/threat-model/README.md attributes no review to it in the closure-attribution table [no document attributes a review; closed before the threat-model Working rule entered the board in abb7c91, so none was demanded at the time, and deliberately kept out of the pre-rule exemption so that losing this reference fails rather than passes silently -- which is what HYG-002 made it do]\nclosure-receipts debt: SEC-003 is DONE but docs/threat-model/README.md attributes no review to it in the closure-attribution table [no document attributes a review; closed before the threat-model Working rule entered the board in abb7c91, so none was demanded at the time, and deliberately kept out of the pre-rule exemption so that losing this reference fails rather than passes silently -- which is what HYG-002 made it do]\nclosure-receipts debt: SECRET-001 is DONE but docs/threat-model/README.md attributes no review to it in the closure-attribution table [2026-08-13 ccd9b7c; added TM-041 without naming the ticket, and the verification-ownership table has no entry for it]\nclosure-receipts debt: SHADOW-001 is DONE without docs/evidence/SHADOW-001_SECURITY_REVIEW.md [2026-08-16 7912a0f; board row names docs/architecture/SHADOW_QUALIFICATION_V1.md as its closure]\nclosure-receipts debt: WIN-001 is DONE but docs/threat-model/README.md attributes no review to it in the closure-attribution table [credited before HYG-002 only by the `Area | First implementation ticket` ownership table, which records which ticket first implemented an area and asserts nothing about a review having happened]\nclosure-receipts debt: WIN-002 is DONE but docs/threat-model/README.md attributes no review to it in the closure-attribution table [credited before HYG-002 only by the `Area | First implementation ticket` ownership table, which records which ticket first implemented an area and asserts nothing about a review having happened]\nclosure-receipts debt: WIN-003 is DONE but docs/threat-model/README.md attributes no review to it in the closure-attribution table [2026-08-04 d854c97; named only in prose at docs/threat-model/README.md, with no ownership-table row, register row, or closure-review heading]\n"
+    },
+    {
+      "command": [
+        "python3",
+        "-I",
+        "scripts/test-workflow-aggregate.py"
+      ],
+      "exit_code": 0,
+      "stdout": "",
+      "stderr": ".............\n----------------------------------------------------------------------\nRan 13 tests in 7.740s\n\nOK\n"
+    },
+    {
+      "command": [
+        "python3",
+        "-I",
+        "scripts/test-windows-agent-impact.py"
+      ],
+      "exit_code": 0,
+      "stdout": "",
+      "stderr": "...............\n----------------------------------------------------------------------\nRan 15 tests in 0.200s\n\nOK\n"
+    },
+    {
+      "command": [
+        "python3",
+        "-B",
+        "scripts/dogfood/verify-lanes.py"
+      ],
+      "exit_code": 0,
+      "stdout": "dogfood-lanes-ok lanes=6 checked=68 unmirrored=1\n",
+      "stderr": ""
+    },
+    {
+      "command": [
+        "bash",
+        "-n",
+        "scripts/validate-foundation.sh"
+      ],
+      "exit_code": 0,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "command": [
+        "bash",
+        "-n",
+        "scripts/dogfood/architecture.sh"
+      ],
+      "exit_code": 0,
+      "stdout": "",
+      "stderr": ""
+    }
+  ],
+  "source_sha256": {
+    "scripts/stale_claims.py": "c28723b48e560900502e7805f6d441f4853c00fc572b0d721981414043fd26da",
+    "scripts/reviewed_handoff_archives.py": "2407a88d0694fb5d855f4decc41792a25c8a0418c26c965d7b4b2cbc49b50f94",
+    "scripts/stale-claims-archives.json": "b5e4acf4b39e20f31db9e2f1d83c9d6d30cd50211523d6895130fb39c5af726f",
+    "scripts/test-stale-claims-archives.py": "f2c7e8a5b0b31fdf2dabd250630af1c1c74e4267cb4dada822b1d1e92c0d465e",
+    "scripts/test-stale-claims-mutations.py": "180ce6caf3542c59e1224f535ab4832a8b00e8c6b878c2d5989304c3e1b602e2",
+    "scripts/verify-execution-board.py": "b1e88b89ea4997b7c59178023e1aaef6ca02a846a81af843b536a9e170aa3d49",
+    "scripts/verify-ticket-closure-receipts.py": "1068fe3c345e7293faccd27a1b7b20b511712a4f3e02b846bcd38b73e7035414",
+    "scripts/test-execution-board.py": "7edb685dbd6fe633773cdf2cc0e3405b3c3188142e55466ba526e8646f0798e7",
+    "scripts/test-ticket-closure-receipts.py": "46c1b03499bd215a21592c00ab932a41480172f199964ab8c2f80de924a46a2b",
+    "scripts/fixtures/stale-claims.json": "dffc504be3b305e2dba583bbac59de91eb940a5e2e555e973760321cc2563604",
+    ".github/workflows/foundation.yml": "74a79d56cb72bd32eedd3148676fd8bcc599655769ad416635da078bf8871623",
+    "scripts/validate-foundation.sh": "1146661ad478df702894cc9bf1ec3f4379a64757f096e1218e32120ade68821b",
+    "scripts/dogfood/architecture.sh": "6d1152cea21b7cc1616b1cb8a50797e7d1cfe2fcb3765e2aabb5bcd911989b31",
+    "scripts/dogfood/verify-lanes.py": "9d8a99876d38bd2d7f3f98b968a45b3055963302d10e6a4639ab5803c582a2a3"
+  }
+}
