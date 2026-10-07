@@ -11,6 +11,12 @@ use serde::{Deserialize, Serialize};
 pub const ARTIFACT_UPLOAD_CAPABILITY: &str = "artifact-upload-v1";
 /// Wire feature: the peer accepts the `UploadArtifact` client stream.
 pub const ARTIFACT_UPLOAD_FEATURE: &str = "artifact-upload-v1";
+/// Whole-set publication; v1 peers must not execute declared artifact work.
+pub const ARTIFACT_SET_FEATURE: &str = "artifact-set-v2";
+pub const MAX_ARTIFACT_MATCHING_CELLS: u64 = 8_388_608;
+pub const ARTIFACT_COMMIT_HEADROOM_SECONDS: u64 = 60;
+pub const ARTIFACT_RESPONSE_MARGIN_SECONDS: u64 = 5;
+pub const ARTIFACT_READER_JOIN_SECONDS: u64 = 2;
 /// Upper bound on artifact declarations in one stage.
 pub const MAX_ARTIFACTS_PER_STAGE: usize = 16;
 /// Upper bound on path patterns in one declaration.
@@ -173,95 +179,245 @@ pub fn validate_pattern(pattern: &str) -> Result<(), ArtifactSpecError> {
     Ok(())
 }
 
-/// The pattern's segments with consecutive `**` collapsed to one: the two
-/// forms match the same paths, and the matcher's table is sized by the
-/// collapsed length.
-fn normalized_segments(pattern: &str) -> Vec<&str> {
-    let mut segments: Vec<&str> = Vec::new();
-    for segment in pattern.split('/') {
-        if segment == "**" && segments.last() == Some(&"**") {
-            continue;
-        }
-        segments.push(segment);
-    }
-    segments
+/// One stage compilation, shared by collection and descent.
+#[derive(Debug)]
+pub struct CompiledArtifacts {
+    declarations: Vec<(String, Vec<CompiledPattern>)>,
 }
-
-/// Whether the pattern could match something strictly below the directory
-/// at `dir` (workspace-relative, `/` form): the walk descends only into
-/// such directories and refuses a link in their place before looking below.
-/// A table over (pattern segment, path segment), so the work is the product
-/// of the two lengths whatever the pattern's shape.
-#[must_use]
-pub fn pattern_may_descend(pattern: &str, dir: &str) -> bool {
-    let pattern = normalized_segments(pattern);
-    let dir: Vec<&str> = dir.split('/').collect();
-    let (m, n) = (pattern.len(), dir.len());
-    // table[i][j]: pattern[i..] can match something strictly below dir[j..].
-    let mut table = vec![vec![false; n + 1]; m + 1];
-    for i in (0..m).rev() {
-        for j in (0..=n).rev() {
-            table[i][j] = if j == n {
-                // The directory is fully matched and pattern remains: a
-                // deeper entry can still match.
-                true
-            } else if pattern[i] == "**" {
-                table[i + 1][j] || table[i][j + 1]
+#[derive(Debug)]
+pub struct CompiledPattern {
+    segments: Vec<Segment>,
+}
+#[derive(Debug)]
+enum Segment {
+    Recursive,
+    Literal(Vec<char>),
+}
+#[derive(Clone, Debug)]
+pub struct MatchingBudget {
+    remaining: u64,
+    spent: u64,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MatchingBudgetSpent;
+impl MatchingBudget {
+    pub fn new(cells: u64) -> Self {
+        Self {
+            remaining: cells,
+            spent: 0,
+        }
+    }
+    pub fn spent(&self) -> u64 {
+        self.spent
+    }
+    fn charge(&mut self) -> Result<(), MatchingBudgetSpent> {
+        if self.remaining == 0 {
+            return Err(MatchingBudgetSpent);
+        }
+        self.remaining -= 1;
+        self.spent += 1;
+        Ok(())
+    }
+}
+impl CompiledArtifacts {
+    pub fn new(specs: &[ArtifactSpec]) -> Self {
+        Self {
+            declarations: specs
+                .iter()
+                .map(|s| {
+                    (
+                        s.name.clone(),
+                        s.paths.iter().map(|p| CompiledPattern::new(p)).collect(),
+                    )
+                })
+                .collect(),
+        }
+    }
+    /// Returns matched declaration names and whether any pattern permits descent.
+    /// Every evaluation, including descent, uses this attempt's same budget.
+    pub fn classify<'a>(
+        &'a self,
+        path: &str,
+        budget: &mut MatchingBudget,
+    ) -> Result<(Vec<&'a str>, bool), MatchingBudgetSpent> {
+        let segments: Vec<&str> = path.split('/').collect();
+        let mut names = Vec::new();
+        let mut descends = false;
+        for (name, patterns) in &self.declarations {
+            let mut matched = false;
+            for pattern in patterns {
+                if !matched {
+                    matched = pattern.evaluate(&segments, false, budget)?;
+                }
+                if !descends {
+                    descends = pattern.evaluate(&segments, true, budget)?;
+                }
+            }
+            if matched {
+                names.push(name.as_str());
+            }
+        }
+        Ok((names, descends))
+    }
+}
+#[cfg(test)]
+thread_local! { static COMPILED_PATTERN_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+impl CompiledPattern {
+    pub fn new(pattern: &str) -> Self {
+        #[cfg(test)]
+        COMPILED_PATTERN_COUNT.with(|n| n.set(n.get() + 1));
+        let mut segments = Vec::new();
+        for s in pattern.split('/') {
+            if s == "**" {
+                if !matches!(segments.last(), Some(Segment::Recursive)) {
+                    segments.push(Segment::Recursive);
+                }
             } else {
-                segment_matches(pattern[i], dir[j]) && table[i + 1][j + 1]
-            };
+                segments.push(Segment::Literal(s.chars().collect()));
+            }
         }
+        Self { segments }
     }
-    table[0][0]
-}
-
-/// Whether a workspace-relative path in `/` form matches the pattern. A
-/// table over (pattern segment, path segment), so a pattern of many `**`
-/// segments costs their product, never a combinatorial search.
-#[must_use]
-pub fn pattern_matches(pattern: &str, path: &str) -> bool {
-    let pattern = normalized_segments(pattern);
-    let path: Vec<&str> = path.split('/').collect();
-    let (m, n) = (pattern.len(), path.len());
-    // table[i][j]: pattern[i..] matches path[j..] exactly.
-    let mut table = vec![vec![false; n + 1]; m + 1];
-    table[m][n] = true;
-    for i in (0..m).rev() {
-        for j in (0..=n).rev() {
-            table[i][j] = if pattern[i] == "**" {
-                table[i + 1][j] || (j < n && table[i][j + 1])
-            } else {
-                j < n && segment_matches(pattern[i], path[j]) && table[i + 1][j + 1]
-            };
+    pub fn evaluate(
+        &self,
+        path: &[&str],
+        descent: bool,
+        budget: &mut MatchingBudget,
+    ) -> Result<bool, MatchingBudgetSpent> {
+        let n = path.len();
+        let mut next = Vec::with_capacity(n + 1);
+        for j in 0..=n {
+            budget.charge()?;
+            next.push(!descent && j == n);
         }
+        for segment in self.segments.iter().rev() {
+            let mut row = vec![false; n + 1];
+            for j in (0..=n).rev() {
+                budget.charge()?;
+                row[j] = if descent && j == n {
+                    true
+                } else {
+                    match segment {
+                        Segment::Recursive => next[j] || (j < n && row[j + 1]),
+                        Segment::Literal(p) => {
+                            j < n && next[j + 1] && segment_matches_compiled(p, path[j], budget)?
+                        }
+                    }
+                };
+            }
+            next = row;
+        }
+        Ok(next[0])
     }
-    table[0][0]
 }
-
-fn segment_matches(pattern: &str, name: &str) -> bool {
-    let pattern: Vec<char> = pattern.chars().collect();
-    let name: Vec<char> = name.chars().collect();
+fn segment_matches_compiled(
+    pattern: &[char],
+    name: &str,
+    budget: &mut MatchingBudget,
+) -> Result<bool, MatchingBudgetSpent> {
+    // Wildcard backtracking/token comparisons share the same aggregate limit:
+    // counting DP cells alone must not hide long literal-segment work.
+    let mut chars = Vec::new();
+    for c in name.chars() {
+        budget.charge()?;
+        chars.push(c);
+    }
+    let name = chars;
     let (mut p, mut n) = (0, 0);
-    let mut star: Option<(usize, usize)> = None;
+    let mut star = None;
     while n < name.len() {
+        budget.charge()?;
         if p < pattern.len() && (pattern[p] == '?' || pattern[p] == name[n]) {
             p += 1;
             n += 1;
         } else if p < pattern.len() && pattern[p] == '*' {
             star = Some((p, n));
             p += 1;
-        } else if let Some((star_p, star_n)) = star {
-            p = star_p + 1;
-            n = star_n + 1;
-            star = Some((star_p, star_n + 1));
+        } else if let Some((sp, sn)) = star {
+            p = sp + 1;
+            n = sn + 1;
+            star = Some((sp, sn + 1));
         } else {
-            return false;
+            return Ok(false);
         }
     }
     while p < pattern.len() && pattern[p] == '*' {
+        budget.charge()?;
         p += 1;
     }
-    p == pattern.len()
+    Ok(p == pattern.len())
+}
+#[must_use]
+pub fn pattern_matches(pattern: &str, path: &str) -> bool {
+    CompiledPattern::new(pattern)
+        .evaluate(
+            &path.split('/').collect::<Vec<_>>(),
+            false,
+            &mut MatchingBudget::new(u64::MAX),
+        )
+        .unwrap_or(false)
+}
+#[must_use]
+pub fn pattern_may_descend(pattern: &str, path: &str) -> bool {
+    CompiledPattern::new(pattern)
+        .evaluate(
+            &path.split('/').collect::<Vec<_>>(),
+            true,
+            &mut MatchingBudget::new(u64::MAX),
+        )
+        .unwrap_or(false)
+}
+/// Bounded immutable set manifest. Digests are bound when each member is staged.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ArtifactManifestMember {
+    pub name: String,
+    pub bytes: u64,
+    pub media_type: String,
+}
+pub fn validate_manifest(members: &[ArtifactManifestMember]) -> Result<u64, ArtifactSpecError> {
+    if members.len() > MAX_ARTIFACT_FILES_PER_ATTEMPT {
+        return Err(ArtifactSpecError("too many artifact members"));
+    }
+    let mut total = 0_u64;
+    let mut names = std::collections::BTreeSet::new();
+    for member in members {
+        if member.name.is_empty()
+            || member.name.len() > MAX_ARTIFACT_OBJECT_NAME_BYTES
+            || member.name.chars().any(char::is_control)
+            || member.media_type != ARTIFACT_MEDIA_TYPE
+            || !names.insert(&member.name)
+        {
+            return Err(ArtifactSpecError("invalid or duplicate artifact member"));
+        }
+        total = total
+            .checked_add(member.bytes)
+            .ok_or(ArtifactSpecError("artifact bytes overflow"))?;
+        if total > MAX_ATTEMPT_ARTIFACT_BYTES {
+            return Err(ArtifactSpecError("artifact byte quota"));
+        }
+    }
+    Ok(total)
+}
+pub fn artifact_manifest_digest(members: &[ArtifactManifestMember]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let mut sorted = members.to_vec();
+    sorted.sort_by(|a, b| a.name.cmp(&b.name));
+    let mut digest = Sha256::new();
+    digest.update(b"mcloving.artifact-set.v2\0");
+    for m in sorted {
+        for value in [m.name.as_bytes(), m.media_type.as_bytes()] {
+            digest.update((value.len() as u64).to_be_bytes());
+            digest.update(value);
+        }
+        digest.update(m.bytes.to_be_bytes());
+    }
+    digest.finalize().into()
+}
+pub fn artifact_server_seconds(bytes: u64) -> u64 {
+    artifact_upload_seconds(bytes) + ARTIFACT_UPLOAD_BASE_SECONDS + ARTIFACT_COMMIT_HEADROOM_SECONDS
+}
+pub fn artifact_client_seconds(bytes: u64) -> u64 {
+    artifact_server_seconds(bytes) + ARTIFACT_RESPONSE_MARGIN_SECONDS
 }
 
 #[cfg(test)]
@@ -303,7 +459,7 @@ mod tests {
         assert!(started.elapsed() < std::time::Duration::from_secs(1));
         assert!(pattern_matches("a/**/**/b", "a/b"));
         assert!(pattern_matches("a/**/**/b", "a/x/y/b"));
-        assert_eq!(normalized_segments("a/**/**/**/b"), ["a", "**", "b"]);
+        assert_eq!(CompiledPattern::new("a/**/**/**/b").segments.len(), 3);
     }
 
     #[test]
@@ -350,5 +506,104 @@ mod tests {
             paths: Vec::new(),
         };
         assert!(empty.validate().is_err());
+    }
+}
+
+#[cfg(test)]
+mod agent012_tests {
+    use super::*;
+    #[test]
+    fn shared_patterns_charge_matching_and_descent_without_recompilation() {
+        let specs = vec![
+            ArtifactSpec {
+                name: "logs".into(),
+                paths: vec!["a/**/x?.log".into(), "**/*.txt".into()],
+            },
+            ArtifactSpec {
+                name: "all".into(),
+                paths: vec!["**".into()],
+            },
+        ];
+        let before_compile = COMPILED_PATTERN_COUNT.with(|n| n.get());
+        let compiled = CompiledArtifacts::new(&specs);
+        let after_compile = COMPILED_PATTERN_COUNT.with(|n| n.get());
+        assert_eq!(after_compile - before_compile, 3);
+        let address = compiled.declarations[0].1.as_ptr();
+        let mut budget = MatchingBudget::new(10_000);
+        assert_eq!(
+            compiled.classify("a/b/x1.log", &mut budget).unwrap(),
+            (vec!["logs", "all"], true)
+        );
+        let before = budget.spent();
+        assert_eq!(
+            compiled.classify("a/b/readme.txt", &mut budget).unwrap(),
+            (vec!["logs", "all"], true)
+        );
+        assert!(budget.spent() > before);
+        assert_eq!(address, compiled.declarations[0].1.as_ptr());
+        assert_eq!(
+            COMPILED_PATTERN_COUNT.with(|n| n.get()),
+            after_compile,
+            "matching/descent recompiled a pattern"
+        );
+        let mut tiny = MatchingBudget::new(1);
+        assert_eq!(
+            compiled.classify("a/b/x1.log", &mut tiny),
+            Err(MatchingBudgetSpent)
+        );
+        assert_eq!(tiny.spent(), 1);
+    }
+    #[test]
+    fn literal_token_backtracking_cannot_bypass_aggregate_budget() {
+        let mut budget = MatchingBudget::new(64);
+        assert_eq!(
+            segment_matches_compiled(
+                &"*aaaaaaaaab".chars().collect::<Vec<_>>(),
+                &"a".repeat(64),
+                &mut budget
+            ),
+            Err(MatchingBudgetSpent),
+            "literal token matcher failed to refuse exhausted aggregate budget"
+        );
+        assert_eq!(budget.spent(), 64);
+    }
+    #[test]
+    fn manifest_identity_is_order_independent_and_binds_exact_members() {
+        let a = ArtifactManifestMember {
+            name: "a/x".into(),
+            bytes: 1,
+            media_type: ARTIFACT_MEDIA_TYPE.into(),
+        };
+        let b = ArtifactManifestMember {
+            name: "a/y".into(),
+            bytes: 2,
+            media_type: ARTIFACT_MEDIA_TYPE.into(),
+        };
+        assert_eq!(
+            artifact_manifest_digest(&[a.clone(), b.clone()]),
+            artifact_manifest_digest(&[b.clone(), a.clone()])
+        );
+        let mut changed = b.clone();
+        changed.bytes += 1;
+        assert_ne!(
+            artifact_manifest_digest(&[a.clone(), b.clone()]),
+            artifact_manifest_digest(&[a.clone(), changed])
+        );
+        assert!(validate_manifest(&[a.clone(), a]).is_err());
+        let mut oversized = b;
+        oversized.bytes = MAX_ATTEMPT_ARTIFACT_BYTES + 1;
+        assert!(validate_manifest(&[oversized]).is_err());
+    }
+    #[test]
+    fn client_budget_covers_receive_header_commit_and_response_margin() {
+        for bytes in [0, 1, 128 * 1_048_576, MAX_ATTEMPT_ARTIFACT_BYTES] {
+            assert!(
+                artifact_server_seconds(bytes)
+                    >= ARTIFACT_UPLOAD_BASE_SECONDS
+                        + artifact_upload_seconds(bytes)
+                        + ARTIFACT_COMMIT_HEADROOM_SECONDS
+            );
+            assert!(artifact_client_seconds(bytes) > artifact_server_seconds(bytes));
+        }
     }
 }

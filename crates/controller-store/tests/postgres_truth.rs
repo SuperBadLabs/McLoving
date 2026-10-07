@@ -15125,3 +15125,1082 @@ async fn ctrl005_ledger_mutations_wait_for_the_attempt_lock() {
         );
     }
 }
+
+// AGENT-012: metadata/quota/custody proofs. These deliberately test the database
+// boundary; actual filesystem verification belongs to the controller actor and
+// object-store drivers. A skipped DB fixture is not feature proof.
+async fn agent012_fixture() -> Option<(
+    Store,
+    mcloving_controller_store::ArtifactSetAuthority,
+    Uuid,
+    BuildAdmission,
+)> {
+    let store = test_store().await?;
+    let organization = Uuid::new_v4();
+    let project = Uuid::new_v4();
+    let agent = format!("agent012-{organization}");
+    store
+        .create_project(
+            organization,
+            &format!("org-{organization}"),
+            project,
+            "agent012",
+        )
+        .await
+        .unwrap();
+    let build = store
+        .admit_test_build(&NewBuild {
+            organization_id: organization,
+            project_id: project,
+            pipeline_id: project,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
+            idempotency_key: "artifact-set-v2".into(),
+            pipeline_digest: [0x12; 32],
+            node_key: "package".into(),
+            required_capabilities: vec!["linux".into()],
+            required_trust_pool: "trusted".into(),
+            priority: 0,
+            execution_spec: json!({}),
+        })
+        .await
+        .unwrap();
+    assert!(
+        store
+            .open_agent_session(
+                &agent,
+                "trusted",
+                1,
+                0,
+                &[
+                    "work-delivery-v1".into(),
+                    mcloving_domain::artifacts::ARTIFACT_SET_FEATURE.into()
+                ],
+                &["linux".into()]
+            )
+            .await
+            .unwrap()
+    );
+    let claim = store
+        .claim_next_in_session(
+            &ClaimRequest {
+                organization_id: organization,
+                scheduler_id: "agent012".into(),
+                agent_id: agent.clone(),
+                capabilities: vec!["linux".into()],
+                trust_pool: "trusted".into(),
+                lease_seconds: 300,
+                fairness_seed: 0,
+            },
+            1,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        store
+            .accept_offer(
+                organization,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                &agent
+            )
+            .await
+            .unwrap()
+    );
+    let a = mcloving_controller_store::ArtifactSetAuthority {
+        organization_id: organization,
+        attempt_id: claim.attempt_id,
+        fence: claim.fence,
+        restore_epoch: claim.restore_epoch,
+        agent_id: agent,
+        session_epoch: 1,
+    };
+    Some((store, a, project, build))
+}
+fn agent012_members(bytes: u64) -> Vec<mcloving_domain::artifacts::ArtifactManifestMember> {
+    ["outputs/a", "outputs/b"]
+        .into_iter()
+        .map(|name| mcloving_domain::artifacts::ArtifactManifestMember {
+            name: name.into(),
+            bytes,
+            media_type: mcloving_domain::artifacts::ARTIFACT_MEDIA_TYPE.into(),
+        })
+        .collect()
+}
+#[tokio::test]
+async fn agent012_all_members_hidden_until_atomic_batch_commit_and_legacy_cannot_publish_one() {
+    let Some((store, a, project, build)) = agent012_fixture().await else {
+        return;
+    };
+    let members = agent012_members(3);
+    let id = mcloving_domain::artifacts::artifact_manifest_digest(&members);
+    store.begin_artifact_set(&a, id, &members).await.unwrap();
+    store
+        .claim_artifact_set_member(&a, id, "outputs/a")
+        .await
+        .unwrap()
+        .register([1; 32], "tenant-a-1.staged")
+        .await
+        .unwrap();
+    assert!(
+        store
+            .build_artifacts(a.organization_id, project, build.build_id)
+            .await
+            .unwrap()
+            .is_empty(),
+        "pending batch member became visible before whole-set commit"
+    );
+    assert!(
+        store
+            .build_objects(a.organization_id, project, build.build_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        store.commit_artifact_set(&a, id).await.is_err(),
+        "incomplete batch must not commit"
+    );
+    assert!(
+        !store
+            .mark_artifact_available_in_session(
+                a.organization_id,
+                build.build_id,
+                build.node_id,
+                a.attempt_id,
+                a.fence,
+                "outputs/a",
+                [1; 32],
+                3,
+                mcloving_domain::artifacts::ARTIFACT_MEDIA_TYPE,
+                86400,
+                &a.agent_id,
+                1
+            )
+            .await
+            .unwrap()
+    );
+    assert!(
+        !store
+            .set_object_status(
+                a.organization_id,
+                a.attempt_id,
+                a.fence,
+                ObjectKind::Artifact,
+                "outputs/a",
+                [1; 32],
+                ObjectStatus::Available
+            )
+            .await
+            .unwrap()
+    );
+    store
+        .claim_artifact_set_member(&a, id, "outputs/b")
+        .await
+        .unwrap()
+        .register([2; 32], "tenant-a-2.staged")
+        .await
+        .unwrap();
+    assert!(
+        store
+            .build_artifacts(a.organization_id, project, build.build_id)
+            .await
+            .unwrap()
+            .is_empty(),
+        "pending batch member became visible before whole-set commit"
+    );
+    store.commit_artifact_set(&a, id).await.unwrap();
+    let visible = store
+        .build_artifacts(a.organization_id, project, build.build_id)
+        .await
+        .unwrap();
+    assert_eq!(visible.len(), 2);
+    assert!(visible.iter().all(|o| o.status == ObjectStatus::Available));
+    store.commit_artifact_set(&a, id).await.unwrap();
+    assert!(store.abort_artifact_set(&a, id).await.is_err());
+    let retry = store
+        .claim_artifact_set_member(&a, id, "outputs/a")
+        .await
+        .unwrap();
+    assert_eq!(retry.member.digest, Some([1; 32]));
+    assert_eq!(
+        retry.member.pending_token.as_deref(),
+        Some("tenant-a-1.staged")
+    );
+    retry.register([1; 32], "tenant-a-1.staged").await.unwrap();
+}
+#[tokio::test]
+async fn agent012_mid_set_refusal_aborts_pending_rows_and_preserves_public_artifacts() {
+    let Some((store, a, project, build)) = agent012_fixture().await else {
+        return;
+    };
+    assert!(
+        store
+            .register_artifact(
+                a.organization_id,
+                build.build_id,
+                build.node_id,
+                a.attempt_id,
+                a.fence,
+                a.restore_epoch,
+                &a.agent_id,
+                "public/shared",
+                [9; 32],
+                1,
+                "application/octet-stream",
+                86400
+            )
+            .await
+            .unwrap()
+    );
+    assert!(
+        store
+            .mark_artifact_available(
+                a.organization_id,
+                build.build_id,
+                build.node_id,
+                a.attempt_id,
+                a.fence,
+                "public/shared",
+                [9; 32],
+                1,
+                "application/octet-stream",
+                86400
+            )
+            .await
+            .unwrap()
+    );
+    let members = agent012_members(3);
+    let id = mcloving_domain::artifacts::artifact_manifest_digest(&members);
+    store.begin_artifact_set(&a, id, &members).await.unwrap();
+    store
+        .claim_artifact_set_member(&a, id, "outputs/a")
+        .await
+        .unwrap()
+        .register([1; 32], "tenant-b-1.staged")
+        .await
+        .unwrap();
+    // The uploader's later changed_length/unreadable refusal takes this abort.
+    let cleanup = store.abort_artifact_set(&a, id).await.unwrap();
+    assert_eq!(cleanup.len(), 2);
+    assert_eq!(
+        cleanup.iter().filter(|m| m.pending_token.is_some()).count(),
+        1
+    );
+    store.abort_artifact_set(&a, id).await.unwrap();
+    assert!(store.begin_artifact_set(&a, id, &members).await.is_err());
+    let visible = store
+        .build_artifacts(a.organization_id, project, build.build_id)
+        .await
+        .unwrap();
+    assert_eq!(visible.len(), 1);
+    assert_eq!(visible[0].name, "public/shared");
+    assert_eq!(
+        store
+            .attempt_artifact_bytes(a.organization_id, a.attempt_id, a.fence)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        store
+            .attempt_artifact_count(a.organization_id, a.attempt_id, a.fence)
+            .await
+            .unwrap(),
+        1
+    );
+    assert!(
+        !store
+            .artifact_publication_claim_active(a.organization_id, [1; 32], 3)
+            .await
+            .unwrap()
+    );
+}
+#[tokio::test]
+async fn agent012_two_128_mib_members_fit_once_and_concurrent_exact_retry_serializes() {
+    let Some((store, a, _project, build)) = agent012_fixture().await else {
+        return;
+    };
+    let members = agent012_members(128 * 1_048_576);
+    let id = mcloving_domain::artifacts::artifact_manifest_digest(&members);
+    store.begin_artifact_set(&a, id, &members).await.unwrap();
+    assert_eq!(
+        store
+            .attempt_artifact_bytes(a.organization_id, a.attempt_id, a.fence)
+            .await
+            .unwrap(),
+        256 * 1_048_576,
+        "registered members were counted twice against whole-set reservation"
+    );
+    let first = store
+        .claim_artifact_set_member(&a, id, "outputs/a")
+        .await
+        .unwrap();
+    let independent = Store::new(store.pool().clone());
+    let copy = a.clone();
+    let (started_tx, started) = tokio::sync::oneshot::channel();
+    let mut retry = tokio::spawn(async move {
+        started_tx.send(()).unwrap();
+        independent
+            .claim_artifact_set_member(&copy, id, "outputs/a")
+            .await
+    });
+    started.await.unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(30), &mut retry)
+            .await
+            .is_err(),
+        "another connection must wait for durable member ownership"
+    );
+    // Admission of an extra byte races registration of an already charged
+    // member; neither completion order may create a gap or double charge.
+    let (registered, excess) = tokio::join!(
+        first.register([1; 32], "tenant-q-1.staged"),
+        store.register_artifact(
+            a.organization_id,
+            build.build_id,
+            build.node_id,
+            a.attempt_id,
+            a.fence,
+            a.restore_epoch,
+            &a.agent_id,
+            "excess",
+            [8; 32],
+            1,
+            "application/octet-stream",
+            86400
+        )
+    );
+    registered.unwrap();
+    assert!(!excess.unwrap());
+    let retry = retry.await.unwrap().unwrap();
+    assert_eq!(
+        retry.member.pending_token.as_deref(),
+        Some("tenant-q-1.staged")
+    );
+    retry.register([1; 32], "tenant-q-1.staged").await.unwrap();
+    store
+        .claim_artifact_set_member(&a, id, "outputs/b")
+        .await
+        .unwrap()
+        .register([2; 32], "tenant-q-2.staged")
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .attempt_artifact_bytes(a.organization_id, a.attempt_id, a.fence)
+            .await
+            .unwrap(),
+        256 * 1_048_576,
+        "registered members were counted twice against whole-set reservation"
+    );
+    assert_eq!(
+        store
+            .attempt_artifact_count(a.organization_id, a.attempt_id, a.fence)
+            .await
+            .unwrap(),
+        2
+    );
+    store.commit_artifact_set(&a, id).await.unwrap();
+    assert_eq!(
+        store
+            .attempt_artifact_bytes(a.organization_id, a.attempt_id, a.fence)
+            .await
+            .unwrap(),
+        256 * 1_048_576,
+        "registered members were counted twice against whole-set reservation"
+    );
+}
+#[tokio::test]
+async fn agent012_stale_authority_membership_changes_and_expired_orphans_are_refused() {
+    let Some((store, a, project, build)) = agent012_fixture().await else {
+        return;
+    };
+    let members = agent012_members(3);
+    let id = mcloving_domain::artifacts::artifact_manifest_digest(&members);
+    store.begin_artifact_set(&a, id, &members).await.unwrap();
+    for stale in [
+        mcloving_controller_store::ArtifactSetAuthority {
+            fence: a.fence + 1,
+            ..a.clone()
+        },
+        mcloving_controller_store::ArtifactSetAuthority {
+            restore_epoch: a.restore_epoch + 1,
+            ..a.clone()
+        },
+        mcloving_controller_store::ArtifactSetAuthority {
+            session_epoch: 2,
+            ..a.clone()
+        },
+    ] {
+        assert!(
+            store
+                .claim_artifact_set_member(&stale, id, "outputs/a")
+                .await
+                .is_err()
+        );
+        assert!(store.commit_artifact_set(&stale, id).await.is_err());
+    }
+    let mut changed = members.clone();
+    changed[0].bytes += 1;
+    assert!(
+        store
+            .begin_artifact_set(
+                &a,
+                mcloving_domain::artifacts::artifact_manifest_digest(&changed),
+                &changed
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .claim_artifact_set_member(&a, id, "unlisted")
+            .await
+            .is_err()
+    );
+    store
+        .claim_artifact_set_member(&a, id, "outputs/a")
+        .await
+        .unwrap()
+        .register([1; 32], "tenant-r-1.staged")
+        .await
+        .unwrap();
+    let retry = store
+        .claim_artifact_set_member(&a, id, "outputs/a")
+        .await
+        .unwrap();
+    assert!(retry.register([2; 32], "tenant-r-1.staged").await.is_err());
+    sqlx::query("UPDATE attempts SET lease_expires_at=clock_timestamp()-interval '1 second' WHERE organization_id=$1 AND id=$2").bind(a.organization_id).bind(a.attempt_id).execute(store.pool()).await.unwrap();
+    store.expire_artifact_sets(a.organization_id).await.unwrap();
+    assert_eq!(
+        store
+            .attempt_artifact_bytes(a.organization_id, a.attempt_id, a.fence)
+            .await
+            .unwrap(),
+        0
+    );
+    assert!(
+        store
+            .build_artifacts(a.organization_id, project, build.build_id)
+            .await
+            .unwrap()
+            .is_empty(),
+        "pending batch member became visible before whole-set commit"
+    );
+    assert!(
+        !store
+            .artifact_publication_claim_active(a.organization_id, [1; 32], 3)
+            .await
+            .unwrap()
+    );
+}
+
+/// The receipt gate is AFTER the real SQL commit. Cancelling the caller there
+/// discards a committed result, not a synthetic pre-commit timeout. An independent
+/// store connection recovers the exact token and a reopened filesystem store
+/// verifies its retained claim at a quota which cannot accommodate a second copy.
+#[cfg(debug_assertions)]
+#[tokio::test]
+async fn agent012_committed_registration_discarded_response_retains_exact_claim() {
+    use mcloving_object_store::{FilesystemObjectStore, PendingObject, Quota};
+    let Some((store, a, _project, _build)) = agent012_fixture().await else {
+        return;
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let quota = Quota {
+        max_object_bytes: 3,
+        max_total_bytes: 3,
+        max_staged_objects: 4,
+    };
+    let objects = FilesystemObjectStore::open(tmp.path(), quota).unwrap();
+    let members = vec![mcloving_domain::artifacts::ArtifactManifestMember {
+        name: "outputs/a".into(),
+        bytes: 3,
+        media_type: mcloving_domain::artifacts::ARTIFACT_MEDIA_TYPE.into(),
+    }];
+    let id = mcloving_domain::artifacts::artifact_manifest_digest(&members);
+    store.begin_artifact_set(&a, id, &members).await.unwrap();
+    let mut writer = objects
+        .begin_artifact(&a.organization_id.to_string(), 3)
+        .unwrap();
+    writer.write(b"abc").unwrap();
+    let pending = writer.finish().unwrap().persist().unwrap();
+    let pending = objects.claim_pending(&pending).unwrap();
+    let digest = pending.object_ref().sha256;
+    let token = pending.token().to_owned();
+    let claim = store
+        .claim_artifact_set_member(&a, id, "outputs/a")
+        .await
+        .unwrap();
+    let (committed_tx, committed) = tokio::sync::oneshot::channel();
+    let (release_tx, release) = tokio::sync::oneshot::channel::<()>();
+    let copy = token.clone();
+    let registration = tokio::spawn(async move {
+        claim
+            .register_with_receipt_boundary(digest, &copy, async move {
+                committed_tx.send(()).unwrap();
+                let _ = release.await;
+            })
+            .await
+    });
+    committed.await.unwrap();
+    registration.abort();
+    assert!(registration.await.unwrap_err().is_cancelled());
+    drop(release_tx);
+    let independent = Store::new(store.pool().clone());
+    let recovered = independent
+        .claim_artifact_set_member(&a, id, "outputs/a")
+        .await
+        .unwrap();
+    assert_eq!(recovered.member.digest, Some(digest));
+    assert_eq!(
+        recovered.member.pending_token.as_deref(),
+        Some(token.as_str())
+    );
+    drop(objects);
+    let reopened = FilesystemObjectStore::open(
+        tmp.path(),
+        Quota {
+            max_object_bytes: 3,
+            max_total_bytes: 3,
+            max_staged_objects: 4,
+        },
+    )
+    .unwrap();
+    let exact = PendingObject::from_parts(token.clone(), pending.object_ref().clone()).unwrap();
+    let exact = reopened.claim_pending(&exact).unwrap();
+    assert_eq!(reopened.verify_pending(&exact).unwrap().bytes, 3);
+    assert!(
+        reopened.begin_artifact("second-copy", 3).is_err(),
+        "the fixture must disallow restaging"
+    );
+    recovered.register(digest, &token).await.unwrap();
+    reopened.commit_pending(exact).unwrap();
+    independent.commit_artifact_set(&a, id).await.unwrap();
+}
+
+// AGENT-012 approved lock-order adversaries. Revised fixtures NOT RUN.
+// Mixed legacy requires40P01; session/restore require actual writer->commit->M
+// blocking; expiry requires its exact stale-reservation data invariant.
+// Polling/watchdog/setup failures are never semantic RED.
+struct Agent012Task<T>(tokio::task::JoinHandle<T>);
+impl<T> Drop for Agent012Task<T> {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+impl<T> Agent012Task<T> {
+    async fn finish(&mut self) -> T {
+        tokio::time::timeout(Duration::from_secs(10), &mut self.0)
+            .await
+            .expect("lock adversary completion bound exceeded: not semantic RED")
+            .expect("lock adversary task panicked: not semantic RED")
+    }
+}
+// A fixture-owned single physical writer makes the actual blocking edge
+// attributable to this OpenSession/restore call, not another pooled query.
+async fn agent012_owned_writer_store() -> (Store, i32) {
+    let url = std::env::var("MCLOVING_TEST_DATABASE_URL")
+        .expect("explicit PostgreSQL fixture URL is required");
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&url)
+        .await
+        .expect("connect owned PostgreSQL writer");
+    let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    (Store::new(pool), pid)
+}
+async fn agent012_actual_member_wait_owner(store: &Store, commit_pid: i32) -> i32 {
+    let owners: Vec<i32> = sqlx::query_scalar("SELECT pg_blocking_pids($1)")
+        .bind(commit_pid)
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+    assert_eq!(
+        owners.len(),
+        1,
+        "actual commit must wait for exactly one held member owner"
+    );
+    let owner = owners[0];
+    let query: String = sqlx::query_scalar("SELECT query FROM pg_stat_activity WHERE pid=$1")
+        .bind(owner)
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+    assert!(
+        query.contains("FOR UPDATE OF m"),
+        "actual commit blocker must be the real member claim transaction"
+    );
+    owner
+}
+fn agent012_not_deadlocked<T>(result: &Result<T, StoreError>) {
+    if let Err(StoreError::Database(sqlx::Error::Database(error))) = result {
+        assert_ne!(
+            error.code().as_deref(),
+            Some("40P01"),
+            "AGENT012_LOCK_ORDER_40P01: actual Store transaction formed a PostgreSQL deadlock"
+        );
+    }
+}
+async fn agent012_advisory_key(store: &Store, name: &str) -> i64 {
+    sqlx::query_scalar("SELECT hashtextextended($1,0)")
+        .bind(name)
+        .fetch_one(store.pool())
+        .await
+        .unwrap()
+}
+async fn agent012_wait_advisory(store: &Store, key: i64, granted: bool, blocked: bool) -> i32 {
+    tokio::time::timeout(Duration::from_secs(5),async {
+        loop {
+            let pid=sqlx::query_scalar::<_,i32>(
+                "SELECT pid FROM pg_locks WHERE locktype='advisory' AND objsubid=1 AND classid::bigint=(($1::bigint>>32)&4294967295) AND objid::bigint=($1::bigint&4294967295) AND granted=$2 AND (NOT $3 OR cardinality(pg_blocking_pids(pid))>0) LIMIT 1")
+                .bind(key).bind(granted).bind(blocked).fetch_optional(store.pool()).await.unwrap();
+            if let Some(pid)=pid {break pid}
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }).await.expect("required exact advisory ownership/wait witness absent: not semantic RED")
+}
+async fn agent012_wait_blocked_by(store: &Store, owner: i32) -> i32 {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let pid = sqlx::query_scalar::<_, i32>(
+                "SELECT pid FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid)) LIMIT 1",
+            )
+            .bind(owner)
+            .fetch_optional(store.pool())
+            .await
+            .unwrap();
+            if let Some(pid) = pid {
+                break pid;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("required exact PostgreSQL blocking edge absent: not semantic RED")
+}
+#[tokio::test]
+async fn agent012_actual_legacy_commit_and_member_abort_do_not_deadlock() {
+    for abort in [false, true] {
+        let Some((store, a, project, build)) = agent012_fixture().await else {
+            return;
+        };
+        let members = agent012_members(3);
+        let id = mcloving_domain::artifacts::artifact_manifest_digest(&members);
+        store.begin_artifact_set(&a, id, &members).await.unwrap();
+        for (name, digest, token) in [
+            ("outputs/a", [1; 32], "lock-a.staged"),
+            ("outputs/b", [2; 32], "lock-b.staged"),
+        ] {
+            store
+                .claim_artifact_set_member(&a, id, name)
+                .await
+                .unwrap()
+                .register(digest, token)
+                .await
+                .unwrap();
+        }
+        let held = store
+            .claim_artifact_set_member(&a, id, "outputs/a")
+            .await
+            .unwrap();
+        let key = agent012_advisory_key(
+            &store,
+            &format!(
+                "mcloving.artifact.attempt.{}.{}.{}",
+                a.organization_id, a.attempt_id, a.fence
+            ),
+        )
+        .await;
+        let independent = Store::new(store.pool().clone());
+        let authority = a.clone();
+        let mut batch = Agent012Task(tokio::spawn(async move {
+            if abort {
+                independent
+                    .abort_artifact_set(&authority, id)
+                    .await
+                    .map(|_| ())
+            } else {
+                independent.commit_artifact_set(&authority, id).await
+            }
+        }));
+        let batch_pid = agent012_wait_advisory(&store, key, true, true).await;
+        let independent = Store::new(store.pool().clone());
+        let authority = a.clone();
+        let mut legacy = Agent012Task(tokio::spawn(async move {
+            independent
+                .register_artifact(
+                    authority.organization_id,
+                    build.build_id,
+                    build.node_id,
+                    authority.attempt_id,
+                    authority.fence,
+                    authority.restore_epoch,
+                    &authority.agent_id,
+                    "public/race",
+                    [1; 32],
+                    3,
+                    "application/octet-stream",
+                    86400,
+                )
+                .await
+        }));
+        let legacy_pid = agent012_wait_advisory(&store, key, false, false).await;
+        let blockers: Vec<i32> = sqlx::query_scalar("SELECT pg_blocking_pids($1)")
+            .bind(legacy_pid)
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+        assert!(
+            blockers.contains(&batch_pid),
+            "legacy must actually wait for this batch attempt ownership"
+        );
+        // Old legacy D->A yields commit A->M->D->legacy, or abort A->M
+        // ->held registration D->legacy. The fixed legacy acquires A first.
+        if abort {
+            let result = held.register([1; 32], "lock-a.staged").await;
+            agent012_not_deadlocked(&result);
+            result.unwrap();
+        } else {
+            drop(held);
+        }
+        let result = batch.finish().await;
+        agent012_not_deadlocked(&result);
+        result.unwrap();
+        let result = legacy.finish().await;
+        agent012_not_deadlocked(&result);
+        assert!(result.unwrap());
+        let visible = store
+            .build_artifacts(a.organization_id, project, build.build_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            visible
+                .iter()
+                .filter(|m| m.name.starts_with("outputs/"))
+                .count(),
+            if abort { 0 } else { 2 }
+        );
+        assert_eq!(
+            store
+                .attempt_artifact_bytes(a.organization_id, a.attempt_id, a.fence)
+                .await
+                .unwrap(),
+            if abort { 3 } else { 9 }
+        );
+    }
+}
+#[tokio::test]
+async fn agent012_actual_queued_session_writer_does_not_cycle_with_member_owner() {
+    let Some((store, a, project, build)) = agent012_fixture().await else {
+        return;
+    };
+    let members = agent012_members(3);
+    let id = mcloving_domain::artifacts::artifact_manifest_digest(&members);
+    store.begin_artifact_set(&a, id, &members).await.unwrap();
+    for (name, digest, token) in [
+        ("outputs/a", [1; 32], "session-a.staged"),
+        ("outputs/b", [2; 32], "session-b.staged"),
+    ] {
+        store
+            .claim_artifact_set_member(&a, id, name)
+            .await
+            .unwrap()
+            .register(digest, token)
+            .await
+            .unwrap();
+    }
+    let held = store
+        .claim_artifact_set_member(&a, id, "outputs/a")
+        .await
+        .unwrap();
+    let key = agent012_advisory_key(
+        &store,
+        &format!(
+            "mcloving.artifact.attempt.{}.{}.{}",
+            a.organization_id, a.attempt_id, a.fence
+        ),
+    )
+    .await;
+    let independent = Store::new(store.pool().clone());
+    let authority = a.clone();
+    let mut commit = Agent012Task(tokio::spawn(async move {
+        independent.commit_artifact_set(&authority, id).await
+    }));
+    let commit_pid = agent012_wait_advisory(&store, key, true, true).await;
+    let member_pid = agent012_actual_member_wait_owner(&store, commit_pid).await;
+    let (independent, writer_pid) = agent012_owned_writer_store().await;
+    let agent = a.agent_id.clone();
+    let mut session = Agent012Task(tokio::spawn(async move {
+        independent
+            .open_agent_session(
+                &agent,
+                "trusted",
+                2,
+                0,
+                &[
+                    "work-delivery-v1".into(),
+                    mcloving_domain::artifacts::ARTIFACT_SET_FEATURE.into(),
+                ],
+                &["linux".into()],
+            )
+            .await
+    }));
+    // The actual writer must finish while the real member remains owned.
+    // A queued compatible SHARE recheck need not produce 40P01; this control
+    // observes the actual forbidden writer->commit->member ordering instead.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let blocked: bool = sqlx::query_scalar("SELECT $1=ANY(pg_blocking_pids($2))")
+                .bind(commit_pid)
+                .bind(writer_pid)
+                .fetch_one(store.pool())
+                .await
+                .unwrap();
+            if blocked {
+                let member_wait: bool = sqlx::query_scalar("SELECT $1=ANY(pg_blocking_pids($2))")
+                    .bind(member_pid)
+                    .bind(commit_pid)
+                    .fetch_one(store.pool())
+                    .await
+                    .unwrap();
+                assert!(member_wait, "session ordering witness lost exact actual held member wait");
+                panic!("AGENT012_SESSION_CHURN_BLOCKED_BY_MEMBER_WAIT: actual OpenSession writer queued behind commit while member ownership is held; writer={writer_pid}, commit={commit_pid}, member={member_pid}");
+            }
+            let epoch: i64 =
+                sqlx::query_scalar("SELECT session_epoch FROM agent_sessions WHERE agent_id=$1")
+                    .bind(&a.agent_id)
+                    .fetch_one(store.pool())
+                    .await
+                    .unwrap();
+            if epoch == 2 && session.0.is_finished() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("actual session writer did not finish before held member release: not semantic RED");
+    let changed = session.finish().await;
+    agent012_not_deadlocked(&changed);
+    assert!(changed.unwrap());
+    let registration = tokio::time::timeout(
+        Duration::from_secs(10),
+        held.register([1; 32], "session-a.staged"),
+    )
+    .await
+    .expect("session registration watchdog: not semantic RED");
+    agent012_not_deadlocked(&registration);
+    let result = commit.finish().await;
+    agent012_not_deadlocked(&result);
+    assert!(
+        matches!(registration, Err(StoreError::InvalidAgentSession)),
+        "queued new session must invalidate old member authority"
+    );
+    assert!(
+        matches!(result, Err(StoreError::InvalidAgentSession)),
+        "old session cannot publish after durable session advance"
+    );
+    assert!(
+        store
+            .build_artifacts(a.organization_id, project, build.build_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+#[tokio::test]
+async fn agent012_actual_queued_restore_writer_does_not_cycle_with_member_owner() {
+    let Some((store, a, project, build)) = agent012_fixture().await else {
+        return;
+    };
+    let backup = format!("agent012-lock-{}", a.organization_id);
+    store.seal_recovery_point(&backup).await.unwrap();
+    let members = agent012_members(3);
+    let id = mcloving_domain::artifacts::artifact_manifest_digest(&members);
+    store.begin_artifact_set(&a, id, &members).await.unwrap();
+    for (name, digest, token) in [
+        ("outputs/a", [1; 32], "restore-a.staged"),
+        ("outputs/b", [2; 32], "restore-b.staged"),
+    ] {
+        store
+            .claim_artifact_set_member(&a, id, name)
+            .await
+            .unwrap()
+            .register(digest, token)
+            .await
+            .unwrap();
+    }
+    let held = store
+        .claim_artifact_set_member(&a, id, "outputs/a")
+        .await
+        .unwrap();
+    let key = agent012_advisory_key(
+        &store,
+        &format!(
+            "mcloving.artifact.attempt.{}.{}.{}",
+            a.organization_id, a.attempt_id, a.fence
+        ),
+    )
+    .await;
+    let independent = Store::new(store.pool().clone());
+    let authority = a.clone();
+    let mut commit = Agent012Task(tokio::spawn(async move {
+        independent.commit_artifact_set(&authority, id).await
+    }));
+    let commit_pid = agent012_wait_advisory(&store, key, true, true).await;
+    let member_pid = agent012_actual_member_wait_owner(&store, commit_pid).await;
+    let (independent, writer_pid) = agent012_owned_writer_store().await;
+    let mut restore = Agent012Task(tokio::spawn(async move {
+        independent
+            .activate_restore_epoch(&backup, "AGENT012 lock fixture")
+            .await
+    }));
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let blocked: bool = sqlx::query_scalar("SELECT $1=ANY(pg_blocking_pids($2))")
+                .bind(commit_pid)
+                .bind(writer_pid)
+                .fetch_one(store.pool())
+                .await
+                .unwrap();
+            if blocked {
+                let member_wait: bool = sqlx::query_scalar("SELECT $1=ANY(pg_blocking_pids($2))")
+                    .bind(member_pid)
+                    .bind(commit_pid)
+                    .fetch_one(store.pool())
+                    .await
+                    .unwrap();
+                assert!(member_wait, "restore ordering witness lost exact actual held member wait");
+                panic!("AGENT012_RESTORE_CHURN_BLOCKED_BY_MEMBER_WAIT: actual restore writer queued behind commit while member ownership is held; writer={writer_pid}, commit={commit_pid}, member={member_pid}");
+            }
+            if store.current_restore_epoch().await.unwrap() > a.restore_epoch && restore.0.is_finished() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("actual restore writer did not finish before held member release: not semantic RED");
+    let advanced = restore.finish().await;
+    agent012_not_deadlocked(&advanced);
+    assert!(advanced.unwrap().is_some());
+    let registration = tokio::time::timeout(
+        Duration::from_secs(10),
+        held.register([1; 32], "restore-a.staged"),
+    )
+    .await
+    .expect("restore registration watchdog: not semantic RED");
+    agent012_not_deadlocked(&registration);
+    let result = commit.finish().await;
+    agent012_not_deadlocked(&result);
+    assert!(
+        matches!(registration, Err(StoreError::InvalidAgentSession)),
+        "restore must invalidate old member authority"
+    );
+    assert!(
+        matches!(result, Err(StoreError::InvalidAgentSession)),
+        "old restore epoch cannot publish"
+    );
+    assert!(
+        store
+            .build_artifacts(a.organization_id, project, build.build_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+#[tokio::test]
+async fn agent012_expiry_owns_set_before_queued_restore_and_preserves_current_lease() {
+    let Some((store, a, project, build)) = agent012_fixture().await else {
+        return;
+    };
+    let backup = format!("agent012-expiry-{}", a.organization_id);
+    store.seal_recovery_point(&backup).await.unwrap();
+    let members = agent012_members(3);
+    let id = mcloving_domain::artifacts::artifact_manifest_digest(&members);
+    store.begin_artifact_set(&a, id, &members).await.unwrap();
+    store.expire_artifact_sets(a.organization_id).await.unwrap();
+    assert_eq!(
+        store
+            .attempt_artifact_bytes(a.organization_id, a.attempt_id, a.fence)
+            .await
+            .unwrap(),
+        6,
+        "expiry retired a current nonexpired lease"
+    );
+    let mut owner = store.pool().begin().await.unwrap();
+    sqlx::query("SELECT set_config('mcloving.organization_id',$1,true)")
+        .bind(a.organization_id.to_string())
+        .execute(&mut *owner)
+        .await
+        .unwrap();
+    let owner_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *owner)
+        .await
+        .unwrap();
+    sqlx::query("SELECT set_id FROM artifact_sets WHERE organization_id=$1 AND attempt_id=$2 AND set_id=$3 FOR SHARE").bind(a.organization_id).bind(a.attempt_id).bind(id.as_slice()).fetch_one(&mut *owner).await.unwrap();
+    let independent = Store::new(store.pool().clone());
+    let organization = a.organization_id;
+    let mut expiry = Agent012Task(tokio::spawn(async move {
+        independent.expire_artifact_sets(organization).await
+    }));
+    let expiry_pid = agent012_wait_blocked_by(&store, owner_pid).await;
+    let independent = Store::new(store.pool().clone());
+    let mut restore = Agent012Task(tokio::spawn(async move {
+        independent
+            .activate_restore_epoch(&backup, "AGENT012 expiry fixture")
+            .await
+    }));
+    const RESTORE_KEY: i64 = 0x4d_63_4c_6f_76_72_65_63;
+    tokio::time::timeout(Duration::from_secs(5),async {
+        loop {
+            if store.current_restore_epoch().await.unwrap()>a.restore_epoch {break}
+            let waiting:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_locks WHERE locktype='advisory' AND objsubid=1 AND classid::bigint=(($1::bigint>>32)&4294967295) AND objid::bigint=($1::bigint&4294967295) AND NOT granted AND $2=ANY(pg_blocking_pids(pid)))").bind(RESTORE_KEY).bind(expiry_pid).fetch_one(store.pool()).await.unwrap();
+            if waiting {break}
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }).await.expect("actual expiry/restore queue witness absent: not semantic RED");
+    // A controlled set owner requests the same restore SHARE as actual stage.
+    // With old expiry RestoreS->S this closes the real queued-exclusive cycle.
+    let shared = tokio::time::timeout(
+        Duration::from_secs(10),
+        sqlx::query("SELECT pg_advisory_xact_lock_shared($1)")
+            .bind(RESTORE_KEY)
+            .execute(&mut *owner),
+    )
+    .await
+    .expect("expiry fixture fence watchdog: not semantic RED")
+    .map(|_| ())
+    .map_err(StoreError::from);
+    agent012_not_deadlocked(&shared);
+    shared.unwrap();
+    owner.rollback().await.unwrap();
+    let advanced = restore.finish().await;
+    agent012_not_deadlocked(&advanced);
+    assert!(advanced.unwrap().is_some());
+    let retired = expiry.finish().await;
+    agent012_not_deadlocked(&retired);
+    retired.unwrap();
+    assert_eq!(
+        store
+            .attempt_artifact_bytes(a.organization_id, a.attempt_id, a.fence)
+            .await
+            .unwrap(),
+        0,
+        "expiry failed to re-evaluate changed restore authority after set ownership"
+    );
+    assert!(
+        store
+            .build_artifacts(a.organization_id, project, build.build_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}

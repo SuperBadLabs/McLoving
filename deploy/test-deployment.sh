@@ -287,6 +287,11 @@ excluded_patterns = [
     r"_SHA256$",                # digest strings pinning a path variable's content
 ]
 excluded_literals = {
+    # AGENT-012: exact debug-only numeric integration seam. Bounded to 60 s,
+    # consumed once per controller process and compiled out of release behavior;
+    # never carries a path and is not accepted by a shipped contract.
+    "MCLOVING_TEST_ARTIFACT_REGISTER_DELAY_MILLISECONDS": "AGENT-012 debug-only bounded once-per-process registration delay",
+    "MCLOVING_ARTIFACT_FD_DRIVER": "AGENT-012 cfg(test)-only descriptor-limit subprocess recursion marker",
     # The agent synthesizes these only for the sealed input helper from the
     # validated startup-frozen bindings. They are never read from agent or
     # controller service contracts; the bindings path is classified above.

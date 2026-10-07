@@ -39,6 +39,7 @@ nix = { version = "=0.31.3", features = ["dir", "signal", "fs", "user"] }
 mcloving-source-acquirer = { version = "0.0.0", path = "../../crates/source-acquirer" }
 
 [dev-dependencies]
+mcloving-object-store = { version = "0.0.0", path = "../../crates/object-store" }
 tokio-stream = { version = "=0.1.19", features = ["net"] }
 mcloving-pipeline-ir = { version = "0.0.0", path = "../../crates/pipeline-ir" }
 mcloving-controller-api = { version = "0.0.0", path = "../../crates/controller-api" }
