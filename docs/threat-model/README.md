@@ -854,9 +854,12 @@ version-5 work declined rather than refused for a session that did not
 negotiate the feature, and byte-identical initial and replayed summaries.
 Closed on squash merge `cca42de59271820826248c35ed195e8e81e637a6` with
 exact-main Foundation `34571458905` and Windows Agent `34571458894`; receipt
-`docs/evidence/PAR-010_SECURITY_REVIEW.md`. Residual: journaled step logs are
-not published when recovery completes a cancellation (`AGENT-008`), and
-hostile same-UID access to the relocated spools remains `SEC-005`.
+`docs/evidence/PAR-010_SECURITY_REVIEW.md`. At PAR-010 closure, journaled step
+logs were not published when recovery completed a cancellation (`AGENT-008`).
+The AGENT-008 candidate assessment below records the subsequent PAR-013
+recovery path and its bounded crash/response-loss proof; formal AGENT-008
+closure remains open. Hostile same-UID access to relocated spools remains
+`SEC-005`.
 
 ## PAR-011 container stage execution review (earned closure)
 
@@ -1595,3 +1598,39 @@ phase. The own-conflict physical scan residual remains explicit and unresolved;
 this closure makes no universal constant-cost append claim. The no-change
 capability/protocol conclusions and privileged database/host residuals above
 remain in force. No production, canary, migration or release authority is granted.
+
+
+## AGENT-008 recovery log publication (candidate assessment)
+
+The local candidate in `docs/evidence/AGENT-008_SECURITY_REVIEW.md` reviews
+TM-006 descriptor/reservation durability and receipt semantics; TM-003/TM-011
+exact fenced authority transferred to fresh sessions; TM-005 PostgreSQL truth;
+TM-007 process containment before replay; TM-018 unchanged duplicate quota and
+build-position accounting; and TM-052 the executing Foundation gate and CLI
+fixture. Production agent/controller code, schema, protocol, policy and authority
+predicates are unchanged. PAR-013 already supplied the quiesce, persisted
+`cancelling` result, fenced session transfer and publication-before-completion
+path; this candidate supplies exact shipped-binary acceptance evidence.
+
+The Linux fixture crashes the agent during step two with both step-zero
+stdout/stderr descriptors durable. A test-owned mTLS peer gates the first real
+upload, discards a positive committed response before journal acknowledgement,
+and permits the identical reservation to replay under a later session. Actual
+journal, PostgreSQL chunks/digests/counters, terminal events and CLI logs establish
+the publication order. The initial historical campaign's three semantic controls
+restore premature cancellation, omit completed descriptors and acknowledge before
+a response; each fails its named invariant and passes after exact restoration.
+The dated `AGENT-008_PHASE_QUALIFICATION.md` continuation corrects the initial
+temporal observation gap with eight direct journal/controller snapshots and a
+fourth early-local-retirement control, followed by restored scenario and full-nine
+GREEN results. The previous
+negotiated-live single-step recovery gate remains in the nine-test suite.
+
+Existing tenant, redaction, source/artifact/helper, identity/grant, restore,
+audit, admission, deployment, supply-chain, migration and release controls are
+assessed unchanged in the candidate receipt. Lost/replaced spool custody remains
+AGENT-011, hostile same-UID access remains SEC-005, and host/disk failure and
+definitive fence retirement remain explicit limits. This controlled Linux
+observation neither grants a stale fence upload authority nor qualifies native
+Windows. Independent review, protected merge and exact post-merge Foundation/
+Windows verification remain owed; no earned closure attribution is added here.
