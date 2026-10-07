@@ -99,6 +99,7 @@ async fn main() -> Result<()> {
         );
         return Ok(());
     }
+    let notification_nat64_prefixes = notification_nat64_prefixes_from(&process_environment)?;
     let migration_database_url = std::env::var("MCLOVING_MIGRATION_DATABASE_URL")
         .context("MCLOVING_MIGRATION_DATABASE_URL is required")?;
     let runtime_database_url =
@@ -259,6 +260,11 @@ async fn main() -> Result<()> {
             .with_public_base_url(&base)
             .context("configure MCLOVING_PUBLIC_BASE_URL")?;
     }
+    if let Some(prefixes) = notification_nat64_prefixes {
+        state = state
+            .with_notification_nat64_prefixes(&prefixes)
+            .context("configure MCLOVING_NOTIFICATION_NAT64_PREFIXES")?;
+    }
     if let Some(oidc) = &oidc {
         state = state
             .with_oidc_client(oidc.client.clone())
@@ -405,6 +411,15 @@ fn environment_string(env: EnvLookup, name: &str) -> Result<Option<String>> {
             .map(Some)
             .map_err(|_| anyhow::anyhow!("{name} must contain valid Unicode")),
     }
+}
+
+fn notification_nat64_prefixes_from(env: EnvLookup) -> Result<Option<String>> {
+    let value = environment_string(env, "MCLOVING_NOTIFICATION_NAT64_PREFIXES")?;
+    if let Some(prefixes) = &value {
+        mcloving_controller_api::notifications::parse_notification_nat64_prefixes(prefixes)
+            .context("validate MCLOVING_NOTIFICATION_NAT64_PREFIXES before startup I/O")?;
+    }
+    Ok(value)
 }
 
 fn bounded_u64_environment(name: &str, default: u64) -> Result<u64> {
@@ -3496,6 +3511,35 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn notification_nat64_environment_is_validated_without_global_environment_mutation() {
+        assert!(
+            notification_nat64_prefixes_from(&|_| None)
+                .unwrap()
+                .is_none()
+        );
+        let valid = "2606:4700::/96";
+        assert_eq!(
+            notification_nat64_prefixes_from(&|_| Some(valid.into()))
+                .unwrap()
+                .as_deref(),
+            Some(valid)
+        );
+        for invalid in ["", "bad-prefix", "2606:4700::/72"] {
+            assert!(notification_nat64_prefixes_from(&|_| Some(invalid.into())).is_err());
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt as _;
+            assert!(
+                notification_nat64_prefixes_from(&|_| Some(std::ffi::OsString::from_vec(vec![
+                    0xff
+                ])))
+                .is_err()
+            );
+        }
+    }
 
     #[test]
     fn server_side_work_wait_requires_exact_session_negotiation() {

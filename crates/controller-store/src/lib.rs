@@ -216,6 +216,9 @@ pub const PROJECT_ROLE_GRANTS_V41: &str =
 pub const SCHEDULE_SLOTS_V42: &str = include_str!("../migrations/0042_trigger_schedule_slots.sql");
 pub const WORKSPACE_AFFINITY_V43: &str = include_str!("../migrations/0043_workspace_affinity.sql");
 pub const LOG_ACCOUNTING_V44: &str = include_str!("../migrations/0044_log_accounting.sql");
+/// Leased, bounded delivered GitHub status observations (CTRL-007).
+pub const NOTIFICATION_RECONCILIATION_V45: &str =
+    include_str!("../migrations/0045_notification_reconciliation.sql");
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AgentReconciliationDisposition {
@@ -405,6 +408,15 @@ pub struct NotificationDelivery {
     pub terminal_generation: i32,
     /// Attempts made so far in this generation, this claim included.
     pub attempts: i32,
+}
+
+/// One leased observation of a delivered GitHub status. Its attempt count is
+/// independent of delivery retries and never reset by a corrective repost.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NotificationReconciliation {
+    pub delivery: NotificationDelivery,
+    pub attempts: i32,
+    pub claim: Uuid,
 }
 
 /// Serializes every decision about one commit status (repository, commit,
@@ -1553,6 +1565,7 @@ impl Store {
         apply_migration(&mut tx, 42, SCHEDULE_SLOTS_V42).await?;
         apply_migration(&mut tx, 43, WORKSPACE_AFFINITY_V43).await?;
         apply_migration(&mut tx, 44, LOG_ACCOUNTING_V44).await?;
+        apply_migration(&mut tx, 45, NOTIFICATION_RECONCILIATION_V45).await?;
         tx.commit().await?;
         Ok(())
     }
@@ -3758,6 +3771,13 @@ impl Store {
                      ELSE clock_timestamp()
                          + make_interval(secs => LEAST(power(2, attempts), $7))
                  END,
+                 reconciliation_due_at = CASE
+                     WHEN $5::text IS NULL AND NOT repost_required
+                          AND kind = 'github_status' AND reconciliation_attempts < $10
+                         THEN clock_timestamp() + make_interval(secs => $9)
+                 END,
+                 reconciliation_claim = NULL,
+                 reconciliation_lease_until = NULL,
                  repost_required = false,
                  in_flight = CASE
                      WHEN $5::text IS NULL OR attempts >= $6 THEN false
@@ -3780,6 +3800,8 @@ impl Store {
         .bind(mcloving_domain::notifications::MAX_DELIVERY_ATTEMPTS)
         .bind(mcloving_domain::notifications::MAX_DELIVERY_BACKOFF_SECONDS as f64)
         .bind(terminal_generation)
+        .bind(mcloving_domain::notifications::STALE_WRITE_QUIET_SECONDS as f64)
+        .bind(mcloving_domain::notifications::MAX_RECONCILIATION_ATTEMPTS)
         .fetch_optional(&mut *tx)
         .await?;
         tx.commit().await?;
@@ -3812,6 +3834,9 @@ impl Store {
                  repost_required = state <> 'delivered',
                  in_flight = CASE WHEN state = 'delivered' THEN false ELSE in_flight END,
                  delivered_at = NULL,
+                 reconciliation_due_at = NULL,
+                 reconciliation_claim = NULL,
+                 reconciliation_lease_until = NULL,
                  state = 'pending'
              WHERE organization_id = $1
                AND build_id = $2
@@ -3835,8 +3860,9 @@ impl Store {
     /// at its target from now on: a build that becomes terminal again while
     /// this stands, and a later build for the same commit status, delay
     /// their outcome's first post past this attempt's deadline, so this
-    /// write cannot land after theirs even if the controller dies between
-    /// the write and its settlement. For a commit status the mark and the
+    /// the local attempt finishes first even if the controller dies between
+    /// the write and its settlement. A target may apply the received body
+    /// later; delivered-row reconciliation observes that separate event. For a commit status the mark and the
     /// later-holder check are one step under the status key's lock, the
     /// same lock the terminal transaction takes, so either this attempt is
     /// marked before the later build records its rows (and that build is
@@ -3953,6 +3979,217 @@ impl Store {
         .bind(terminal_generation)
         .bind(attempts)
         .bind(superseded_by)
+        .fetch_optional(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(settled.is_some())
+    }
+
+    /// Claims delivered GitHub status rows for target observation. Each claim
+    /// durably charges a bounded attempt before I/O, leases the row beyond the
+    /// local deadline, and carries a fresh settlement token. Successful checks
+    /// recur after the quiet interval: a timed-out request can be applied after
+    /// an earlier successful check. The finite budget bounds this observation
+    /// window; it cannot promise convergence against arbitrary future writes.
+    pub async fn claim_due_notification_reconciliations(
+        &self,
+        organization_id: Uuid,
+        limit: i64,
+    ) -> Result<Vec<NotificationReconciliation>, StoreError> {
+        if !(1..=1_000).contains(&limit) {
+            return Ok(Vec::new());
+        }
+        let token = Uuid::new_v4();
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        // A worker may die after charging its final attempt. Once its lease
+        // expires, retire the claim without ever charging another attempt.
+        sqlx::query(
+            "UPDATE notification_deliveries
+             SET reconciliation_due_at = NULL, reconciliation_claim = NULL,
+                 reconciliation_lease_until = NULL, in_flight = false,
+                 reconciliation_error = COALESCE(reconciliation_error,
+                     'reconciliation attempts exhausted')
+             WHERE organization_id = $1 AND kind = 'github_status'
+               AND state = 'delivered' AND reconciliation_attempts >= $2
+               AND reconciliation_claim IS NOT NULL
+               AND reconciliation_lease_until <= clock_timestamp()",
+        )
+        .bind(organization_id)
+        .bind(mcloving_domain::notifications::MAX_RECONCILIATION_ATTEMPTS)
+        .execute(&mut *tx)
+        .await?;
+        let rows = sqlx::query_as::<
+            _,
+            (
+                Uuid,
+                Option<Uuid>,
+                Uuid,
+                i32,
+                String,
+                String,
+                Value,
+                String,
+                i32,
+                i32,
+                i32,
+            ),
+        >(
+            "WITH due AS (
+                 SELECT organization_id, build_id, target_index
+                 FROM notification_deliveries
+                 WHERE organization_id = $1
+                   AND state = 'delivered' AND kind = 'github_status'
+                   AND reconciliation_attempts < $4
+                   AND reconciliation_due_at <= clock_timestamp()
+                   AND (reconciliation_lease_until IS NULL
+                        OR reconciliation_lease_until <= clock_timestamp())
+                 ORDER BY reconciliation_due_at, build_id, target_index
+                 LIMIT $2
+                 FOR UPDATE SKIP LOCKED
+             ), claimed AS (
+                 UPDATE notification_deliveries AS d
+                 SET reconciliation_attempts = d.reconciliation_attempts + 1,
+                     reconciliation_claim = $5,
+                     reconciliation_lease_until = clock_timestamp() + make_interval(secs => $3)
+                 FROM due
+                 WHERE d.organization_id = due.organization_id
+                   AND d.build_id = due.build_id AND d.target_index = due.target_index
+                 RETURNING d.*
+             )
+             SELECT b.project_id, b.pipeline_id, c.build_id, c.target_index, c.kind,
+                    c.mapping_id, c.target, c.build_status, c.terminal_generation,
+                    c.attempts, c.reconciliation_attempts
+             FROM claimed AS c JOIN builds AS b
+               ON b.organization_id = c.organization_id AND b.id = c.build_id
+             ORDER BY c.build_id, c.target_index",
+        )
+        .bind(organization_id)
+        .bind(limit)
+        .bind(mcloving_domain::notifications::CLAIM_LEASE_SECONDS as f64)
+        .bind(mcloving_domain::notifications::MAX_RECONCILIATION_ATTEMPTS)
+        .bind(token)
+        .fetch_all(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(rows
+            .into_iter()
+            .map(
+                |(
+                    project_id,
+                    pipeline_id,
+                    build_id,
+                    target_index,
+                    kind,
+                    mapping_id,
+                    target,
+                    build_status,
+                    terminal_generation,
+                    attempts,
+                    reconciliation_attempts,
+                )| NotificationReconciliation {
+                    delivery: NotificationDelivery {
+                        organization_id,
+                        project_id,
+                        pipeline_id,
+                        build_id,
+                        target_index,
+                        kind,
+                        mapping_id,
+                        target,
+                        build_status,
+                        terminal_generation,
+                        attempts,
+                    },
+                    attempts: reconciliation_attempts,
+                    claim: token,
+                },
+            )
+            .collect())
+    }
+
+    /// The same status-key lock and in-flight ordering as delivery, with the
+    /// reconciliation's own token, generation, attempt and lease predicates.
+    pub async fn mark_notification_reconciliation_in_flight(
+        &self,
+        reconciliation: &NotificationReconciliation,
+    ) -> Result<InFlightMark, StoreError> {
+        let d = &reconciliation.delivery;
+        let mut tx = self.tenant_transaction(d.organization_id).await?;
+        lock_status_key(&mut tx, d.organization_id, &d.target).await?;
+        let marked = sqlx::query_scalar::<_, i32>(
+            "UPDATE notification_deliveries SET in_flight = true
+             WHERE organization_id = $1 AND build_id = $2 AND target_index = $3
+               AND kind = 'github_status' AND state = 'delivered'
+               AND terminal_generation = $4 AND reconciliation_attempts = $5
+               AND reconciliation_claim = $6
+               AND reconciliation_lease_until > clock_timestamp()
+             RETURNING reconciliation_attempts",
+        )
+        .bind(d.organization_id)
+        .bind(d.build_id)
+        .bind(d.target_index)
+        .bind(d.terminal_generation)
+        .bind(reconciliation.attempts)
+        .bind(reconciliation.claim)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if marked.is_none() {
+            tx.rollback().await?;
+            return Ok(InFlightMark::Overtaken);
+        }
+        if let Some((by, _)) =
+            later_github_status_holder_in(&mut tx, d.organization_id, d.build_id, &d.target).await?
+        {
+            // Keep the mark only for attempts that might actually issue I/O.
+            tx.rollback().await?;
+            return Ok(InFlightMark::Superseded { by });
+        }
+        tx.commit().await?;
+        Ok(InFlightMark::Marked)
+    }
+
+    /// Settles only this generation's current unexpired claim. Delivery truth
+    /// remains delivered even if observation failed; its separate error and
+    /// charged attempt remain durable. Reposts do not reset this budget.
+    pub async fn settle_notification_reconciliation(
+        &self,
+        reconciliation: &NotificationReconciliation,
+        error: Option<&str>,
+        superseded: bool,
+    ) -> Result<bool, StoreError> {
+        let d = &reconciliation.delivery;
+        let mut tx = self.tenant_transaction(d.organization_id).await?;
+        let settled = sqlx::query_scalar::<_, i32>(
+            "UPDATE notification_deliveries
+             SET reconciliation_due_at = CASE
+                     WHEN $8 OR reconciliation_attempts >= $9 THEN NULL
+                     WHEN $7::text IS NULL THEN clock_timestamp() + make_interval(secs => $10)
+                     ELSE clock_timestamp() + make_interval(secs =>
+                         LEAST(power(2, reconciliation_attempts), $11))
+                 END,
+                 reconciliation_claim = NULL,
+                 reconciliation_lease_until = NULL,
+                 reconciliation_error = $7,
+                 in_flight = CASE WHEN $7::text IS NULL OR $8
+                     OR reconciliation_attempts >= $9 THEN false ELSE in_flight END
+             WHERE organization_id = $1 AND build_id = $2 AND target_index = $3
+               AND kind = 'github_status' AND state = 'delivered'
+               AND terminal_generation = $4 AND reconciliation_attempts = $5
+               AND reconciliation_claim = $6
+               AND reconciliation_lease_until > clock_timestamp()
+             RETURNING reconciliation_attempts",
+        )
+        .bind(d.organization_id)
+        .bind(d.build_id)
+        .bind(d.target_index)
+        .bind(d.terminal_generation)
+        .bind(reconciliation.attempts)
+        .bind(reconciliation.claim)
+        .bind(error)
+        .bind(superseded)
+        .bind(mcloving_domain::notifications::MAX_RECONCILIATION_ATTEMPTS)
+        .bind(mcloving_domain::notifications::STALE_WRITE_QUIET_SECONDS as f64)
+        .bind(mcloving_domain::notifications::MAX_DELIVERY_BACKOFF_SECONDS as f64)
         .fetch_optional(&mut *tx)
         .await?;
         tx.commit().await?;

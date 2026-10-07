@@ -477,6 +477,38 @@ require_secret_files() {
 # that EXISTS. The secret and trust classes are all file-valued and carry
 # regular-file refusals of their own already; the column is stated for
 # them too, so the authority is complete rather than partial.
+# Same configuration grammar as controller-api's startup parser. This scalar
+# changes the SSRF interpretation of global IPv6 and is pinned to the contract,
+# even though it names no filesystem path.
+validate_notification_nat64_prefixes() {
+  python3 - "$1" <<'NAT64'
+import ipaddress
+import sys
+value = sys.argv[1]
+def refuse():
+    raise SystemExit("MCLOVING_NOTIFICATION_NAT64_PREFIXES requires 1 to 32 nonoverlapping canonical global IPv6 RFC6052 prefixes (/32,/40,/48,/56,/64,/96), comma-separated without whitespace")
+entries = value.split(',')
+if not value or len(value.encode()) > 4096 or len(entries) > 32 or any(c.isspace() for c in value):
+    refuse()
+excluded = [ipaddress.IPv6Network(n) for n in ('2001::/23', '2001:db8::/32', '2002::/16', '3fff::/20')]
+global_unicast = ipaddress.IPv6Network('2000::/3')
+prefixes = []
+for entry in entries:
+    try:
+        address, width = entry.split('/')
+        if '%' in address or width not in ('32', '40', '48', '56', '64', '96'):
+            refuse()
+        prefix = ipaddress.IPv6Network(entry, strict=True)
+        if not prefix.subnet_of(global_unicast) or any(prefix.overlaps(n) for n in excluded):
+            refuse()
+        if prefix.network_address.packed[8] != 0 or any(prefix.overlaps(n) for n in prefixes):
+            refuse()
+        prefixes.append(prefix)
+    except (ValueError, TypeError):
+        refuse()
+NAT64
+}
+
 deployment_contract_path_variables() {
   case "$1" in
     controller)

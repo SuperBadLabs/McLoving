@@ -144,8 +144,34 @@ holds that status: an earlier build's delayed delivery is recorded as
 abandoned, superseded by the later build, and not written; every attempt
 marks itself in flight under the status key's lock before sending, and a
 later build's terminal transaction takes the same lock and delays its first
-post past an in-flight earlier attempt's deadline, so the later build's
-outcome is the last write even across a controller crash. A webhook is a JSON record (`mcloving.build-notification/v1`: organization,
+post past an in-flight earlier attempt's local deadline. That deadline
+bounds the controller's wait, not when GitHub applies a request body it
+already received. Delivered `github_status` rows therefore become due for
+reconciliation after the 35-second quiet interval (CTRL-007). Reconciliation
+is durably claimed under `FOR UPDATE SKIP LOCKED`, a 90-second lease and a
+fresh token; generation, attempt, token and live lease fence marking and
+settlement. The worker charges one of twelve separate reconciliation
+attempts per terminal generation before network I/O. It reads
+`GET /repos/{owner}/{name}/commits/{commit}/statuses`, selects the newest
+exact-context record, and posts the recorded state, description and build
+link once when they differ or the context is absent. A matching read sends
+no POST. Status pages contain at most 100 records; at most ten pages and
+512 KiB per page and 2 MiB total are read under the same 30-second attempt
+deadline. The GET budget accommodates complete GitHub creator/URL/timestamp
+metadata while preserving the separate 64 KiB POST-answer bound. Truncated,
+malformed, oversized, redirected or inconclusive bounded searches fail
+observation without licensing a corrective write. GET and corrective POST
+both repeat the checked, pinned destination boundary. Later status holders
+supersede old observations without a request.
+
+Checks recur after another quiet interval, because GitHub may apply the old
+body after an earlier matching check; errors use bounded exponential backoff.
+Crashes consume their charged attempt and become reclaimable after the lease.
+Reposts never reset the reconciliation budget; only a new terminal generation
+starts a new budget. At exhaustion the row retains its delivered truth and
+reconciliation attempt/error record. This finite observation window cannot
+promise convergence against arbitrarily late or unrelated external writes.
+A webhook is a JSON record (`mcloving.build-notification/v1`: organization,
 project, pipeline, build, status, mapping, target index, terminal generation,
 attempt, build URL)
 POSTed to the mapping's `https` destination with `X-McLoving-Signature-256:
@@ -156,8 +182,9 @@ can tell its outcomes apart; a delivery from an older generation that lands
 while or after the newer generation delivers makes the newer one post once
 more, and an attempt recorded in flight when the build becomes terminal
 again delays the new outcome's first post past that attempt's deadline, so
-the last write at a target is the latest outcome even across a controller
-crash),
+the newer local attempt follows the earlier deadline even across a
+controller crash; this does not bound a target's late application of a
+received body),
 `X-McLoving-Attempt` and
 `X-McLoving-Event: build.terminal`. Before either connects, the destination
 host is resolved and every address is checked against the loopback,
@@ -166,7 +193,20 @@ reserved ranges; an IPv6 address is allowed only inside global unicast
 `2000::/3` less the IETF protocol-assignments block (Teredo, benchmarking,
 ORCHID), documentation and segment-routing prefixes, with 6to4, NAT64 and
 IPv4-mapped forms decided by the embedded IPv4 address and local-use NAT64
-refused outright; the connection is
+refused outright. Deployments using network-specific RFC6052 NAT64 inside
+global unicast must declare their translators in startup-frozen
+`MCLOVING_NOTIFICATION_NAT64_PREFIXES`: 1 to 32 comma-separated canonical
+IPv6 networks, without whitespace, duplicate/overlapping networks or host
+bits, using `/32`, `/40`, `/48`, `/56`, `/64` or `/96`. Unset means no
+network-specific translators; present-empty or malformed fails before
+startup I/O. Reserved/transition prefixes are refused as configuration,
+and matching addresses use the embedded IPv4 policy, with the RFC6052
+reserved u octet and unused suffix required to be zero. A translated private,
+loopback or other refused IPv4 is refused before connecting; public IPv4
+remains reachable. The deployment guard pins this scalar to its environment
+contract and refuses ambient overrides or dropped declarations. Operators
+must name every network-specific translator in their DNS64 deployment;
+unconfigured global unicast retains native IPv6 interpretation. The connection is
 then pinned to exactly those addresses with the host name kept for TLS and
 `Host`, redirects are not followed, proxies are not used, a request is
 bounded at five seconds to connect and twenty in all, the answer is read to

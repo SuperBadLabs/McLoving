@@ -17,6 +17,9 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=tools/versions.env
 source "${repo_root}/tools/versions.env"
 
+# CTRL-007 configuration proof uses no container or service resources.
+bash "${repo_root}/deploy/test-notification-nat64.sh"
+
 for tool in podman openssl python3 curl jq cargo sha256sum flock strip; do
   command -v "${tool}" >/dev/null || {
     echo "missing required tool: ${tool}" >&2

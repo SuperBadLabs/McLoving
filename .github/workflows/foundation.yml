@@ -491,8 +491,13 @@ jobs:
           cargo +1.97.1 test --locked
           -p mcloving-controller-api
           --test scm_webhook
-          --test notifications
           -- --test-threads=1
+      - name: Run bounded delivered-status reconciliation and notification contracts
+        run: >-
+          bash scripts/run-verified-rust-test.sh
+          10 notifications --require-postgres
+          cargo +1.97.1 test --locked -p mcloving-controller-api
+          --test notifications -- --include-ignored --test-threads=1
       - name: Run durable identity lifecycle and tenant-isolation tests
         run: cargo +1.97.1 test --locked -p mcloving-controller-store --test identity_lifecycle
       - name: Run immutable authorization mapping and rollback tests
