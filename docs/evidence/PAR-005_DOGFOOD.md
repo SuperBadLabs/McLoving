@@ -185,3 +185,48 @@ readback fields and provenance are in
 recorder correction preserves three fractional digits, and its full-path
 regression covers both observed remainders and refusal of genuinely older
 builds. PAR-005 remains ACTIVE pending its review, merge and verification gates.
+
+## AGENT-013 owner-host checkout and native recovery proof (2026-10-07 UTC)
+
+The earlier September throughput notes, Luigi residual and complete ten-push
+verdict table above remain unchanged. AGENT-013's current candidate records
+a fresh isolated shipped-controller/remote-mTLS-agent checkout at protected
+`dc5c58e85f0835d9761beffa330d46d960139e10` on HeMan: **9.314s** for the complete
+successful checkout plus harmless readiness attempt, **2,191 files / 28,074,111
+bytes**. Acquisition-only 9.112s is diagnostic; whole-wrapper 13.521s includes
+setup/cleanup. The signed receipt, exact tree/manifest/content and successful
+attempt/fence/remote identity were independently reconciled before fixture key
+retirement. This measured dc5 target is historical after protected362 advances;
+it is not a benchmark of the new candidate base or a whole Foundation verdict.
+
+The native integration proof observed 2/256 partial bulk blobs, kernel-confirmed
+SIGSTOP/SIGKILL and bounded reap, then retried the same real binary/config/private
+bindings/acquisition and byte-identical request without claim rewriting or
+operator cleanup; 257 recovered files and the authenticated exact retained tree
+passed. The full source suite passed 62 unique tests and strict Clippy. Existing
+batched reads/per-blob bounds and older reachable exact-commit-after-branch-advance
+plus other-ref refusal remain covered. First 121.677s PG setup failure and later
+preflight negatives are retained as unearned setup evidence.
+
+[`AGENT-013_SECURITY_REVIEW.md`](AGENT-013_SECURITY_REVIEW.md) and
+[`AGENT-013_PROOF.json`](AGENT-013_PROOF.json) bind review roles, raw evidence
+hashes and remaining protected gates. AGENT-013 remains ACTIVE. The explicit
+unconfined userns-permission profile, accepted owner same-UID debug residual,
+public-origin real-credential binding without provider-use attestation, absence
+of a raw live NDJSON transcript and bounded cleanup visibility remain recorded.
+No provider token revocation, production broker grant or DOGFOOD-001 closure is
+inferred.
+
+### AGENT-013 public receipt projection after candidate Secret scan
+
+Observed 2026-10-07 UTC: PR182 headf1a398a4 failed `generic-api-key` at
+`AGENT-013_PROOF.json` line121. Private comparison and the shipped digest
+definition classify the exact field as a nonsecret marker-set SHA256 commitment,
+matching the original authenticated receipt/config. The public proof now omits
+that commitment and signature in an explicitly unsigned metadata projection;
+it retains the complete original raw receipt hash and the actual prior HMAC
+review. The full private receipt and all native/benchmark proofs remain intact.
+No scanner rule, allowlist or exemption changes. This candidate negative is not
+a production credential-leak finding or a new checkout measurement. Root's
+independent corrected-candidate review and unchanged Secret scan remain pending;
+AGENT-013 stays ACTIVE.
