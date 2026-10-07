@@ -47,6 +47,17 @@ and arbitrary English is not a supported assertion grammar. Those cases
 require the live checks and dated receipts above; a green local gate does not
 claim to have performed them.
 
+A reviewed historical archive may retain the wording it actually contained.
+The three roots and independent manifest commitments in
+`scripts/stale-claims-archives.json` establish a finite content boundary. Only
+listed Markdown whose same opened bytes match the pinned manifest digest is
+historical payload; an archive label, date, untracked status, editable manifest,
+or containing directory grants no exception. New or changed prose is checked.
+Optional owner-local units may be absent from CI; a present unit with a missing
+or invalid seal, ambiguous paths, or symlink aliases fails closed. Changing this
+registry requires a reviewed source change and provenance review. These content
+commitments establish neither authorship nor current operational authority.
+
 ## Closing a ticket
 
 Two artifacts are checked mechanically by

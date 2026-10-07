@@ -1,0 +1,24 @@
+# JCOMP-003 preparation, 2026-09-10
+
+No campaign or fixture workload has run in this preparation. No source edit or remote write was made. The recovered source remains the historical preparation commit 7d78b2f8eda68b643367b8b6df1568e1f1b60314/tree 246de4b9de73c4d8c58e1eae6e31d3ddf85e3552; this is not an execution freeze.
+
+Repository: /tmp/mcloving-chief-campaign-0910. `recovered-main` is 5cd305d227e909be95fa838088f7429b75cb6601. The preparation delta is 22 files, 3952 insertions and 3 deletions over aaa3778 ancestry. All 27 source/tool/fixture entries in the historical prereg-source-tools-v3 manifest match the recovered bytes; see historical-tooling-comparison.json. Review must bind the eventual refreshed source, not merely this historical equality.
+
+Read-only infrastructure observations: Podman resolves the exact pinned Jenkins reference to 3b072c3e47bfa9a97dc733fc414da2005c99180f111ac0842327bd963509a1c1. Pinned Rust resolves to a0635962c16d5f26400703edd4317175cf9531f3285d632613f9da227f9c71d1; pinned PostgreSQL resolves to d741b376874687de90374fd34f55c6b2760e8f7bd7e4ae5cd47f50757fc08cf8. All 90 public plugin bytes and manifest match the frozen inventory. strace and required host unwind library path exist; Clojure is installed. These are availability observations, not executed-container approval. Docker is not the runtime used by these scripts.
+
+Source population() validates 228 identities and retained repository bytes: 226 originals and 2 historical typed-redacted representations. The separate unchanged authored manifest has 23 cases: 11 supported, 10 unsupported, 2 rejected. The paired workload target is 11 positives/19 shell executions on each runtime. The compiler target is 46 responses with independent Rust readmission. The original228 capture must retain admission/launcher failures as unverified.
+
+## Release sequence and review focus
+
+1. Chief verifies corrected runtime's protected merge, exact-main gates including actual native Windows, and earned AGENT-007/JCOMP-002B closures. Current main and closure commit identities must be explicit.
+2. Reconcile the 22-file preparation delta onto that protected baseline. Independently review the exact resulting compiler authority, admitted YAML propagation, operational enablement, real shipped controller/agent work, physical shell observation, containment release markers, literal xtrace comparison, skipped-node absence, checkpoint/workspace cleanup and fixed publication omissions. No fixture expectation changes are planned.
+3. Freeze clean source commit/tree and independent review manifest. Adapted dispatch-paired.py changes only REPO to the recovered repository and is copied here, outside the source tree. Packaging helper is a verbatim historical copy. Review these helpers and pin their digests; historical source-freeze/output receipts cannot be reused.
+4. Build fresh compiler worker and Rust admission from frozen Git archive; externally inspect/pin image, admission bytes, source archive and build inventory. Existing historical compiler image is not execution authority.
+5. Compile all 23 authored inputs twice and readmit exact responses, then independently pin campaign/input. Jenkins may run independently after source release; product must wait for reviewed input. Run original228 separately against the fresh compiler/admission identities. Preserve all failed versioned outputs.
+6. Independently review output inventory digests, run paired verifier with all external pins, and package retained output only with chief-reviewed 13-key publication-pins.json. Only successful observed paired report may establish authored equivalence; original corpus remains separate classification.
+
+Estimated times are engineering estimates, not receipts: clean build 5–20 minutes; compiler46 2–8 minutes; corpus228 10–25 minutes; Jenkins bounded at 540 seconds plus kill reserve; product build/run below its 20-minute outer bound; review/verification/packaging 5–10 minutes. Main risks are first-execution observer incompatibility, clean-build downloads/resource contention, and correction/recapture review cycles. Any runtime defect needs its own protected correction and regenerated evidence.
+
+## HeMan errand
+
+The local qwen3.8-flash-next model was refreshed through GET /models and performed a bounded source extraction from scripts/jcomp003/README.md and build-compiler.sh. llm-request.json and llm-response.json retain the material/output; no secrets were supplied. Direct source comparison confirmed extracted pin categories, but the model omitted standalone archive/build-inventory entries and grouped post-teardown inventories under a heading phrased as preexecution. The sequence above corrects these omissions: archive/build inventory are build pins, executed workload inventories exist only after teardown. Ask independent reviewer to check this bounded source summary. Model output grants no execution authority or evidence.

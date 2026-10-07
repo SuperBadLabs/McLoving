@@ -1,0 +1,20 @@
+{
+  "schema": "hyg-003-reviewed-handoff-archives-v1",
+  "units": [
+    {
+      "root": "docs/handoffs/2026-09-10-master-chief-mission/campaign-complete-v4",
+      "manifest": "ARTIFACTS.sha256",
+      "sha256": "bbba8731110c0adf2dc829bbde0541856ac26ba9417b135399f35df90998f143"
+    },
+    {
+      "root": "docs/handoffs/2026-09-10-next-master-chief-post-mission",
+      "manifest": "SHA256SUMS",
+      "sha256": "a4940f7721b356a3bc2a4bdbbdfc6da3a58f2b99387c5f6a07d074f4d86fa273"
+    },
+    {
+      "root": "docs/handoffs/2026-09-11-source-prerequisite-verified",
+      "manifest": "SHA256SUMS",
+      "sha256": "72e758c7ecdd546ca830b734d5b7953a0fdb1fcfeb817fcaf45f7da8abc0bd74"
+    }
+  ]
+}

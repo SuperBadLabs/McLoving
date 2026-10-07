@@ -1516,6 +1516,21 @@ exact-head readback is still mandatory. HYG-003 is `ACTIVE`; this section is not
 a closure attribution or independent review receipt.
 
 
+The HYG-003 archival continuation on the 7ff63e54 base additionally reviews
+content-scoped historical handoff handling. Three independent source-registry
+manifest commitments delimit 107 listed Markdown files; an exact digest on the
+same opened bytes distinguishes preserved historical payload from live prose.
+These reviewed content commitments assert neither authorship nor operational
+authority. New/unlisted prose remains checked; altered Markdown, malformed or
+missing present-unit seals, path aliases and symlinks fail closed. Optional
+owner-local units may be absent in CI. No execution, deployment or release
+boundary changes. The four-file real-manifest replay, named removal/restoration
+controls and root-owned actual owner-tree readback are separately identified in
+the canonical receipt. Residual trust remains review of the committed registry
+and external observation truth; a local content gate cannot certify either.
+This continuation is candidate evidence while HYG-003 remains ACTIVE.
+
+
 ## CTRL-005 incremental log accounting
 
 This candidate changes controller persistence and resource accounting. It does

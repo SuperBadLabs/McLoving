@@ -20,6 +20,7 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[1]
 BOARD = "test-execution-board.py"
 CLOSURE = "test-ticket-closure-receipts.py"
+ARCHIVES = "test-stale-claims-archives.py"
 # (label, production source, exact mutation, named control)
 MUTATIONS = (
     ("head-assertions", "stale_claims.py", "HEAD_ASSERTIONS", "pattern", BOARD,
@@ -64,11 +65,11 @@ MUTATIONS = (
      'defects += []', BOARD,
      "StaleClaimBoundaryTests.test_observation_keyword_does_not_excuse_live_assertion"),
     ("handoff-governance-integration", "stale_claims.py",
-     'defects += governance_defects(\n                path, handoffs / "2026-09-06-freeze-thaw.md", today=today\n            )',
+     'defects += governance_defects(\n                path, handoffs / "2026-09-06-freeze-thaw.md", today=today, content=content\n            )',
      'defects += []', BOARD,
      "ExecutionBoardVerifierTests.test_pre_thaw_governance_claim_fails_after_recorded_lift"),
     ("board-governance-integration", "stale_claims.py",
-     'defects += governance_defects(\n        repository / "docs" / "EXECUTION_BOARD.md",\n        handoffs / "2026-09-06-freeze-thaw.md", today=today,\n    )',
+     'defects += governance_defects(\n        repository / "docs" / "EXECUTION_BOARD.md",\n        handoffs / "2026-09-06-freeze-thaw.md", today=today, content=board_text,\n    )',
      'defects += []', BOARD,
      "StaleClaimBoundaryTests.test_expired_window_in_board_fails_real_entry_point"),
     ("closure-entry-integration", "verify-ticket-closure-receipts.py",
@@ -94,6 +95,67 @@ MUTATIONS = (
     ("paragraph-wide-observation-bypass", "stale_claims.py", '        assertions = [',
      '        if dated_handoff and "observed" in plain:\n            observed_spans = [(0, len(plain))]\n        assertions = [', BOARD,
      "StaleClaimBoundaryTests.test_dated_observation_and_current_assertion_in_same_sentence_fails"),
+    ("main-token-boundary", "stale_claims.py",
+     'MAIN_SUBJECT = r"(?<![\\w-])(?:protected[- ]main|main)(?![\\w-])"',
+     'MAIN_SUBJECT = r"\\b(?:protected[- ]main|main)\\b"', ARCHIVES,
+     "ArchiveBoundaryTests.test_recovered_main_is_not_live_main"),
+    ("reviewed-seal-commitment", "reviewed_handoff_archives.py",
+     'if hashlib.sha256(data).hexdigest() != unit["sha256"]:', 'if False:', ARCHIVES,
+     "ArchiveBoundaryTests.test_manifest_and_payload_cannot_update_their_own_pin"),
+    ("listed-markdown-digest", "stale_claims.py",
+     'if hashlib.sha256(data).hexdigest() != expected:', 'if False:', ARCHIVES,
+     "ArchiveBoundaryTests.test_changed_listed_markdown_is_refused"),
+    ("restored-archival-scope", "stale_claims.py", 'if expected is not None:',
+     'if False and expected is not None:', ARCHIVES,
+     "ArchiveBoundaryTests.test_real_three_seals_and_four_archival_documents_pass_entry_point"),
+    ("same-opened-markdown", "stale_claims.py", 'if hashlib.sha256(data).hexdigest() != expected:',
+     'if hashlib.sha256(path.read_bytes()).hexdigest() != expected:', ARCHIVES,
+     "ArchiveBoundaryTests.test_archive_eligibility_uses_the_same_opened_markdown_bytes"),
+    ("registry-fail-closed", "reviewed_handoff_archives.py",
+     'return {}, [f"archive scope: cannot validate reviewed registry: {error}"]',
+     'return {}, []', ARCHIVES,
+     "ArchiveBoundaryTests.test_missing_registry_fails_closed_even_on_clean_tree"),
+    ("seal-file-no-follow", "reviewed_handoff_archives.py",
+     'os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW', 'os.O_RDONLY | os.O_NONBLOCK', ARCHIVES,
+     "ArchiveBoundaryTests.test_seal_symlink_cannot_authorize_scope"),
+    ("seal-ancestor-no-follow", "reviewed_handoff_archives.py",
+     'os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW', 'os.O_RDONLY | os.O_DIRECTORY', ARCHIVES,
+     "ArchiveBoundaryTests.test_registered_ancestor_no_follow_guard"),
+    ("nested-directory-symlink", "stale_claims.py",
+     'defects.append(f"{relative}: handoff directory symlink cannot be checked as repository prose")',
+     'pass', ARCHIVES,
+     "ArchiveBoundaryTests.test_unlisted_nested_directory_symlink_is_refused"),
+    ("manifest-duplicate-path", "reviewed_handoff_archives.py", 'if path in entries:',
+     'if False and path in entries:', ARCHIVES,
+     "ArchiveParserTests.test_duplicate_manifest_paths_cannot_be_collapsed"),
+    ("manifest-path-canonicality", "reviewed_handoff_archives.py",
+     'raise ArchiveScopeError("noncanonical or escaping archive path")', 'pass', ARCHIVES,
+     "ArchiveParserTests.test_manifest_paths_cannot_escape"),
+    ("manifest-digest-shape", "reviewed_handoff_archives.py",
+     'MANIFEST_LINE = re.compile(r"(?P<digest>[0-9a-f]{64})  (?P<path>.+)")',
+     'MANIFEST_LINE = re.compile(r"(?P<digest>[^ ]+)  (?P<path>.+)")', ARCHIVES,
+     "ArchiveParserTests.test_bad_manifest_digest_is_refused"),
+    ("manifest-complete-lines", "reviewed_handoff_archives.py",
+     'if not data or not data.endswith(b"\\n"):', 'if not data:', ARCHIVES,
+     "ArchiveParserTests.test_unterminated_manifest_is_refused"),
+    ("registry-duplicate-keys", "reviewed_handoff_archives.py", 'if name in result:',
+     'if False and name in result:', ARCHIVES,
+     "ArchiveParserTests.test_duplicate_registry_keys_are_refused"),
+    ("registry-root-overlap", "reviewed_handoff_archives.py",
+     'if any(root[:len(other)] == other or other[:len(root)] == root for other in seen):',
+     'if False:', ARCHIVES,
+     "ArchiveParserTests.test_registry_overlapping_roots_are_refused"),
+    ("registry-reviewed-unit-set", "reviewed_handoff_archives.py",
+     'or len(registry["units"]) != 3', 'or False', ARCHIVES,
+     "ArchiveParserTests.test_registry_missing_unit_cannot_change_reviewed_scope"),
+    ("registry-commitment-shape", "reviewed_handoff_archives.py",
+     'if not isinstance(unit["sha256"], str) or HEX.fullmatch(unit["sha256"]) is None:',
+     'if False:', ARCHIVES,
+     "ArchiveParserTests.test_registry_malformed_commitment_is_refused"),
+    ("seal-file-regularity", "reviewed_handoff_archives.py", 'if not stat.S_ISREG(os.fstat(fd).st_mode):',
+     'if False:', ARCHIVES,
+     "ArchiveParserTests.test_nonregular_file_cannot_supply_seal_bytes"),
+
 )
 
 
@@ -105,6 +167,7 @@ def replay() -> dict:
         for source in (ROOT / "scripts").glob("*.py"):
             shutil.copyfile(source, root / "scripts" / source.name)
         shutil.copytree(ROOT / "scripts/fixtures", root / "scripts/fixtures")
+        shutil.copyfile(ROOT / "scripts/stale-claims-archives.json", root / "scripts/stale-claims-archives.json")
         shutil.copyfile(ROOT / "README.md", root / "README.md")
         (root / "docs/handoffs").mkdir(parents=True)
         shutil.copyfile(ROOT / "docs/EXECUTION_BOARD.md", root / "docs/EXECUTION_BOARD.md")
@@ -132,15 +195,22 @@ def replay() -> dict:
                 path.write_text(original, encoding="utf-8")
             if red.returncode != 1 or "FAILED (failures=1)" not in red.stderr or "ERROR:" in red.stderr:
                 raise RuntimeError(f"{name}: mutation did not cause one assertion failure\n{red.stderr}")
+            restored = subprocess.run(command, cwd=root, text=True, capture_output=True, timeout=30)
+            if restored.returncode != 0:
+                raise RuntimeError(f"{name}: restored control fails\n{restored.stderr}")
             results.append({"mutation": name, "source": filename, "test": test,
                             "green_exit": baseline.returncode, "red_exit": red.returncode,
-                            "green_output": baseline.stderr, "red_output": red.stderr})
+                            "green_output": baseline.stderr, "red_output": red.stderr,
+                            "restored_exit": restored.returncode, "restored_output": restored.stderr})
     sources = {str(path.relative_to(ROOT)): hashlib.sha256(path.read_bytes()).hexdigest()
                for path in sorted((ROOT / "scripts").glob("*stale*")) if path.is_file()}
     for filename in (BOARD, CLOSURE, "verify-execution-board.py", "verify-ticket-closure-receipts.py",
-                     "fixtures/stale-claims.json"):
+                     "fixtures/stale-claims.json", "reviewed_handoff_archives.py", "stale-claims-archives.json"):
         path = ROOT / "scripts" / filename
         sources[str(path.relative_to(ROOT))] = hashlib.sha256(path.read_bytes()).hexdigest()
+    for path in sorted((ROOT / "scripts/fixtures/hyg-003-owner-archives").rglob("*")):
+        if path.is_file():
+            sources[str(path.relative_to(ROOT))] = hashlib.sha256(path.read_bytes()).hexdigest()
     return {"ticket": "HYG-003", "source_sha256": sources, "mutations": results}
 
 

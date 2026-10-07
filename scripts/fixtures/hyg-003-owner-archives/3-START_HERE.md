@@ -1,0 +1,17 @@
+# Next Master Chief: local handoff only
+
+The previous 270-minute mission ended at 08:59 UTC on September 10, 2026. This package does not grant a new time budget or automatically resume implementation.
+
+**Current user constraint: handoff artifacts LOCAL ONLY. No GitHub commits, pushes, PRs, merges, workflow reruns, ticket closures or source changes are authorized by this request.** Earlier mission publication authority must not be carried forward into this handoff task. Read-only status inspection and artifact validation are permitted; they are not gate execution or approval to publish.
+
+Read [STATUS.md](STATUS.md) for historical versus latest observations, [NEXT_MASTER_CHIEF_PROMPT.md](NEXT_MASTER_CHIEF_PROMPT.md) for the intended resume prompt, and [REMAINING_ACTIONS.md](REMAINING_ACTIONS.md) for work that remains unperformed. The original workspace remains at verified `01137b54`; remote merged main is `ca79f7b4`. The fresh 14:40:04 UTC read-only receipt now establishes successful exact-main Foundation and native Windows checks on ca79. JCOMP-003 remains ACTIVE because earned closure bookkeeping has not been applied; that work is outside this handoff request and should be executed when assigned in the next mission. Do not repeat completed main CI or campaigns for this handoff.
+
+The complete retained mission directory is copied under [mission/](mission/), including raw v4 paired/Jenkins/228-source evidence, earlier failed or superseded v1/v2/v3 evidence, classifier 17/46/228 and mutation proof, signed merge receipts, Git bundles, and unapplied closure/gate tools. Old manifests and pending observations are unchanged. The latest read-only observation is retained separately under `latest-status/` and establishes completed exact-main gates; it must not relabel the deadline record.
+
+Verify `sha256sum -c SHA256SUMS` from this directory. Run `python3 RECOVER.py /a/new/empty-destination.git` to reconstruct source offline in a new bare repository, using only included bundles. The script refuses an existing destination and makes no network requests. It imports the full runtime base, campaign history, publication and merged-main history, then historical classifier/runtime bundles, checking exact commit/tree identities. To inspect source afterward, create a separate clone of that recovered bare repository and explicitly check out the desired known commit; do not modify the original workspace.
+
+Self-contained means source history and retained raw evidence plus instructions are included. Large compiler images, admission executables and other omitted binary payloads remain reconstruction/pin references as explicitly documented in the copied packages; this is not a promise of offline campaign reexecution. Absolute historical `/tmp` paths are provenance only, not required recovery inputs. When a future mission requires gate execution, use a new worktree and repoint working copies of gate configuration to included evidence.
+
+This handoff does not start another mission. Follow the user’s next mission instructions and authorization; do not ask again for actions they authorize. Do not publish handoff-only commits or rerun completed gates just for handoff.
+
+Portable archive: [2026-09-10-next-master-chief-post-mission.tar.gz](../2026-09-10-next-master-chief-post-mission.tar.gz), with its adjacent `.sha256` checksum and `.verification.json` archive-validation receipt. Extract into a new directory, then verify this package’s SHA256SUMS.
