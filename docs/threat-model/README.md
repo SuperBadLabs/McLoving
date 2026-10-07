@@ -618,6 +618,8 @@ had never claimed one.
 | CTRL-005 | `docs/evidence/CTRL-005_SECURITY_REVIEW.md` |
 | CTRL-006 | `docs/evidence/CTRL-006_SECURITY_REVIEW.md` |
 | EXEC-005 | `docs/evidence/EXEC-005_SECURITY_REVIEW.md` |
+| CTRL-007 | `docs/evidence/CTRL-007_SECURITY_REVIEW.md` |
+| AGENT-013 | `docs/evidence/AGENT-013_SECURITY_REVIEW.md` |
 
 ## Residual-risk policy
 
@@ -1968,3 +1970,80 @@ controls pass. Earlier 96/nine records remain historical. The outside-scope test
 uses a real existing target; no accepted scope spelling can replace missing
 receipt/attribution files. Original acceptance, ACTIVE state, protected historic
 prefixes and all runtime/authority limits remain unchanged.
+
+
+## CTRL-007 subsequent reviewed closure observation (2026-10-07 UTC)
+
+Observed at 2026-10-07T04:09:24.394197+00:00: independent full implementation/native/boundary review and
+the final twenty-file composition review by `/root/milestone_m2` covered the
+original PAR-004-dependent acceptance. Exact-context target reconciliation
+corrects a genuinely late older write after the quiet interval, with durable
+twelve-attempt charging and generation/UUID/lease-fenced exclusive claims.
+Configured RFC6052 prefixes retain all six legal widths and the embedded IPv4
+private-destination refusal for GET and POST. Startup, deployed contract,
+sanitized interpreter, response budgets, meaningful mutations and previous
+failed observations remain separately bound in
+`docs/evidence/CTRL-007_SECURITY_REVIEW.md`.
+
+PR #179 normally protected-merged as
+`3fb819f53116f039159e9d0055eadcf539f1243c`. Exact-merge Foundation
+`37565473306` and Windows Agent `37565473257` succeeded on attempt 2 after
+failed-only retries, including actual native job `112615588859` and all
+23 steps. Joint receipt SHA-256 is
+`f933d31cf5b7a914c735d5c34e0b5fe4d5ab61ee216f013db46ff12b0dbc15ac`.
+The first actual Windows failure remains preserved with cause unproven; a retry
+does not erase it or qualify another head. No scanner/test/workflow relaxation
+is used. Canonical receipt references bind the exact source and all gate records.
+
+The existing TM-039/TM-054/TM-013/TM-018 and migration/authority determinations
+are retained. Finite convergence, arbitrarily delayed/external writes, operator
+routing/unconfigured translators, system TLS trust and cross-organization
+same-context races remain residuals. This private subsequent closure candidate
+changes no product runtime, schema, protocol, credential grant or network policy.
+Its root-owned independent metadata review, composition, protected checks and
+normal closure merge remain required. No production, canary, deployment,
+migration or release authority is granted.
+
+
+## AGENT-013 subsequent reviewed closure observation (2026-10-07 UTC)
+
+Observed at 2026-10-07T04:09:24.394197+00:00: the original full PAR-005-dependent three behavior clauses
+and both proof requirements had independently reviewed implementation evidence.
+Batched bounded blobs, ordinary same-native/config/request retry after
+kernel-confirmed genuine partial-materialization death without operator
+cleanup, and exact older requested-object acquisition after branch advance
+retain their full positive/negative source controls. The cbfb-qualified
+62-test/strict-Clippy native phase remains historical. The actual HeMan dc5
+checkout through shipped authenticated controller/remote mTLS agent/sealed
+source took a conservative complete successful two-step **9,314 ms**, covering
+**2,191 files / 28,074,111 bytes**. It is not a new d7 benchmark; signed
+acquisition-only and wrapper durations are not substituted for checkout timing.
+
+Original signed receipt HMAC, full manifest/tree/content, exact attempt/fence,
+runtime/config/source provenance and owned cleanup were independently reviewed
+before root retired the exact fixture verification key/private journals.
+Public receipt metadata is explicitly an unsigned projection; no reduced
+projection signature, live materialized tree or still-present fixture key is
+claimed. All receipt, review and retirement identities are bound in
+`docs/evidence/AGENT-013_SECURITY_REVIEW.md`; the original entropy-scan
+negative and first 121.677 s PostgreSQL setup failure remain historical.
+
+PR #182 normally protected-merged as
+`d7bba542dfa67306a3128908c3ccd37e84fbb8d5`. Exact-merge Foundation
+`37567968905` and Windows Agent `37567968977` succeeded on attempt 1;
+Foundation's fifteen recorded jobs include fourteen successes and one legitimate
+classified UI-browser skip. Actual native job `112619980593` executed all
+23 steps. Joint receipt SHA-256 is
+`cfef9319a7d4bb581f31a083d4ee3306a245a7d0c038ddf56f89adf957da33f5`.
+Those exact implementation-result gates do not assert later-head success or
+execution of the Linux crash/benchmark scenario on Windows.
+
+All earlier source/provenance, retained-state, process lifetime, secrets and
+admission determinations remain. The named unconfined userns permission profile
+is not MAC confinement. Public-origin credential binding is not proof of a
+provider challenge; raw live NDJSON absence, same-UID/transformed-secret exposure,
+bounded process visibility, SIGKILL/power-loss cleanup and host/disk failure
+remain explicit limits. DOGFOOD-001 and SEC-005 retain separate full acceptance.
+This private metadata candidate grants no product, credential, production,
+canary, migration, deployment or release authority; independent root review,
+composition, protected checks and normal closure merge remain required.
