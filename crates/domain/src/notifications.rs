@@ -16,6 +16,9 @@ pub const MAX_STATUS_CONTEXT_BYTES: usize = 255;
 pub const DEFAULT_STATUS_CONTEXT: &str = "mcloving";
 /// Attempts before a delivery is abandoned.
 pub const MAX_DELIVERY_ATTEMPTS: i32 = 12;
+/// Delivered-row observations per terminal generation, including crashed claims.
+/// A corrective POST never resets this separate budget.
+pub const MAX_RECONCILIATION_ATTEMPTS: i32 = 12;
 /// Longest wait between two attempts, in seconds.
 pub const MAX_DELIVERY_BACKOFF_SECONDS: u64 = 3600;
 /// Bound on one delivery attempt end to end, in seconds.
@@ -26,8 +29,9 @@ pub const CLAIM_LEASE_SECONDS: u64 = 3 * DELIVERY_DEADLINE_SECONDS;
 const _: () = assert!(CLAIM_LEASE_SECONDS > DELIVERY_DEADLINE_SECONDS);
 /// How long a build that becomes terminal again waits before its new
 /// outcome is first posted when an attempt of the old outcome was recorded
-/// in flight: past the deadline of that attempt, so its write cannot land
-/// after the new one even if the controller died before settling it.
+/// in flight: past that attempt's local deadline, even across a crash.
+/// This does not bound when the target applies a body it already received;
+/// delivered GitHub status rows are observed again after this interval.
 pub const STALE_WRITE_QUIET_SECONDS: u64 = DELIVERY_DEADLINE_SECONDS + 5;
 /// Longest body a notification target may answer with before the answer is
 /// discarded unread.

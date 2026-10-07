@@ -494,6 +494,14 @@ impl ApiState {
         Ok(self)
     }
 
+    /// Startup-frozen network-specific RFC6052 translators. Embedded IPv4
+    /// destinations are checked before connecting through these prefixes.
+    pub fn with_notification_nat64_prefixes(mut self, prefixes: &str) -> Result<Self, ApiError> {
+        self.notification_policy.nat64_prefixes =
+            notifications::parse_notification_nat64_prefixes(prefixes)?;
+        Ok(self)
+    }
+
     /// The token GitHub commit statuses are written with (PAR-004): one
     /// line of printable ASCII, as a fine-grained or classic token is.
     pub fn with_github_token(mut self, token: &str) -> Result<Self, ApiError> {

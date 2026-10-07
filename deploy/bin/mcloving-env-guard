@@ -269,6 +269,25 @@ require_min_bytes() {
 # imported: they carry no filesystem path, so no class rule applies to
 # them, and importing every ambient MCLOVING_* would let unrelated
 # environment noise satisfy the required-variable checks.
+# CTRL-007's NAT64 scalar is also security-relevant contract truth. Refuse
+# ambient overrides, omissions and malformed prefixes before service startup.
+if [[ "${service}" == controller ]]; then
+  nat64_variable=MCLOVING_NOTIFICATION_NAT64_PREFIXES
+  if [[ -v "MCLOVING_EFFECTIVE_ENV[${nat64_variable}]" ]]; then
+    [[ -v "MCLOVING_CONTRACT_DECLARED[${nat64_variable}]" ]] \
+      || fail "${nat64_variable} reaches this service from outside its contract file; declare it in ${env_file}"
+    [[ "${MCLOVING_EFFECTIVE_ENV[${nat64_variable}]}" == "${MCLOVING_CONTRACT_DECLARED[${nat64_variable}]}" ]] \
+      || fail "${nat64_variable} differs between service environment and ${env_file}; reconcile the declaration"
+  fi
+  if [[ -v "MCLOVING_CONTRACT_DECLARED[${nat64_variable}]" ]]; then
+    [[ ! -v "MCLOVING_CONTRACT_DROPPED[${nat64_variable}]" ]] \
+      || fail "${nat64_variable} is declared in ${env_file} but will not reach this service"
+    contract_into nat64_prefixes "${nat64_variable}"
+    validate_notification_nat64_prefixes "${nat64_prefixes}" \
+      || fail "${nat64_variable} is not a valid configured RFC6052 prefix list"
+  fi
+fi
+
 guard_classified=()
 while IFS=' ' read -r _ _ guard_path_variable _; do
   [[ -n "${guard_path_variable:-}" ]] || continue

@@ -1180,6 +1180,11 @@ pub(crate) async fn record_terminal_notifications(
                      ELSE clock_timestamp()
                  END,
                  in_flight = false,
+                 reconciliation_attempts = 0,
+                 reconciliation_due_at = NULL,
+                 reconciliation_claim = NULL,
+                 reconciliation_lease_until = NULL,
+                 reconciliation_error = NULL,
                  repost_required = false,
                  last_error = NULL,
                  delivered_at = NULL
@@ -1196,8 +1201,9 @@ pub(crate) async fn record_terminal_notifications(
     // A commit status this build names may be held in flight by an earlier
     // build's attempt: under the status key's lock taken above, this
     // build's first post is delayed past that attempt's deadline so the
-    // earlier write cannot land after this build's whether or not its
-    // controller lives to settle.
+    // earlier local attempt finishes first whether or not its controller
+    // lives to settle. This cannot bound target application of a received
+    // body; delivered-row reconciliation observes late external writes.
     let status_rows = sqlx::query_as::<_, (i32,)>(
         "SELECT target_index FROM notification_deliveries
          WHERE organization_id = $1 AND build_id = $2 AND kind = 'github_status'

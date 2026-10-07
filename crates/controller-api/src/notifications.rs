@@ -6,7 +6,7 @@
 //! destination address checked and pinned before a connection is made.
 use super::{ApiError, ApiState, PipelineIr, StatusCode};
 use hmac::{Hmac, Mac as _};
-use mcloving_controller_store::{InFlightMark, NotificationDelivery};
+use mcloving_controller_store::{InFlightMark, NotificationDelivery, NotificationReconciliation};
 use mcloving_domain::cache_intent::canonical_mapping_id;
 use mcloving_domain::notifications::{
     MAX_RESPONSE_BYTES, NotifyTarget, is_commit_id, is_repository_identity,
@@ -289,6 +289,7 @@ pub(super) struct DeliveryPolicy {
     pub(super) resolver: Arc<dyn DestinationResolver>,
     pub(super) allow_loopback: bool,
     pub(super) github_api_base: Url,
+    pub(super) nat64_prefixes: Vec<NotificationNat64Prefix>,
 }
 
 impl Default for DeliveryPolicy {
@@ -297,8 +298,97 @@ impl Default for DeliveryPolicy {
             resolver: Arc::new(SystemResolver),
             allow_loopback: false,
             github_api_base: Url::parse(GITHUB_API_BASE).expect("constant GitHub API base"),
+            nat64_prefixes: Vec::new(),
         }
     }
+}
+
+/// An operator-declared RFC6052 network-specific translation prefix.
+/// Construction is restricted to the bounded, canonical configuration parser.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NotificationNat64Prefix {
+    network: u128,
+    length: u8,
+}
+
+impl NotificationNat64Prefix {
+    fn mask(length: u8) -> u128 {
+        u128::MAX << (128 - length)
+    }
+
+    fn matches(&self, address: Ipv6Addr) -> bool {
+        u128::from(address) & Self::mask(self.length) == self.network
+    }
+
+    fn decode(&self, address: Ipv6Addr) -> Result<Ipv4Addr, &'static str> {
+        let bytes = address.octets();
+        let mut v4 = [0; 4];
+        let mut position = usize::from(self.length / 8);
+        for byte in &mut v4 {
+            if position == 8 {
+                position += 1; // RFC6052's reserved u octet.
+            }
+            *byte = bytes[position];
+            position += 1;
+        }
+        // Refuse noncanonical encodings inside a configured translator's range;
+        // they must never fall back to ordinary global-unicast allowance.
+        if (self.length != 96 && bytes[8] != 0) || bytes[position..].iter().any(|byte| *byte != 0) {
+            return Err("invalid NAT64 encoding");
+        }
+        Ok(Ipv4Addr::from(v4))
+    }
+}
+
+/// Parses MCLOVING_NOTIFICATION_NAT64_PREFIXES: 1..32 comma-separated IPv6
+/// networks without whitespace, host bits, duplicates or overlaps. Unset means
+/// no network-specific translators; set-but-empty is a configuration error.
+pub fn parse_notification_nat64_prefixes(
+    value: &str,
+) -> Result<Vec<NotificationNat64Prefix>, ApiError> {
+    let invalid = || {
+        ApiError::configuration(
+            "MCLOVING_NOTIFICATION_NAT64_PREFIXES must contain 1 to 32 nonoverlapping canonical global IPv6 RFC6052 prefixes (/32,/40,/48,/56,/64,/96), comma-separated without whitespace",
+        )
+    };
+    if value.is_empty() || value.len() > 4096 || value.chars().any(char::is_whitespace) {
+        return Err(invalid());
+    }
+    let mut prefixes: Vec<NotificationNat64Prefix> = Vec::new();
+    for entry in value.split(',') {
+        if prefixes.len() == 32 {
+            return Err(invalid());
+        }
+        let (address, length) = entry.split_once('/').ok_or_else(invalid)?;
+        let length = match length {
+            "32" => 32,
+            "40" => 40,
+            "48" => 48,
+            "56" => 56,
+            "64" => 64,
+            "96" => 96,
+            _ => return Err(invalid()),
+        };
+        let address: Ipv6Addr = address.parse().map_err(|_| invalid())?;
+        let network = u128::from(address);
+        if network & !NotificationNat64Prefix::mask(length) != 0
+            || address.segments()[0] & 0xe000 != 0x2000
+            || address.octets()[8] != 0
+            || address.segments()[0] == 0x2002 // Preserve 6to4's independent policy.
+            || forbidden_v6(address).is_some()
+        {
+            return Err(invalid());
+        }
+        let prefix = NotificationNat64Prefix { network, length };
+        if prefixes.iter().any(|existing| {
+            let mask = NotificationNat64Prefix::mask(existing.length.min(length));
+            existing.network & mask == network & mask
+        }) {
+            return Err(invalid());
+        }
+        prefixes.push(prefix);
+    }
+    Ok(prefixes)
 }
 
 /// Why an address may not be a notification destination: the controller
@@ -409,6 +499,18 @@ fn forbidden_v6(v6: Ipv6Addr) -> Option<&'static str> {
 }
 
 fn address_refusal(policy: &DeliveryPolicy, address: IpAddr) -> Option<&'static str> {
+    if let IpAddr::V6(v6) = address {
+        for prefix in &policy.nat64_prefixes {
+            if prefix.matches(v6) {
+                // The debug HTTP-loopback seam must not authorize a translated
+                // loopback address: only literal loopback is a test destination.
+                return match prefix.decode(v6) {
+                    Ok(v4) => forbidden_v4(v4),
+                    Err(reason) => Some(reason),
+                };
+            }
+        }
+    }
     match forbidden_address(address) {
         Some("loopback") if policy.allow_loopback => None,
         other => other,
@@ -627,6 +729,181 @@ async fn deliver_github_status(
     Ok(Delivered::Posted)
 }
 
+/// A target read must be complete JSON within the response bound. Unlike a
+/// successful POST, a torn GET answer establishes no state and never licenses
+/// a corrective write. Redirects, retries, proxies and DNS rebinding use the
+/// same refusal/pinning boundary as notification delivery.
+async fn get_pinned_json(
+    policy: &DeliveryPolicy,
+    url: Url,
+    token: &str,
+    remaining_bytes: &mut usize,
+) -> Result<Vec<GithubStatus>, String> {
+    let (host, addresses) = admissible_addresses(policy, &url).await?;
+    let client = client_for(policy, &host, &addresses)?;
+    let mut response = client
+        .get(url)
+        .header("authorization", format!("Bearer {token}"))
+        .header("accept", "application/vnd.github+json")
+        .header("x-github-api-version", "2022-11-28")
+        .send()
+        .await
+        .map_err(|error| format!("status read failed: {}", sanitized(&error.to_string())))?;
+    if !response.status().is_success() {
+        return Err(format!("status read returned {}", response.status()));
+    }
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_GITHUB_STATUS_PAGE_BYTES.min(*remaining_bytes) as u64)
+    {
+        return Err("status read exceeded response byte bound".to_owned());
+    }
+    let mut answer = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|error| {
+        format!(
+            "status read answer failed: {}",
+            sanitized(&error.to_string())
+        )
+    })? {
+        if chunk.len() > *remaining_bytes
+            || chunk.len() > MAX_GITHUB_STATUS_PAGE_BYTES.saturating_sub(answer.len())
+        {
+            return Err("status read exceeded response byte bound".to_owned());
+        }
+        *remaining_bytes -= chunk.len();
+        answer.extend_from_slice(&chunk);
+    }
+    let statuses: Vec<GithubStatus> = serde_json::from_slice(&answer)
+        .map_err(|_| "status read was not a complete GitHub status list".to_owned())?;
+    if statuses.len() > STATUS_PAGE_SIZE || statuses.iter().any(|status| !status.valid()) {
+        return Err("status read contained invalid status records".to_owned());
+    }
+    Ok(statuses)
+}
+
+const STATUS_PAGE_SIZE: usize = 100;
+/// GitHub status-list objects include substantial creator/URL metadata; this
+/// bound is independent of the smaller POST answer. Unknown fields are ignored.
+pub const MAX_GITHUB_STATUS_PAGE_BYTES: usize = 512 * 1024;
+/// Combined byte bound across the at-most-ten status pages in one observation.
+pub const MAX_GITHUB_STATUS_SEARCH_BYTES: usize = 2 * 1024 * 1024;
+const MAX_STATUS_PAGES: usize = 10;
+
+#[derive(Debug, Deserialize)]
+struct GithubStatus {
+    context: String,
+    state: String,
+    description: Option<String>,
+    target_url: Option<String>,
+}
+
+impl GithubStatus {
+    fn valid(&self) -> bool {
+        // External systems may use labels outside McLoving's admission
+        // grammar (including Unicode). JSON types and total byte/page limits
+        // bound those labels; only our own resolved target uses that grammar.
+        matches!(
+            self.state.as_str(),
+            "success" | "failure" | "error" | "pending"
+        )
+    }
+
+    fn matches(&self, state: &ApiState, delivery: &NotificationDelivery) -> bool {
+        self.state == github_state(&delivery.build_status)
+            && self.description.as_deref()
+                == Some(format!("McLoving build {}", delivery.build_status).as_str())
+            && self.target_url == build_url(state, delivery)
+    }
+}
+
+async fn current_github_status(
+    state: &ApiState,
+    delivery: &NotificationDelivery,
+) -> Result<Option<GithubStatus>, String> {
+    let token = state
+        .notification_github_token
+        .as_deref()
+        .ok_or_else(|| "no GitHub token is configured".to_owned())?;
+    let repository = delivery.target["repository"].as_str().unwrap_or_default();
+    let commit = delivery.target["commit"].as_str().unwrap_or_default();
+    let context = delivery.target["context"].as_str().unwrap_or_default();
+    if !is_repository_identity(repository)
+        || !is_commit_id(commit)
+        || !mcloving_domain::notifications::is_status_context(context)
+    {
+        return Err("ledger target is not a resolved github_status target".to_owned());
+    }
+    let mut bytes = MAX_GITHUB_STATUS_SEARCH_BYTES;
+    for page in 1..=MAX_STATUS_PAGES {
+        let mut url = state.notification_policy.github_api_base.clone();
+        url.set_path(&format!(
+            "{}/repos/{repository}/commits/{commit}/statuses",
+            url.path().trim_end_matches('/')
+        ));
+        // Enumerate only our own endpoint; never follow a target-supplied Link URL.
+        url.set_query(None);
+        url.query_pairs_mut()
+            .append_pair("per_page", &STATUS_PAGE_SIZE.to_string())
+            .append_pair("page", &page.to_string());
+        let statuses = get_pinned_json(&state.notification_policy, url, token, &mut bytes).await?;
+        let full = statuses.len() == STATUS_PAGE_SIZE;
+        // GitHub lists commit statuses in reverse chronological order. The
+        // first exact-context row is current, across pages; older rows cannot
+        // substitute for it, and a different context cannot hide it.
+        if let Some(status) = statuses
+            .into_iter()
+            .find(|status| status.context == context)
+        {
+            return Ok(Some(status));
+        }
+        if !full {
+            return Ok(None);
+        }
+    }
+    Err("status context search exceeded page bound".to_owned())
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Reconciled {
+    Matched,
+    Posted,
+    Superseded,
+}
+
+async fn reconcile(
+    state: &ApiState,
+    claim: &NotificationReconciliation,
+) -> Result<Reconciled, String> {
+    let attempt = async {
+        match state
+            .store
+            .mark_notification_reconciliation_in_flight(claim)
+            .await
+            .map_err(|error| format!("reconciliation in-flight mark failed: {error}"))?
+        {
+            InFlightMark::Overtaken => {
+                return Err("reconciliation claim overtaken before request".to_owned());
+            }
+            InFlightMark::Superseded { .. } => return Ok(Reconciled::Superseded),
+            InFlightMark::Marked => {}
+        }
+        let current = current_github_status(state, &claim.delivery).await?;
+        if current.is_some_and(|current| current.matches(state, &claim.delivery)) {
+            return Ok(Reconciled::Matched);
+        }
+        // One correction maximum in this already charged reconciliation attempt.
+        deliver_github_status(state, &claim.delivery).await?;
+        Ok(Reconciled::Posted)
+    };
+    match tokio::time::timeout(DELIVERY_DEADLINE, attempt).await {
+        Ok(outcome) => outcome,
+        Err(_) => Err(format!(
+            "reconciliation exceeded {} seconds",
+            DELIVERY_DEADLINE.as_secs()
+        )),
+    }
+}
+
 /// The record a webhook target receives; signed over its exact bytes.
 fn webhook_record(state: &ApiState, delivery: &NotificationDelivery) -> Value {
     json!({
@@ -753,12 +1030,14 @@ impl ApiState {
         kinds
     }
 
-    /// Claims due deliveries and settles each: delivered, or failed with the
+    /// Claims due deliveries and delivered GitHub status observations, then
+    /// settles each under its generation and lease fences. Delivery is
+    /// delivered, or failed with the
     /// error the next attempt will see. The claimed rows are delivered
     /// concurrently, each under the delivery deadline, so the whole scan
     /// settles well inside the claim lease however many rows it holds; a row
     /// whose claim was overtaken is left to its new holder. Returns the
-    /// number of rows claimed.
+    /// number of delivery and reconciliation rows claimed.
     pub async fn process_due_notifications(
         &self,
         organization_id: Uuid,
@@ -773,6 +1052,16 @@ impl ApiState {
             .claim_due_notifications(organization_id, limit, &kinds)
             .await
             .map_err(super::internal)?;
+        let remaining = limit.saturating_sub(claimed.len() as i64);
+        let reconciliations = if self.notification_github_token.is_some() && remaining > 0 {
+            self.store
+                .claim_due_notification_reconciliations(organization_id, remaining)
+                .await
+                .map_err(super::internal)?
+        } else {
+            Vec::new()
+        };
+        let count = claimed.len() + reconciliations.len();
         let mut tasks = tokio::task::JoinSet::new();
         for delivery in claimed.iter().cloned() {
             let state = self.clone();
@@ -833,6 +1122,50 @@ impl ApiState {
                 Ok::<bool, mcloving_controller_store::StoreError>(settled)
             });
         }
+        for claim in reconciliations {
+            let state = self.clone();
+            tasks.spawn(async move {
+                let outcome = reconcile(&state, &claim).await;
+                let error = outcome.as_ref().err().map(|error| sanitized(error));
+                let settled = state
+                    .store
+                    .settle_notification_reconciliation(
+                        &claim,
+                        error.as_deref(),
+                        matches!(outcome, Ok(Reconciled::Superseded)),
+                    )
+                    .await?;
+                if matches!(outcome, Ok(Reconciled::Posted)) {
+                    let delivery = &claim.delivery;
+                    if !settled {
+                        state
+                            .store
+                            .requeue_after_stale_settlement(
+                                organization_id,
+                                delivery.build_id,
+                                delivery.target_index,
+                                delivery.terminal_generation,
+                            )
+                            .await?;
+                    }
+                    if let Some((later, index)) = state
+                        .store
+                        .later_github_status_holder(
+                            organization_id,
+                            delivery.build_id,
+                            &delivery.target,
+                        )
+                        .await?
+                    {
+                        state
+                            .store
+                            .requeue_after_stale_settlement(organization_id, later, index, 0)
+                            .await?;
+                    }
+                }
+                Ok::<bool, mcloving_controller_store::StoreError>(settled)
+            });
+        }
         let mut failure = None;
         while let Some(joined) = tasks.join_next().await {
             match joined {
@@ -847,7 +1180,7 @@ impl ApiState {
         }
         match failure {
             Some(error) => Err(error),
-            None => Ok(claimed.len()),
+            None => Ok(count),
         }
     }
 }
@@ -998,6 +1331,118 @@ mod tests {
         policy.allow_loopback = true;
         assert!(address_refusal(&policy, "127.0.0.1".parse().unwrap()).is_none());
         assert!(address_refusal(&policy, "10.0.0.1".parse().unwrap()).is_some());
+    }
+
+    #[test]
+    fn configured_nat64_prefixes_decode_all_rfc6052_widths_before_address_policy() {
+        // Independent RFC6052 layouts, with the u octet at byte8 omitted.
+        for (width, indices) in [
+            (32, [4, 5, 6, 7]),
+            (40, [5, 6, 7, 9]),
+            (48, [6, 7, 9, 10]),
+            (56, [7, 9, 10, 11]),
+            (64, [9, 10, 11, 12]),
+            (96, [12, 13, 14, 15]),
+        ] {
+            let prefix = format!("2606:4700::/{width}");
+            let prefixes = parse_notification_nat64_prefixes(&prefix).unwrap();
+            let policy = DeliveryPolicy {
+                nat64_prefixes: prefixes,
+                ..DeliveryPolicy::default()
+            };
+            for (v4, refusal) in [
+                ([10, 9, 8, 7], Some("private")),
+                ([127, 0, 0, 1], Some("loopback")),
+                ([169, 254, 169, 254], Some("link-local")),
+                ([100, 64, 0, 1], Some("shared address space")),
+                ([192, 0, 2, 1], Some("documentation")),
+                ([8, 8, 8, 8], None),
+            ] {
+                let mut bytes = "2606:4700::".parse::<Ipv6Addr>().unwrap().octets();
+                for (index, byte) in indices.into_iter().zip(v4) {
+                    bytes[index] = byte;
+                }
+                let address = IpAddr::V6(Ipv6Addr::from(bytes));
+                assert_eq!(
+                    address_refusal(&policy, address),
+                    refusal,
+                    "{prefix}: {address}"
+                );
+                assert_eq!(
+                    forbidden_address(address),
+                    None,
+                    "control: global synthesized address had passed the unconfigured policy"
+                );
+                // A translator must not turn noncanonical forms into an unchecked destination.
+                if width != 96 {
+                    bytes[8] = 1;
+                    assert_eq!(
+                        address_refusal(&policy, Ipv6Addr::from(bytes).into()),
+                        Some("invalid NAT64 encoding")
+                    );
+                }
+            }
+        }
+        let prefixes = parse_notification_nat64_prefixes("2606:4700::/96").unwrap();
+        let mut policy = DeliveryPolicy {
+            nat64_prefixes: prefixes,
+            ..DeliveryPolicy::default()
+        };
+        assert_eq!(
+            address_refusal(&policy, "2606:4700::a00:1".parse().unwrap()),
+            Some("private")
+        );
+        assert_eq!(
+            address_refusal(&policy, "2606:4700::808:808".parse().unwrap()),
+            None
+        );
+        assert_eq!(
+            address_refusal(&policy, "2606:4701::a00:1".parse().unwrap()),
+            None,
+            "unconfigured native global IPv6 is unaffected"
+        );
+        // Test seam never makes an embedded loopback destination legal.
+        policy.allow_loopback = true;
+        assert_eq!(
+            address_refusal(&policy, "2606:4700::7f00:1".parse().unwrap()),
+            Some("loopback")
+        );
+    }
+
+    #[test]
+    fn configured_nat64_prefixes_are_bounded_canonical_global_and_unambiguous() {
+        for invalid in [
+            "",
+            " ",
+            "2606:4700::",
+            "2606:4700::/72",
+            "2606:4700::/032",
+            "2606:4700::1/96",
+            "2606:4700::/96,",
+            "2606:4700::/96,2606:4700::/96",
+            "2606:4700::/32,2606:4700::/96",
+            "::/96",
+            "fc00::/96",
+            "64:ff9b::/96",
+            "2001:db8::/32",
+            "2002:808::/32",
+            "3fff::/32",
+            "2001::/32",
+            "2606:4700:0:0:100::/96",
+            "2606:4700::/96\n",
+        ] {
+            assert!(
+                parse_notification_nat64_prefixes(invalid).is_err(),
+                "{invalid:?}"
+            );
+        }
+        assert!(parse_notification_nat64_prefixes("2606:4700::/96,2606:4701::/64").is_ok());
+        assert!(parse_notification_nat64_prefixes(&"x".repeat(4097)).is_err());
+        let too_many = (0..33)
+            .map(|n| format!("2606:{n:x}::/32"))
+            .collect::<Vec<_>>()
+            .join(",");
+        assert!(parse_notification_nat64_prefixes(&too_many).is_err());
     }
 
     #[test]

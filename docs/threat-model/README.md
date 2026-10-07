@@ -1680,3 +1680,94 @@ fence refusal and uncertain-process-identity parking remain in force. No
 production, canary, migration or release authority is granted. Root's independent
 review of this docs-only closure update and its protected checks/normal merge
 remain required before closure bookkeeping is earned.
+
+
+## CTRL-007 status reconciliation and configured NAT64 (implementation candidate)
+
+CTRL-007 remains ACTIVE pending independent disposition, protected merge and
+post-merge Foundation/native Windows verification. The historical PAR-004 earned
+receipt above describes its then-shipped limits; this candidate addresses its
+late-body and configured network-specific NAT64 follow-ups without claiming new
+closure. Complete local evidence and frozen 17-file hashes are in
+`docs/evidence/CTRL-007_SECURITY_REVIEW.md`.
+
+TM-039: accepted delivered GitHub rows become due after a 35-second quiet
+interval, including migration 0045's existing rows. The worker observes the
+newest exact repository/commit/context status and, if state, description or
+target URL differ (or the context is affirmatively absent), posts the recorded
+outcome once. Each observation consumes one of twelve durable per-generation
+attempts before I/O. `SKIP LOCKED`, a 90-second lease, UUID claim, generation and
+attempt predicates fence both mark and settlement; expiry recovery and exhausted
+crashed claims do not reset the budget. The existing status-key lock, in-flight
+mark, later-holder ordering, generation transition and stale delivery settlement
+remain. The real sink integration retains a timed-out older body independently
+of its disconnected handler, applies it after newer success/quiet interval, then
+uses production GET/correction to restore the newer outcome.
+
+TM-054/TM-013: GET/correction keep the startup-frozen credential mapping,
+all-address resolution/admission/pinning, TLS identity, no proxy/redirect/retry,
+and credential refusal. Own target grammar stays strict; unrelated valid Unicode
+contexts cannot poison selection. Real full status records may contain ignored
+creator/avatar/URL/id/timestamp metadata, charged to explicit bounds: 100 records
+per page, ten pages, 512 KiB/page, 2 MiB/search and 30 seconds including correction;
+POST answers retain 64 KiB. Inconclusive invalid/oversized/exhausted searches do
+no correction. The operator can name 1..32 nonoverlapping canonical global
+RFC6052 /32,/40,/48,/56,/64,/96 prefixes through
+`MCLOVING_NOTIFICATION_NAT64_PREFIXES`; startup/deployment reject malformed or
+contract-drifted policy before work. Embedded private IPv4 or invalid reserved
+encoding is refused even when its synthesized IPv6 looks globally routable.
+
+TM-018/TM-005/TM-017/TM-038: bounded observation work and migration scheduling
+preserve accepted-delivery truth. Final native verification executed all ten
+notification integrations (zero ignored, 93.54 seconds), six address/parser
+units, startup/loader and existing store tests, strict Clippy and installed
+deployment guards. Six specific semantic mutants failed and sources restored
+byte-identically. Original source custody, true REDs and historical unearned
+fixture/handler attempts remain explicit in the receipt. The exact isolated
+PostgreSQL 17.6 fixture was removed and absence verified before native handoff.
+These are local candidate observations, not remote CI or production authority.
+
+The convergence window is finite. A body applied after the final observation,
+budget exhaustion, external writers or persistent target failure can still
+leave a stale status. Unconfigured translators, public addresses privately routed
+by the network, system-root trust and tenant-partitioned status keys across
+organizations remain residuals. Operators provide translator policy and distinct
+contexts where multiple organizations share a repository/commit. Public
+authentication, agent/pool/compiler/artifact authority and migration/decommission
+permission are unchanged; independent review must dispose of these determinations.
+
+
+### CTRL-007 2026-10-07 source-coverage continuation
+
+Actual PR #179 deployment job `112579053746` failed before PostgreSQL because
+its Rust environment-name coverage gate did not yet account for the NAT64 policy
+scalar; the scoped configuration/contract guard had just passed. The correction
+adds one named reviewed value exclusion stating the startup-frozen, validated,
+contract-pinned RFC6052 meaning and absence of a filesystem path. It changes no
+path classification, source sweep, exclusion pattern, guard or floor. Exact
+embedded payload execution reproduced baseline refusal and then passed; an
+unknown source name and removal of the reviewed entry still failed specifically.
+`docs/evidence/CTRL-007_SECURITY_REVIEW.md` records actual CI/source-only hashes
+and distinguishes current root-composed candidate custody from historical native
+receipts. No Cargo/native/full deployment ran in this continuation. Independent
+review, rerun CI and protected merge/post-merge remain root obligations. Original
+full acceptance stays ACTIVE, with the same finite-convergence/SSRF/tenant risks.
+
+
+### CTRL-007 2026-10-07 sanitized interpreter continuation
+
+Actual Foundation deployment job `112585000560` refused the NAT64 validator's
+direct `python3` invocation through the unchanged all-helper scanner. The narrow
+correction invokes existing `deployment_python` instead: trusted interpreter
+resolution and constructed child environment restore TM-013's boundary on
+TM-054 policy validation. RFC6052 payload/grammar, contract validation, source
+coverage, scanner refusal and floors remain unchanged. Exact scanner execution
+reproduced RED and then passed GREEN without an exemption. Thirty actual helper
+policy cases (six valid widths and nine malformed values in normal/hostile Python
+environments) passed; a direct-interpreter poison canary positively executed its
+private marker, while the corrected helper executed none. Disposable files were
+cleaned. Canonical evidence records raw hashes/current20 source custody and keeps
+prior native/CI receipts explicitly historical. No full deployment/native/service
+campaign or current-head CI success is asserted; independent review, protected
+merge/post-merge and full original ACTIVE acceptance remain root obligations.
+Finite reconciliation and network/tenant residuals are unchanged.
