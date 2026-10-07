@@ -596,6 +596,7 @@ had never claimed one.
 | AGENT-007 | `docs/evidence/AGENT-007_SECURITY_REVIEW.md` |
 | AGENT-008 | `docs/evidence/AGENT-008_SECURITY_REVIEW.md` |
 | AGENT-009 | `docs/evidence/AGENT-009_SECURITY_REVIEW.md` |
+| AGENT-012 | `docs/evidence/AGENT-012_SECURITY_REVIEW.md` |
 | JOBSTATE-001 | `docs/evidence/JOBSTATE-001_SECURITY_REVIEW.md` |
 | OBS-001 | `docs/evidence/OBS-001_SECURITY_REVIEW.md` |
 | OUTBOX-001 | `docs/evidence/OUTBOX-001_SECURITY_REVIEW.md` |
@@ -2304,3 +2305,27 @@ no default reset or whole-owner-store invariance is asserted. The changes leave
 protocol, persistence, access to sensitive data, fencing, quotas and authorized
 discharge intact. All historical review/negative bytes remain, and no operational
 authority is granted.
+
+
+## AGENT-012 full artifact work-budget closure review (2026-10-07 UTC)
+
+The dated standalone implementation observations are recorded in
+`docs/evidence/AGENT-012_SECURITY_REVIEW.md`: all original matching, cancellation,
+empty-growth, descriptor, blocking-I/O, atomic availability, authority deadline,
+quota-ledger, named refusal and exact pending-copy retry requirements; nineteen
+clause records, four transaction-order adversaries and twenty-five actual named
+guard-removal controls retain their full scope. Physical 256 MiB quota, real
+soft-FD1024, maximal pattern matrix, delayed transport, late abort, retained
+reader/pending custody, concurrent PostgreSQL, actual unprivileged RLS and
+bounded release-hook elision each carry their own observed source bindings.
+
+At the observed protected PR #186 implementation merge and later AGENT-009
+closure observation, Foundation and actual native Windows succeeded. The
+later native job executed the debug and release service/crash-recovery gates.
+Historical failed scans, malformed/generic RED witnesses, parallel shared-state
+failures and intermediate source snapshots remain retained. The RLS proof does
+not invent DELETE/TRUNCATE statements or an UPDATE-policy mutant; hook literal
+elision does not qualify production deployment. No source-acquirer, live-log,
+secret-broker, migration or production authority follows from artifact closure.
+This subsequent four-file metadata candidate still owes its own entire-file
+review, checks, normal protected merge and resulting-main readback.
