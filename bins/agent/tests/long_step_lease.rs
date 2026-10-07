@@ -36,6 +36,447 @@ use sqlx::{PgPool, Row};
 use tokio::process::{Child, Command};
 use uuid::Uuid;
 
+#[path = "support/recovery_proxy.rs"]
+mod recovery_proxy;
+
+/// AGENT-008: completed descriptors and a committed-but-unreceipted upload
+/// survive a real second-step crash without completing cancellation early.
+#[tokio::test]
+async fn crashed_second_step_publishes_all_descriptors_before_cancellation_and_replays_lost_response()
+ {
+    use mcloving_agent_runtime::{AttemptPhase, Journal};
+    use std::sync::atomic::Ordering;
+
+    let Some(harness) = Harness::from_environment("agent008-recovery").await else {
+        return;
+    };
+    let mut controller = harness.spawn_controller("30", None);
+    let client = harness.client();
+    wait_until_listening(&client, harness.organization_id).await;
+    let (port, faults, proxy) = recovery_proxy::start(&harness.tls, harness.agent_port).await;
+    let command = || {
+        let mut command = harness.agent_command("30");
+        command.env(
+            "MCLOVING_CONTROLLER_URI",
+            format!("https://127.0.0.1:{port}"),
+        );
+        command.kill_on_drop(true);
+        command
+    };
+    let mut agent = command()
+        .spawn()
+        .expect("start shipped agent via fixture peer");
+    let build = harness.submit(&client, "agent008-crash", r#"
+version: 1
+name: agent008-crash
+stages:
+  - id: execute
+    name: Execute
+    steps:
+      - process:
+          program: /bin/sh
+          args: [-c, "printf 'step-zero-stdout\\n'; printf 'step-zero-stderr\\n' >&2"]
+          timeout_seconds: 60
+      - process:
+          program: /bin/sh
+          args: [-c, "printf 'interrupted-step-one\\n'; printf started > second-started; while :; do sleep 1; done"]
+          timeout_seconds: 60
+"#).await;
+    let crashed = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            if let Ok(journal) = Journal::open(&harness.journal) {
+                let mut attempts = journal.reconcile().unwrap().attempts;
+                if attempts.len() == 1 {
+                    let attempt = attempts.remove(0);
+                    if attempt.phase == AttemptPhase::Running
+                        && attempt.current_step == Some(1)
+                        && harness
+                            .workspace
+                            .join(&attempt.workspace)
+                            .join("second-started")
+                            .exists()
+                    {
+                        break attempt;
+                    }
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("second step genuinely running before crash");
+    assert_eq!(
+        crashed.logs.len(),
+        2,
+        "both finished-step descriptors are durable before second-step crash"
+    );
+    assert!(crashed.logs.iter().all(|entry| entry.bytes > 0));
+    assert!(
+        client
+            .logs(harness.organization_id, harness.project_id, build)
+            .await
+            .unwrap()
+            .is_empty(),
+        "terminal-only negotiation makes recovery responsible for every finished descriptor"
+    );
+    stop(&mut agent).await; // SIGKILL the shipped agent; its running child is recovered, not rerun.
+
+    faults.observe_attempt(
+        harness.journal.clone(),
+        harness.pool.clone(),
+        harness.organization_id,
+        build,
+    );
+    let watcher_faults = faults.clone();
+    let phase_watcher = tokio::spawn(async move {
+        watcher_faults.watch_local_phase().await;
+    });
+    let mut recovering = command().spawn().expect("restart crashed agent");
+    tokio::time::timeout(Duration::from_secs(20), async {
+        tokio::select! {
+            () = faults.first_started.notified() => {},
+            () = faults.observation_failed.notified() => panic!("{}", faults.failure.lock().unwrap().as_ref().unwrap()),
+            () = faults.cancellation_completed.notified() => {
+                let premature = recovery_ledger(&harness, build).await;
+                assert_eq!(premature["terminal_events"], 0,
+                    "cancellation completed before first recovery publication: {premature}");
+                panic!("cancellation acknowledgement preceded recovery publication: {premature}");
+            }
+        }
+    })
+    .await
+    .expect("recovery reached first upload within bound");
+    let cancelling = Journal::open(&harness.journal)
+        .unwrap()
+        .reconcile()
+        .unwrap()
+        .attempts
+        .remove(0);
+    assert_eq!(
+        cancelling.phase,
+        AttemptPhase::Cancelling,
+        "log publication precedes local retirement"
+    );
+    assert_eq!(
+        cancelling.logs, crashed.logs,
+        "recovery retains every journaled descriptor"
+    );
+    assert_eq!(
+        faults.cancellations.load(Ordering::SeqCst),
+        0,
+        "no cancellation request before descriptors publish"
+    );
+    let before = recovery_ledger(&harness, build).await;
+    assert_eq!(before["terminal_events"], 0);
+    assert_eq!(before["chunks"].as_array().unwrap().len(), 0);
+    faults.first_send.notify_one();
+    wait_recovery_notice(
+        &faults.first_committed,
+        &faults,
+        "real controller committed first recovery chunk",
+    )
+    .await;
+    let committed = recovery_ledger(&harness, build).await;
+    assert_eq!(committed["chunks"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        committed["terminal_events"], 0,
+        "no controller terminal while acknowledgement is withheld"
+    );
+    assert_eq!(faults.cancellations.load(Ordering::SeqCst), 0);
+    let journal = Journal::open(&harness.journal).unwrap();
+    let reservations = journal
+        .log_reservations(
+            &crashed.organization_id,
+            &crashed.attempt_id,
+            crashed.fence_token,
+        )
+        .unwrap();
+    assert_eq!(reservations.len(), 1);
+    assert!(
+        !reservations[0].acknowledged,
+        "upstream commit is not a client receipt"
+    );
+    let original_chunk = faults.chunks.lock().unwrap()[0].clone();
+    let authority = original_chunk.authority.as_ref().unwrap();
+    assert_eq!(authority.attempt_id, crashed.attempt_id);
+    assert_eq!(authority.fence_token, crashed.fence_token);
+    assert!(
+        authority.session_epoch > crashed.session_epoch,
+        "reconciliation transferred the exact fence to a fresh session"
+    );
+    assert_eq!(original_chunk.sequence, reservations[0].sequence);
+    assert_eq!(
+        <[u8; 32]>::from(Sha256::digest(&original_chunk.content)),
+        reservations[0].digest
+    );
+
+    faults.block_sessions.store(true, Ordering::SeqCst);
+    faults.first_reply.notify_one(); // Discard the accepted reply, return unavailable instead.
+    wait_recovery_notice(
+        &faults.blocked_session,
+        &faults,
+        "lost response ended session and triggered reconnect",
+    )
+    .await;
+    let after_loss = Journal::open(&harness.journal)
+        .unwrap()
+        .reconcile()
+        .unwrap()
+        .attempts
+        .remove(0);
+    assert_eq!(
+        after_loss.phase,
+        AttemptPhase::Cancelling,
+        "lost response must leave cancellation replayable"
+    );
+    assert_eq!(
+        recovery_ledger(&harness, build).await,
+        committed,
+        "loss does not add bytes, positions, or terminal events"
+    );
+    stop(&mut recovering).await;
+    faults.block_sessions.store(false, Ordering::SeqCst);
+    faults.session_resume.notify_one();
+    let mut replay = command()
+        .spawn()
+        .expect("restart into new session after lost response");
+    wait_recovery_notice(
+        &faults.retry_committed,
+        &faults,
+        "identical reserved chunk was accepted again",
+    )
+    .await;
+    let retried = recovery_ledger(&harness, build).await;
+    assert_eq!(
+        retried, committed,
+        "identical upload retry counts no second chunk, byte, or build position"
+    );
+    let duplicate = faults.chunks.lock().unwrap()[1].clone();
+    assert_eq!(duplicate.sequence, original_chunk.sequence);
+    assert_eq!(duplicate.stream, original_chunk.stream);
+    assert_eq!(duplicate.step_ordinal, original_chunk.step_ordinal);
+    assert_eq!(duplicate.content, original_chunk.content);
+    let fresh_authority = duplicate.authority.as_ref().unwrap();
+    assert_eq!(fresh_authority.fence_token, authority.fence_token);
+    assert!(fresh_authority.session_epoch > authority.session_epoch);
+    assert_eq!(
+        faults.cancellations.load(Ordering::SeqCst),
+        0,
+        "even committed retry cannot retire unpublished descriptors"
+    );
+    assert_eq!(
+        Journal::open(&harness.journal)
+            .unwrap()
+            .reconcile()
+            .unwrap()
+            .attempts[0]
+            .phase,
+        AttemptPhase::Cancelling
+    );
+    faults.retry_reply.notify_one();
+
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            tokio::select! {
+                () = faults.observation_failed.notified() => panic!("{}", faults.failure.lock().unwrap().as_ref().unwrap()),
+                status = client.status(harness.organization_id, harness.project_id, build) => {
+                    if status.unwrap().status == "aborted" { break; }
+                }
+            }
+            tokio::select! {
+                () = faults.observation_failed.notified() => panic!("{}", faults.failure.lock().unwrap().as_ref().unwrap()),
+                () = tokio::time::sleep(Duration::from_millis(20)) => {}
+            }
+        }
+    })
+    .await
+    .expect("published descriptors precede acknowledged cancellation");
+    let final_ledger = recovery_ledger(&harness, build).await;
+    assert_eq!(final_ledger["terminal_events"], 1);
+    let chunks = final_ledger["chunks"].as_array().unwrap();
+    assert_eq!(
+        chunks.len(),
+        3,
+        "both step-zero streams and interrupted step-one stdout published exactly once"
+    );
+    assert!(faults.failure.lock().unwrap().is_none());
+    let observations = faults.observations.lock().unwrap().clone();
+    assert_eq!(
+        observations.len(),
+        8,
+        "every publication and accepted receipt has a direct journal/controller snapshot"
+    );
+    for (index, pair) in observations.chunks_exact(2).enumerate() {
+        assert_eq!(pair[0]["moment"], "before_publication");
+        assert_eq!(pair[1]["moment"], "committed_receipt");
+        for snapshot in pair {
+            assert_eq!(snapshot["publication"], index + 1);
+            assert_eq!(snapshot["active_journal_row"], true);
+            assert_eq!(snapshot["journal_phase"], "cancelling");
+            assert_eq!(snapshot["cancellation_requests"], 0);
+            assert_eq!(snapshot["controller"]["attempt_status"], "cancelling");
+            assert_eq!(snapshot["controller"]["terminal_events"], 0);
+        }
+    }
+    assert_eq!(faults.cancellations.load(Ordering::SeqCst), 1);
+    for (index, row) in chunks.iter().enumerate() {
+        assert_eq!(row["sequence"], index as i64);
+        assert_eq!(row["position"], index as i64 + 1);
+        assert_eq!(row["fence"], committed["chunks"][0]["fence"]);
+    }
+    assert_eq!(
+        final_ledger["bytes"],
+        chunks
+            .iter()
+            .map(|row| row["bytes"].as_i64().unwrap())
+            .sum::<i64>()
+    );
+    assert_eq!(final_ledger["position"], 3);
+    for descriptor in &crashed.logs {
+        assert_eq!(
+            chunks
+                .iter()
+                .filter(|row| row["digest"] == hex(&descriptor.digest)
+                    && row["bytes"] == descriptor.bytes
+                    && row["step"] == 0)
+                .count(),
+            1,
+            "each exact journaled descriptor published once before terminalization"
+        );
+    }
+    let logs = client
+        .logs(harness.organization_id, harness.project_id, build)
+        .await
+        .unwrap();
+    for (stream, text) in [
+        ("stdout", "step-zero-stdout\n"),
+        ("stderr", "step-zero-stderr\n"),
+    ] {
+        assert!(
+            logs.iter().any(|row| row.step_ordinal == 0
+                && row.stream == stream
+                && row.text.as_deref() == Some(text)),
+            "every completed-step descriptor reaches build logs: {logs:?}"
+        );
+    }
+    assert!(
+        logs.iter()
+            .any(|row| row.step_ordinal == 1
+                && row.text.as_deref() == Some("interrupted-step-one\n"))
+    );
+    // The binary is supplied by the same Foundation/native build as the controller.
+    let cli = std::env::var_os("MCLOVING_CLI_BINARY")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            harness
+                .controller_binary
+                .parent()
+                .unwrap()
+                .join("mcloving-cli")
+        });
+    let cli_output = Command::new(cli)
+        .env(
+            "MCLOVING_URL",
+            format!("http://127.0.0.1:{}", harness.api_port),
+        )
+        .env("MCLOVING_API_TOKEN", TOKEN)
+        .env(
+            "MCLOVING_ORGANIZATION_ID",
+            harness.organization_id.to_string(),
+        )
+        .env("MCLOVING_PROJECT_ID", harness.project_id.to_string())
+        .args(["logs", &build.to_string()])
+        .output()
+        .await
+        .expect("run shipped mcloving logs");
+    assert!(
+        cli_output.status.success(),
+        "CLI logs failed: {}",
+        String::from_utf8_lossy(&cli_output.stderr)
+    );
+    let cli_text = String::from_utf8(cli_output.stdout).unwrap();
+    assert!(
+        cli_text.contains("step-zero-stdout") && cli_text.contains("step-zero-stderr"),
+        "CLI shows completed step evidence: {cli_text}"
+    );
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !Journal::open(&harness.journal)
+            .unwrap()
+            .reconcile()
+            .unwrap()
+            .attempts
+            .is_empty()
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("terminal acknowledgement retires local attempt");
+    let descriptors: Vec<_> = crashed.logs.iter().map(|entry| serde_json::json!({
+        "path":entry.relative_path,"sequence":entry.sequence,"bytes":entry.bytes,"digest":hex(&entry.digest)})).collect();
+    let evidence = serde_json::json!({"ticket":"AGENT-008", "build":build, "crashed_session":crashed.session_epoch,
+        "crashed_step":crashed.current_step,"attempt":crashed.attempt_id,"fence_token":crashed.fence_token,"journaled_descriptors":descriptors,
+        "blocked_upload_journal_phase":cancelling.phase.wire_name(),"lost_response_journal_phase":after_loss.phase.wire_name(),
+        "every_publication_and_receipt":observations,
+        "unreceipted_reservation":{"sequence":reservations[0].sequence,"digest":hex(&reservations[0].digest),"acknowledged":reservations[0].acknowledged},
+        "upload_session":authority.session_epoch,"replay_session":fresh_authority.session_epoch,
+        "before_upload":before,"committed_without_receipt":committed,"identical_retry":retried,"final":final_ledger,"cli":cli_text});
+    if let Some(directory) = std::env::var_os("MCLOVING_AGENT008_EVIDENCE_DIR") {
+        std::fs::write(
+            PathBuf::from(directory).join(format!("recovery-{build}.json")),
+            serde_json::to_vec_pretty(&evidence).unwrap(),
+        )
+        .unwrap();
+    }
+    eprintln!("agent008-recovery-evidence {evidence}");
+    stop(&mut replay).await;
+    stop(&mut controller).await;
+    proxy.abort();
+    phase_watcher.abort();
+}
+
+async fn wait_recovery_notice(
+    notice: &tokio::sync::Notify,
+    faults: &recovery_proxy::Faults,
+    name: &str,
+) {
+    tokio::time::timeout(Duration::from_secs(20), async {
+        tokio::select! {
+            () = notice.notified() => {},
+            () = faults.observation_failed.notified() => panic!("{}", faults.failure.lock().unwrap().as_ref().unwrap()),
+        }
+    })
+        .await
+        .expect(name);
+}
+
+async fn recovery_ledger(harness: &Harness, build: Uuid) -> serde_json::Value {
+    recovery_ledger_from(&harness.pool, harness.organization_id, build).await
+}
+
+async fn recovery_ledger_from(pool: &PgPool, organization: Uuid, build: Uuid) -> serde_json::Value {
+    let rows = sqlx::query("SELECT sequence, step_ordinal, stream, content, digest, fence, build_position FROM attempt_log_chunks WHERE organization_id=$1 AND build_id=$2 ORDER BY sequence")
+        .bind(organization).bind(build).fetch_all(pool).await.unwrap();
+    let chunks: Vec<_> = rows.iter().map(|row| {
+        let content: Vec<u8> = row.get("content");
+        serde_json::json!({"sequence":row.get::<i64,_>("sequence"),"step":row.get::<i32,_>("step_ordinal"),
+            "stream":row.get::<String,_>("stream"),"content":String::from_utf8(content.clone()).unwrap(),"bytes":content.len(),
+            "digest":hex(&row.get::<Vec<u8>,_>("digest")),"fence":row.get::<i64,_>("fence"),"position":row.get::<i64,_>("build_position")})
+    }).collect();
+    let bytes: i64 = sqlx::query_scalar("SELECT COALESCE(sum(c.committed_bytes),0)::bigint FROM attempt_log_accounting c JOIN attempts a ON a.organization_id=c.organization_id AND a.id=c.attempt_id JOIN nodes n ON n.id=a.node_id AND n.organization_id=a.organization_id WHERE n.build_id=$1")
+        .bind(build).fetch_one(pool).await.unwrap();
+    let position: i64 = sqlx::query_scalar("SELECT committed_log_position FROM builds WHERE id=$1")
+        .bind(build)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    let terminal_events: i64 = sqlx::query_scalar("SELECT count(*) FROM build_events WHERE build_id=$1 AND kind IN ('attempt.terminal','attempt.recovery_terminated','attempt.recovery_process_already_exited','attempt.recovery_stale_process','attempt.cancellation_completed','attempt.reconciliation_terminal')")
+        .bind(build).fetch_one(pool).await.unwrap();
+    let status: String = sqlx::query_scalar("SELECT a.status FROM attempts a JOIN nodes n ON n.id=a.node_id AND n.organization_id=a.organization_id WHERE n.build_id=$1")
+        .bind(build).fetch_one(pool).await.unwrap();
+    serde_json::json!({"chunks":chunks,"bytes":bytes,"position":position,"terminal_events":terminal_events,"attempt_status":status})
+}
+
 const TOKEN: &str = "mcloving-long-step-lease-test-token";
 
 /// One step spanning at least three five-second lease terms.

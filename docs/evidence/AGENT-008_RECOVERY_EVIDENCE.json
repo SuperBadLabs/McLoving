@@ -1,0 +1,488 @@
+{
+  "schema": "agent008-local-recovery-proof-v1",
+  "observed_date": "2026-10-06",
+  "baseline": "7ff63e54f70ea5d1110b72037e84fe6011f50d01",
+  "production_runtime_changed": false,
+  "ticket_closed": false,
+  "independent_review_earned": false,
+  "hosted_candidate_or_postmerge_checks_earned": false,
+  "scenario": {
+    "attempt": "84b75d8a-5400-4f76-8d70-032a0d0ca8c3",
+    "before_upload": {
+      "attempt_status": "cancelling",
+      "bytes": 0,
+      "chunks": [],
+      "position": 0,
+      "terminal_events": 0
+    },
+    "blocked_upload_journal_phase": "cancelling",
+    "build": "f5eb8b6c-3721-4f80-992d-efeb5db64e99",
+    "cli": "items[0].attempt_id: 84b75d8a-5400-4f76-8d70-032a0d0ca8c3\nitems[0].content_hex: 737465702d7a65726f2d7374646f75740a\nitems[0].cursor: 1\nitems[0].fence: 1\nitems[0].sequence: 0\nitems[0].sha256: 6c771fef67d9bf0ede0dc56bbbae84ef0309421d5629d6acc26fe5e8f908524c\nitems[0].step_ordinal: 0\nitems[0].stream: stdout\nitems[0].text: step-zero-stdout\n\nitems[1].attempt_id: 84b75d8a-5400-4f76-8d70-032a0d0ca8c3\nitems[1].content_hex: 737465702d7a65726f2d7374646572720a\nitems[1].cursor: 2\nitems[1].fence: 1\nitems[1].sequence: 1\nitems[1].sha256: 9a660889473116e32c56e2cd846860ac22aab16764a46e861c57dfc7e41607ef\nitems[1].step_ordinal: 0\nitems[1].stream: stderr\nitems[1].text: step-zero-stderr\n\nitems[2].attempt_id: 84b75d8a-5400-4f76-8d70-032a0d0ca8c3\nitems[2].content_hex: 696e7465727275707465642d737465702d6f6e650a\nitems[2].cursor: 3\nitems[2].fence: 1\nitems[2].sequence: 2\nitems[2].sha256: 60d2c2388092cc72adae95bf683f547bed4632a8fe6e5f3f90e344d47238a365\nitems[2].step_ordinal: 1\nitems[2].stream: stdout\nitems[2].text: interrupted-step-one\n\nlive: null\nnext_after: null\nnext_cursor: null\n",
+    "committed_without_receipt": {
+      "attempt_status": "cancelling",
+      "bytes": 17,
+      "chunks": [
+        {
+          "bytes": 17,
+          "content": "step-zero-stdout\n",
+          "digest": "6c771fef67d9bf0ede0dc56bbbae84ef0309421d5629d6acc26fe5e8f908524c",
+          "fence": 1,
+          "position": 1,
+          "sequence": 0,
+          "step": 0,
+          "stream": "stdout"
+        }
+      ],
+      "position": 1,
+      "terminal_events": 0
+    },
+    "crashed_session": 1,
+    "crashed_step": 1,
+    "fence_token": 4294967297,
+    "final": {
+      "attempt_status": "aborted",
+      "bytes": 55,
+      "chunks": [
+        {
+          "bytes": 17,
+          "content": "step-zero-stdout\n",
+          "digest": "6c771fef67d9bf0ede0dc56bbbae84ef0309421d5629d6acc26fe5e8f908524c",
+          "fence": 1,
+          "position": 1,
+          "sequence": 0,
+          "step": 0,
+          "stream": "stdout"
+        },
+        {
+          "bytes": 17,
+          "content": "step-zero-stderr\n",
+          "digest": "9a660889473116e32c56e2cd846860ac22aab16764a46e861c57dfc7e41607ef",
+          "fence": 1,
+          "position": 2,
+          "sequence": 1,
+          "step": 0,
+          "stream": "stderr"
+        },
+        {
+          "bytes": 21,
+          "content": "interrupted-step-one\n",
+          "digest": "60d2c2388092cc72adae95bf683f547bed4632a8fe6e5f3f90e344d47238a365",
+          "fence": 1,
+          "position": 3,
+          "sequence": 2,
+          "step": 1,
+          "stream": "stdout"
+        }
+      ],
+      "position": 3,
+      "terminal_events": 1
+    },
+    "identical_retry": {
+      "attempt_status": "cancelling",
+      "bytes": 17,
+      "chunks": [
+        {
+          "bytes": 17,
+          "content": "step-zero-stdout\n",
+          "digest": "6c771fef67d9bf0ede0dc56bbbae84ef0309421d5629d6acc26fe5e8f908524c",
+          "fence": 1,
+          "position": 1,
+          "sequence": 0,
+          "step": 0,
+          "stream": "stdout"
+        }
+      ],
+      "position": 1,
+      "terminal_events": 0
+    },
+    "journaled_descriptors": [
+      {
+        "bytes": 17,
+        "digest": "6c771fef67d9bf0ede0dc56bbbae84ef0309421d5629d6acc26fe5e8f908524c",
+        "path": ".agent-results/5b5446e9-84ce-4b8b-8ee1-e7df1e27ea5c/84b75d8a-5400-4f76-8d70-032a0d0ca8c3/4294967297/steps/step-0/stdout.log",
+        "sequence": 0
+      },
+      {
+        "bytes": 17,
+        "digest": "9a660889473116e32c56e2cd846860ac22aab16764a46e861c57dfc7e41607ef",
+        "path": ".agent-results/5b5446e9-84ce-4b8b-8ee1-e7df1e27ea5c/84b75d8a-5400-4f76-8d70-032a0d0ca8c3/4294967297/steps/step-0/stderr.log",
+        "sequence": 1
+      }
+    ],
+    "lost_response_journal_phase": "cancelling",
+    "replay_session": 4,
+    "ticket": "AGENT-008",
+    "unreceipted_reservation": {
+      "acknowledged": false,
+      "digest": "6c771fef67d9bf0ede0dc56bbbae84ef0309421d5629d6acc26fe5e8f908524c",
+      "sequence": 0
+    },
+    "upload_session": 2
+  },
+  "native_stages": [
+    {
+      "name": "long-step-full-nine",
+      "command": [
+        "bash",
+        "scripts/run-verified-rust-test.sh",
+        "9",
+        "long-step-lease",
+        "--require-postgres",
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "mcloving-agent",
+        "--test",
+        "long_step_lease",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exit_code": 0,
+      "seconds": 71.119,
+      "actual_passed_counts": [
+        9
+      ],
+      "expected_count": 9,
+      "passed": true
+    },
+    {
+      "name": "agent-unit",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "mcloving-agent",
+        "--lib",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exit_code": 0,
+      "seconds": 19.694,
+      "actual_passed_counts": [
+        115
+      ],
+      "expected_count": null,
+      "passed": true
+    },
+    {
+      "name": "remote-shipped-mtls",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "mcloving-agent",
+        "--test",
+        "remote_work",
+        "shipped_agent_executes_fenced_work_over_mtls",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exit_code": 0,
+      "seconds": 3.149,
+      "actual_passed_counts": [
+        1
+      ],
+      "expected_count": 1,
+      "passed": true
+    },
+    {
+      "name": "remote-ambiguous-crash",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "mcloving-agent",
+        "--test",
+        "remote_work",
+        "crash_between_a_step_exit_and_its_record_is_reported_not_rerun",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exit_code": 0,
+      "seconds": 4.659,
+      "actual_passed_counts": [
+        1
+      ],
+      "expected_count": 1,
+      "passed": true
+    },
+    {
+      "name": "identity-collision",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "mcloving-agent",
+        "--test",
+        "identity_collision",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exit_code": 0,
+      "seconds": 22.27,
+      "actual_passed_counts": [
+        1
+      ],
+      "expected_count": 1,
+      "passed": true
+    },
+    {
+      "name": "store-fenced-cancellation",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "mcloving-controller-store",
+        "--test",
+        "postgres_truth",
+        "agent_cancellation_completion_is_fenced_durable_and_idempotent",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exit_code": 0,
+      "seconds": 8.576,
+      "actual_passed_counts": [
+        1
+      ],
+      "expected_count": 1,
+      "passed": true
+    },
+    {
+      "name": "store-recovered-discharge",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "mcloving-controller-store",
+        "--test",
+        "postgres_truth",
+        "recovered_discharge_is_authorized_only_when_the_fence_is_disowned",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exit_code": 0,
+      "seconds": 0.133,
+      "actual_passed_counts": [
+        1
+      ],
+      "expected_count": 1,
+      "passed": true
+    },
+    {
+      "name": "store-idempotence-quota",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "mcloving-controller-store",
+        "--test",
+        "postgres_truth",
+        "ctrl005_retries_rejections_and_quota_keep_counts_exact",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exit_code": 0,
+      "seconds": 1.611,
+      "actual_passed_counts": [
+        1
+      ],
+      "expected_count": 1,
+      "passed": true
+    },
+    {
+      "name": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--locked",
+        "-p",
+        "mcloving-agent",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit_code": 0,
+      "seconds": 10.456,
+      "actual_passed_counts": [],
+      "expected_count": null,
+      "passed": true
+    }
+  ],
+  "semantic_controls": [
+    {
+      "name": "controls-baseline-green",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "mcloving-agent",
+        "--test",
+        "long_step_lease",
+        "crashed_second_step_publishes_all_descriptors",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exit_code": 0,
+      "seconds": 4.821,
+      "semantic_marker": null,
+      "expected_outcome_proven": true
+    },
+    {
+      "name": "mutation-premature-cancellation",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "mcloving-agent",
+        "--test",
+        "long_step_lease",
+        "crashed_second_step_publishes_all_descriptors",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exit_code": 101,
+      "seconds": 2.335,
+      "semantic_marker": "cancellation completed before first recovery publication",
+      "expected_outcome_proven": true
+    },
+    {
+      "name": "restored-premature-cancellation-green",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "mcloving-agent",
+        "--test",
+        "long_step_lease",
+        "crashed_second_step_publishes_all_descriptors",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exit_code": 0,
+      "seconds": 4.554,
+      "semantic_marker": null,
+      "expected_outcome_proven": true
+    },
+    {
+      "name": "mutation-omit-journaled-descriptors",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "mcloving-agent",
+        "--test",
+        "long_step_lease",
+        "crashed_second_step_publishes_all_descriptors",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exit_code": 101,
+      "seconds": 4.754,
+      "semantic_marker": "both step-zero streams and interrupted step-one stdout published exactly once",
+      "expected_outcome_proven": true
+    },
+    {
+      "name": "restored-omit-journaled-descriptors-green",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "mcloving-agent",
+        "--test",
+        "long_step_lease",
+        "crashed_second_step_publishes_all_descriptors",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exit_code": 0,
+      "seconds": 4.901,
+      "semantic_marker": null,
+      "expected_outcome_proven": true
+    },
+    {
+      "name": "mutation-acknowledge-before-receipt",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "mcloving-agent",
+        "--test",
+        "long_step_lease",
+        "crashed_second_step_publishes_all_descriptors",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exit_code": 101,
+      "seconds": 3.026,
+      "semantic_marker": "upstream commit is not a client receipt",
+      "expected_outcome_proven": true
+    },
+    {
+      "name": "restored-acknowledge-before-receipt-green",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "mcloving-agent",
+        "--test",
+        "long_step_lease",
+        "crashed_second_step_publishes_all_descriptors",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exit_code": 0,
+      "seconds": 5.168,
+      "semantic_marker": null,
+      "expected_outcome_proven": true
+    }
+  ],
+  "runtime_restored_exactly": true,
+  "tested_source_hashes": {
+    "bins/agent/src/lib.rs": "be651cdadede10ea3e96ac845465c2e3c4e3dd7f3ffcdba619ab7a4f04d03e9f",
+    "bins/agent/src/worker.rs": "7e60ae4818a03ea3e1a7eae0568252fcc1f62058b09a507d258b890513c732b5",
+    "bins/controller/src/main.rs": "7e0feb7cb03b2354009d2d54028d2b9940584c39252e69b1e047ab466b0a0b00",
+    "bins/agent/tests/long_step_lease.rs": "e96bf561867f8f96993429274bfd77c5a07cf9f5b48f35e325a07137a4d07c67",
+    "bins/agent/tests/support/recovery_proxy.rs": "bea25c5238f0b8322fa1a74c7d4c861f1d03884ae3578c937f42d935d803a353",
+    ".github/workflows/foundation.yml": "9d128b4e9ba072661b4e5e3adac7a7f63051407d6cd000ee6f63453281ae7420",
+    "scripts/test-controller-postgres.sh": "82823092dee3da6ff14f8eb10f83d81ca8bd66f82341038a052ac49e2b54d32d"
+  },
+  "python_checks": {
+    "workflow_aggregate_tests": 13,
+    "test_execution_verifier_tests": 9,
+    "dogfood_lanes": 6,
+    "foundation_commands_checked": 67,
+    "documented_unmirrored_commands": 1
+  },
+  "raw_evidence_directory": "/tmp/mcloving-milestones/M2/AGENT-008"
+}

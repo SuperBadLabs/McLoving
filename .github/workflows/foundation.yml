@@ -536,9 +536,10 @@ jobs:
             2 capability-vocabulary --require-postgres \
             cargo +1.97.1 test --locked -p mcloving-controller --test capability_vocabulary
       - name: Build shipped controller and helpers for remote-agent gates
-        run: cargo +1.97.1 build --locked -p mcloving-controller -p mcloving-cache -p mcloving-input-adapter
+        run: cargo +1.97.1 build --locked -p mcloving-controller -p mcloving-cli -p mcloving-cache -p mcloving-input-adapter
       - name: Run shipped remote-agent execution gates against PostgreSQL
         env:
+          MCLOVING_CLI_BINARY: ${{ github.workspace }}/target/debug/mcloving-cli
           MCLOVING_CONTROLLER_BINARY: ${{ github.workspace }}/target/debug/mcloving-controller
           # PAR-011: the container stage tests run the shipped agent against
           # the runner's rootless podman; they skip only when this is unset.
@@ -554,7 +555,7 @@ jobs:
             1 identity-collision --require-postgres \
             cargo +1.97.1 test --locked -p mcloving-agent --test identity_collision -- --test-threads=1
           bash scripts/run-verified-rust-test.sh \
-            8 long-step-lease --require-postgres \
+            9 long-step-lease --require-postgres \
             cargo +1.97.1 test --locked -p mcloving-agent --test long_step_lease -- --test-threads=1
       - name: Run submitted cache product gate
         env:

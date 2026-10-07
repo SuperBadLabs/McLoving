@@ -66,13 +66,13 @@ podman run --rm \
    bash scripts/run-verified-rust-test.sh 2 deployable-runtime --require-postgres cargo test --locked -p mcloving-controller --test deployable_runtime -- --ignored &&
    bash scripts/run-verified-rust-test.sh 1 controller-differential --require-postgres cargo test --locked -p mcloving-controller --test diff_001 &&
    bash scripts/run-verified-rust-test.sh 2 capability-vocabulary --require-postgres cargo test --locked -p mcloving-controller --test capability_vocabulary &&
-   cargo build --locked -p mcloving-controller -p mcloving-cache -p mcloving-input-adapter &&
+   cargo build --locked -p mcloving-controller -p mcloving-cli -p mcloving-cache -p mcloving-input-adapter &&
    MCLOVING_CONTROLLER_BINARY=/work/target/debug/mcloving-controller \
      bash scripts/run-verified-rust-test.sh 9 remote-work --require-postgres cargo test --locked -p mcloving-agent --test remote_work -- --test-threads=1 &&
    MCLOVING_CONTROLLER_BINARY=/work/target/debug/mcloving-controller \
      bash scripts/run-verified-rust-test.sh 1 identity-collision --require-postgres cargo test --locked -p mcloving-agent --test identity_collision -- --test-threads=1 &&
    MCLOVING_CONTROLLER_BINARY=/work/target/debug/mcloving-controller \
-     bash scripts/run-verified-rust-test.sh 8 long-step-lease --require-postgres cargo test --locked -p mcloving-agent --test long_step_lease -- --test-threads=1 &&
+     bash scripts/run-verified-rust-test.sh 9 long-step-lease --require-postgres cargo test --locked -p mcloving-agent --test long_step_lease -- --test-threads=1 &&
    MCLOVING_CONTROLLER_BINARY=/work/target/debug/mcloving-controller \
    MCLOVING_CACHE_BINARY=/work/target/debug/mcloving-cache \
      bash scripts/test-cache-product.sh &&
