@@ -2632,7 +2632,7 @@ async fn run_assignment(
                 // absent; the skipped collection is its named failure.
                 Some("artifact_collection_cancelled".to_owned())
             } else {
-                collect_and_upload_artifacts(
+                let collection_result = collect_and_upload_artifacts(
                     config,
                     client,
                     &assignment,
@@ -2644,12 +2644,12 @@ async fn run_assignment(
                     },
                     &execution_cancellation,
                 )
-                .await
-                .map_err(|error| {
+                .await;
+                #[cfg(unix)]
+                let collection_result = collection_result.map_err(|error| {
                     if matches!(&error, AgentError::ExecutionReconciliationRequired { .. }) {
                         // A returned reader timeout does not prove its FD quiescent.
                         // Persist the parked phase before unwinding the caller.
-                        #[cfg(unix)]
                         if let Err(journal_error) = artifact_upload::park_journal(
                             &mut journal,
                             &organization,
@@ -2662,7 +2662,8 @@ async fn run_assignment(
                         }
                     }
                     error
-                })?
+                });
+                collection_result?
             };
         if artifact_failure.is_some() && terminal == WorkOutcome::Succeeded {
             terminal = WorkOutcome::Failed;

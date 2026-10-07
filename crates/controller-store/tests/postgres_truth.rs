@@ -15129,6 +15129,189 @@ async fn ctrl005_ledger_mutations_wait_for_the_attempt_lock() {
 // AGENT-012: metadata/quota/custody proofs. These deliberately test the database
 // boundary; actual filesystem verification belongs to the controller actor and
 // object-store drivers. A skipped DB fixture is not feature proof.
+// Restore authority is database-global: a unique tenant alone cannot isolate it.
+// Only these two adversaries own scratch databases; ordinary tests stay parallel.
+struct Agent012OwnedDatabase {
+    owner: Uuid,
+    database: String,
+    database_oid: Option<i64>,
+    options: PgConnectOptions,
+    cluster: sqlx::PgPool,
+    pools: Vec<sqlx::PgPool>,
+    custody: Option<tempfile::TempDir>,
+    cleaned: bool,
+}
+impl Agent012OwnedDatabase {
+    async fn create() -> Option<Self> {
+        let url = std::env::var("MCLOVING_TEST_DATABASE_URL").ok()?;
+        let options = url.parse::<PgConnectOptions>().unwrap();
+        let cluster = PgPoolOptions::new()
+            .max_connections(1)
+            .connect_with(options.clone().database("postgres"))
+            .await
+            .expect("connect owned restore fixture cluster");
+        let owner = Uuid::new_v4();
+        let database = format!("agent012_restore_{}", owner.simple());
+        // Establish private custody before CREATE can possibly commit.
+        let custody = tempfile::Builder::new()
+            .prefix("mcloving-agent012-owned-db-")
+            .tempdir()
+            .expect("create private restore fixture custody directory");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(custody.path(), std::fs::Permissions::from_mode(0o700))
+                .expect("private restore fixture custody permissions");
+        }
+        // Retain custody even if CREATE commits but its result is lost.
+        let mut owned = Self {
+            owner,
+            database,
+            database_oid: None,
+            options,
+            cluster,
+            pools: Vec::new(),
+            custody: Some(custody),
+            cleaned: false,
+        };
+        eprintln!(
+            "AGENT012_OWNED_RESTORE_DATABASE: {} owner={}",
+            owned.database, owned.owner
+        );
+        sqlx::query(&format!("CREATE DATABASE \"{}\"", owned.database))
+            .execute(&owned.cluster)
+            .await
+            .expect("create exact UUID-owned restore fixture database");
+        owned.database_oid = Some(
+            sqlx::query_scalar("SELECT oid::bigint FROM pg_database WHERE datname=$1")
+                .bind(&owned.database)
+                .fetch_one(&owned.cluster)
+                .await
+                .expect("capture actual owned database identity"),
+        );
+        Some(owned)
+    }
+    async fn store(&mut self) -> Store {
+        let pool = PgPoolOptions::new()
+            .max_connections(8)
+            .connect_with(self.options.clone().database(&self.database))
+            .await
+            .expect("connect only owned restore fixture database");
+        self.pools.push(pool.clone());
+        let store = Store::new(pool);
+        store
+            .migrate()
+            .await
+            .expect("migrate owned restore fixture");
+        store
+    }
+    fn track(&mut self, store: &Store) {
+        self.pools.push(store.pool().clone());
+    }
+    async fn finish(mut self) {
+        for pool in &self.pools {
+            tokio::time::timeout(Duration::from_secs(10), pool.close())
+                .await
+                .expect("owned restore fixture pool close failed; retain database custody");
+        }
+        assert_eq!(
+            self.database,
+            format!("agent012_restore_{}", self.owner.simple()),
+            "cleanup can target only the exact owned UUID database",
+        );
+        let actual: Option<i64> =
+            sqlx::query_scalar("SELECT oid::bigint FROM pg_database WHERE datname=$1")
+                .bind(&self.database)
+                .fetch_optional(&self.cluster)
+                .await
+                .expect("verify owned database identity before cleanup");
+        assert!(
+            self.database_oid.is_some(),
+            "unknown creation result must retain database custody"
+        );
+        assert_eq!(
+            actual, self.database_oid,
+            "database identity changed; cleanup refused"
+        );
+        // Never FORCE a drop or terminate another connection. An outstanding
+        // connection leaves this exact database and the durable custody record.
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            sqlx::query(&format!("DROP DATABASE \"{}\"", self.database)).execute(&self.cluster),
+        )
+        .await
+        .expect("owned database drop timed out; retain database custody")
+        .expect("owned database drop failed; retain database custody");
+        let absent: bool =
+            sqlx::query_scalar("SELECT NOT EXISTS(SELECT 1 FROM pg_database WHERE datname=$1)")
+                .bind(&self.database)
+                .fetch_one(&self.cluster)
+                .await
+                .expect("confirm owned database absence after acknowledged DROP");
+        assert!(absent, "owned database remains; cleanup custody retained");
+        self.cluster.close().await;
+        // remove_dir removes only this owned empty directory, never its entries.
+        let directory = self.custody.as_ref().expect("owned custody parent exists");
+        std::fs::remove_dir(directory.path())
+            .expect("owned custody directory not empty; retain cleanup diagnosis");
+        self.cleaned = true;
+        let _ = self
+            .custody
+            .take()
+            .expect("owned custody parent exists")
+            .keep();
+    }
+}
+impl Drop for Agent012OwnedDatabase {
+    fn drop(&mut self) {
+        if self.cleaned {
+            return;
+        }
+        // Async cleanup cannot be proven on panic/runtime teardown. Retain the
+        // exact private parent before attempting exclusive durable diagnosis.
+        let directory = self
+            .custody
+            .take()
+            .expect("owned custody parent exists")
+            .keep();
+        let custody = directory.join("custody.json");
+        let record = json!({
+            "database": self.database,
+            "owner": self.owner,
+            "database_oid": self.database_oid,
+            "status": "retained: cleanup not proven on unwind or cleanup failure",
+            "owned_pool_count": self.pools.len(),
+        });
+        let persistence = (|| -> std::io::Result<()> {
+            use std::io::Write;
+            let mut options = std::fs::OpenOptions::new();
+            // create_new atomically refuses any existing file or symlink; it
+            // never follows/overwrites an ambient final path.
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            let mut file = options.open(&custody)?;
+            file.write_all(record.to_string().as_bytes())?;
+            file.sync_all()?;
+            std::fs::File::open(&directory)?.sync_all()?;
+            Ok(())
+        })();
+        eprintln!(
+            "AGENT012_OWNED_RESTORE_DATABASE_RETAINED: database={} owner={} oid={:?} custody={} file_and_parent_sync={:?}",
+            self.database,
+            self.owner,
+            self.database_oid,
+            custody.display(),
+            persistence,
+        );
+        // A failed write/sync is explicitly unproven persistence; the private
+        // directory and the exact database identity remain diagnostically held.
+    }
+}
+
 async fn agent012_fixture() -> Option<(
     Store,
     mcloving_controller_store::ArtifactSetAuthority,
@@ -15136,6 +15319,16 @@ async fn agent012_fixture() -> Option<(
     BuildAdmission,
 )> {
     let store = test_store().await?;
+    Some(agent012_fixture_with_store(store).await)
+}
+async fn agent012_fixture_with_store(
+    store: Store,
+) -> (
+    Store,
+    mcloving_controller_store::ArtifactSetAuthority,
+    Uuid,
+    BuildAdmission,
+) {
     let organization = Uuid::new_v4();
     let project = Uuid::new_v4();
     let agent = format!("agent012-{organization}");
@@ -15217,7 +15410,7 @@ async fn agent012_fixture() -> Option<(
         agent_id: agent,
         session_epoch: 1,
     };
-    Some((store, a, project, build))
+    (store, a, project, build)
 }
 fn agent012_members(bytes: u64) -> Vec<mcloving_domain::artifacts::ArtifactManifestMember> {
     ["outputs/a", "outputs/b"]
@@ -15702,12 +15895,10 @@ impl<T> Agent012Task<T> {
 }
 // A fixture-owned single physical writer makes the actual blocking edge
 // attributable to this OpenSession/restore call, not another pooled query.
-async fn agent012_owned_writer_store() -> (Store, i32) {
-    let url = std::env::var("MCLOVING_TEST_DATABASE_URL")
-        .expect("explicit PostgreSQL fixture URL is required");
+async fn agent012_owned_writer_store(store: &Store) -> (Store, i32) {
     let pool = PgPoolOptions::new()
         .max_connections(1)
-        .connect(&url)
+        .connect_with(store.pool().connect_options().as_ref().clone())
         .await
         .expect("connect owned PostgreSQL writer");
     let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
@@ -15935,7 +16126,7 @@ async fn agent012_actual_queued_session_writer_does_not_cycle_with_member_owner(
     }));
     let commit_pid = agent012_wait_advisory(&store, key, true, true).await;
     let member_pid = agent012_actual_member_wait_owner(&store, commit_pid).await;
-    let (independent, writer_pid) = agent012_owned_writer_store().await;
+    let (independent, writer_pid) = agent012_owned_writer_store(&store).await;
     let agent = a.agent_id.clone();
     let mut session = Agent012Task(tokio::spawn(async move {
         independent
@@ -16017,9 +16208,11 @@ async fn agent012_actual_queued_session_writer_does_not_cycle_with_member_owner(
 }
 #[tokio::test]
 async fn agent012_actual_queued_restore_writer_does_not_cycle_with_member_owner() {
-    let Some((store, a, project, build)) = agent012_fixture().await else {
+    let Some(mut owned_database) = Agent012OwnedDatabase::create().await else {
         return;
     };
+    let store = owned_database.store().await;
+    let (store, a, project, build) = agent012_fixture_with_store(store).await;
     let backup = format!("agent012-lock-{}", a.organization_id);
     store.seal_recovery_point(&backup).await.unwrap();
     let members = agent012_members(3);
@@ -16056,7 +16249,8 @@ async fn agent012_actual_queued_restore_writer_does_not_cycle_with_member_owner(
     }));
     let commit_pid = agent012_wait_advisory(&store, key, true, true).await;
     let member_pid = agent012_actual_member_wait_owner(&store, commit_pid).await;
-    let (independent, writer_pid) = agent012_owned_writer_store().await;
+    let (independent, writer_pid) = agent012_owned_writer_store(&store).await;
+    owned_database.track(&independent);
     let mut restore = Agent012Task(tokio::spawn(async move {
         independent
             .activate_restore_epoch(&backup, "AGENT012 lock fixture")
@@ -16115,12 +16309,15 @@ async fn agent012_actual_queued_restore_writer_does_not_cycle_with_member_owner(
             .unwrap()
             .is_empty()
     );
+    owned_database.finish().await;
 }
 #[tokio::test]
 async fn agent012_expiry_owns_set_before_queued_restore_and_preserves_current_lease() {
-    let Some((store, a, project, build)) = agent012_fixture().await else {
+    let Some(mut owned_database) = Agent012OwnedDatabase::create().await else {
         return;
     };
+    let store = owned_database.store().await;
+    let (store, a, project, build) = agent012_fixture_with_store(store).await;
     let backup = format!("agent012-expiry-{}", a.organization_id);
     store.seal_recovery_point(&backup).await.unwrap();
     let members = agent012_members(3);
@@ -16203,4 +16400,5 @@ async fn agent012_expiry_owns_set_before_queued_restore_and_preserves_current_le
             .unwrap()
             .is_empty()
     );
+    owned_database.finish().await;
 }
