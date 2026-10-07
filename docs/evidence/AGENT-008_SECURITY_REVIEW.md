@@ -157,3 +157,78 @@ initial canonical-prefix digest and exact new fixture cleanup are bound by
 
 Independent review, protected publication and exact hosted/post-merge gates
 remain open; no closure attribution or authority is earned by this continuation.
+
+## 2026-10-07 subsequent reviewed closure observation
+
+Observed at 2026-10-07T01:23:23.935092+00:00: the full original AGENT-008 acceptance has
+independently reviewed implementation evidence and successful exact-merge
+post-merge gates. The initial candidate and phase-continuation body above remains
+an exact historical prefix. Its statements that review, merge or verification
+were pending describe those earlier phases.
+
+The revised ten-file candidate was independently reviewed by `/root/milestone_m2`
+in `independent-review.json`, SHA-256
+`12a908072bd934caae22e5829c7aeb4a667e41abdc79d9b635147c09bf0509d9`.
+Root separately reviewed the bounded threat continuation and the per-publication
+scenario, peer and phase evidence in `root-revised-phase-review.json`, SHA-256
+`ad32ae89593b8edda410373f62ab8e78e56f7d5e53f07475006721c7a688a390`.
+The independent current-base ten-file composition review in
+`ctrl005-closure-currentbase-independent-review.json`, SHA-256
+`8eda9d0fc3c74fe29e5f17322d54c582a3057a17391dfeb87d621b6686e9027b`,
+binds the exact reviewed candidate
+`0ac75ad5713f2fc8a17d5b1c72d01c82048c0bd8` on protected base
+`cbfb41c9ce1374c7bc2cd757dbf4d60b78f744f5`. Those custody artifacts are retained
+under `/tmp/mcloving-milestones/M2/AGENT-008/`.
+
+The original shipped scenario SIGKILLs the agent during the second of two steps.
+The corrected fixture records eight direct before-publication and accepted-
+receipt snapshots, covering every journaled descriptor and the identical retry:
+the local row remains `cancelling`, no cancellation request has occurred, and
+the matching controller attempt remains nonterminal before each response is
+released. Actual step-zero stdout/stderr digests appear in the dense controller
+ledger and in the shipped CLI's build logs. A real controller-committed upload
+response is lost before local acknowledgement; a fresh agent session replays
+the identical chunk without duplicating its sequence, bytes, quota counter or
+build position. Cancellation and local retirement follow those descriptor
+receipts. The existing single-step negotiated-live crash test remains in the
+nine-test gate. All four named semantic mutations earn their specific assertion
+failures and successful byte-restored scenarios. The revised full nine and
+targeted warning-denied Clippy are current phase proofs; the initial 130-test
+campaign, its 115 units and six focused regressions retain their separate
+historical dates and source bindings. No test count is relabeled as a new run.
+
+PR [#178](https://github.com/SuperBadLabs/McLoving/pull/178) completed normal
+protected squash merge as `fbad5ffd5cda4ee7e66a826bceea007bbf6ccecd` at
+2026-10-07T00:53:38Z, after all eight required GitHub Actions App 15368 contexts
+succeeded on the exact reviewed candidate and zero unresolved conversations.
+No administrator override was used. The pre-merge and merge custody records are
+`protected-implementation-premerge-20261007.json` and
+`protected-implementation-merge-20261007.json`.
+
+Exact-implementation-merge push Foundation
+[37554327122](https://github.com/SuperBadLabs/McLoving/actions/runs/37554327122)
+and Windows Agent
+[37554327158](https://github.com/SuperBadLabs/McLoving/actions/runs/37554327158)
+both completed successfully on attempt 1. Foundation aggregate job
+`112583015749` succeeded, including the actual PostgreSQL, deployment, architecture
+and UI jobs. Native Windows job
+[112576961782](https://github.com/SuperBadLabs/McLoving/actions/runs/37554327158/job/112576961782)
+executed all 23 steps successfully; raw log SHA-256 is
+`eac43a5aba8f98f57eb9b4e06fffb2da00f92d6291254385f370692b66681818`.
+`implementation-postmerge-joint-gate-success.json`, SHA-256
+`7b89dddbe9018af77dc5025e1031aaabe1052ae2cb5fb81b6456ff1e049f0572`,
+records the exact fbad implementation-result gate. It does not assert that later
+main `00e1a07fac779f54117ad675dd1b9009fadbc2fe` has completed its own gates.
+The Linux every-descriptor scenario remains a Linux observation; the actual
+native Windows workflow is distinct evidence, not a claim that this shell/
+SQLite/PostgreSQL scenario ran on Windows.
+
+This subsequent closure update records the earned bounded recovery-publication
+acceptance. It changes no agent/controller runtime, journal schema, protocol,
+fenced authority, stale-fence refusal, containment rule or quota predicate.
+AGENT-011 spool custody, SEC-005 hostile same-UID containment and host/disk failure
+remain explicit residuals. Definitive fence retirement still refuses upload;
+uncertain process identity still parks rather than self-discharging. No
+production, canary, migration or release authority is granted. This docs-only
+closure candidate itself still requires root's independent whole-diff review,
+protected checks and normal merge before closure bookkeeping is earned.
