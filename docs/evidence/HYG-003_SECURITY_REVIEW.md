@@ -356,3 +356,56 @@ and nine-mutation records remain dated historical phases with their original
 source/test hashes, not relabeled current. The full protected historical receipt
 prefix and all seven original board acceptance clauses are unchanged. HYG-003
 remains ACTIVE pending this complete correction's own review and protected gates.
+
+
+## HYG-003 subsequent closure review (2026-10-07T06:07:28.114649+00:00)
+
+This later review records completion of the original seven-clause implementation
+and proof. Earlier ACTIVE/candidate statements and failures above remain the
+historical phases they described. The original board acceptance, historical
+population and scope have not been shortened or reworded.
+
+All seven clauses are covered by the historical source citations, real-history
+RED and merged-receipt GREEN controls, adjacent-count and governance refusals,
+explicit convention limits, all 43 stale-claim/archive removal/restoration
+controls, the actual owner-tree readback and the final eleven directory-scope
+controls. The latter include both leading-prefix refusals and the original
+receipt-file predicate; the complete corrected closure suite passed 98 tests.
+The dated owner observation read the actual preserved 107 Markdown files and
+three original seals. Fixture replay alone is not substituted for that readback.
+
+The independent whole-27 source review is
+`/tmp/mcloving-milestones/M2/combined-custody-citation-independent-review.json`,
+SHA-256 `a8b5948ec091845b17a6e513545e1e44adb41834ee11511fda9592a3ae2fd4dc`.
+The final eleven controls are bound by
+`/tmp/mcloving-milestones/M2/HYG-003/citation-scope/prefix-alias-final/named-controls.json`,
+SHA-256 `fd99cdaedb63d332a8780ac6089e702fb7b0b73fe028e8c7cac850f4593a3c74`.
+Original 43-control receipt SHA-256 is
+`dca53d51f0a22ea7c5380a048a38d0385820b04cc8c445ec4681402476217fbd`.
+The real owner-tree receipt SHA-256 is
+`dfbf6ea80207f2d73ff0220abdcc9c2aad0c1f38e9ca4b6b577b43e95136053b`.
+Those committed historical records retain their own source/test hashes.
+
+The final directory-scope implementation normally protected-merged through
+[PR #181](https://github.com/SuperBadLabs/McLoving/pull/181) as
+`cb0abf3ec8679797b5f1b8213d10e0e0969cc0d3`. Its push
+[Foundation 37571830947](https://github.com/SuperBadLabs/McLoving/actions/runs/37571830947)
+and [Windows 37571830986](https://github.com/SuperBadLabs/McLoving/actions/runs/37571830986)
+succeeded: all fifteen Foundation jobs and all 23 executed native Windows steps.
+The joint receipt SHA-256 is
+`0a91eabfa438014401ae126a8454790de6aac768a2cdf142caa326846835b52b`.
+At the subsequent protected-base observation, merge
+`74182232066eb1639d4c96ab23a544a907f74bc4` also passed Foundation
+`37575856382` and actual native Windows `37575856402`, including all 23 steps;
+its joint receipt SHA-256 is
+`f172d4a7814878dbe9b5b447697c6ea98df9c6614b245d56471aacf4135d795d`.
+These qualify those exact implementation/base observations; this closure
+metadata still needs its own protected checks, merge and resulting-main readback.
+
+TM-052's documentation/merge-authority boundary was reviewed. Its technical
+protection and workflow controls remain unchanged. The bounded text grammar,
+content commitments and directory observations cannot establish arbitrary
+English truth, authorship, concurrent filesystem stability or future external
+GitHub state. Those residuals retain live-readback and written-convention
+obligations. This record changes no runtime, schema, protocol, credential,
+operational authority, owner archive or debt ledger.

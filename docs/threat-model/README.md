@@ -620,6 +620,7 @@ had never claimed one.
 | EXEC-005 | `docs/evidence/EXEC-005_SECURITY_REVIEW.md` |
 | CTRL-007 | `docs/evidence/CTRL-007_SECURITY_REVIEW.md` |
 | AGENT-013 | `docs/evidence/AGENT-013_SECURITY_REVIEW.md` |
+| HYG-003 | `docs/evidence/HYG-003_SECURITY_REVIEW.md` |
 
 ## Residual-risk policy
 
@@ -2047,3 +2048,34 @@ remain explicit limits. DOGFOOD-001 and SEC-005 retain separate full acceptance.
 This private metadata candidate grants no product, credential, production,
 canary, migration, deployment or release authority; independent root review,
 composition, protected checks and normal closure merge remain required.
+
+
+## HYG-003 subsequent closure review (2026-10-07T06:07:28.114649+00:00)
+
+Reviewed TM-052's documentation and merge-authority boundary against the complete
+original seven clauses. The earlier candidate assessments remain historical.
+Named live-head/gate, count and governance refusals, narrowly dated observation
+forms, real pre-fix RED/merged-history GREEN, 43 removal/restoration controls,
+three reviewed content commitments and actual unchanged owner-tree readback
+cover the original scope. Eleven additional directory-citation controls and the
+98-test corrected closure suite retain all evidence-file predicates and refuse
+prefix aliases, symlink ancestors/leaves, laundering and missing directories.
+
+Independent whole-27 review SHA-256
+`a8b5948ec091845b17a6e513545e1e44adb41834ee11511fda9592a3ae2fd4dc`
+and the canonical HYG-003 receipt bind the source and actual proof records.
+PR #181 implementation merge `cb0abf3ec8679797b5f1b8213d10e0e0969cc0d3`
+passed its exact push Foundation `37571830947` and Windows `37571830986`:
+all fifteen Foundation jobs and all 23 actual native Windows steps. The later
+protected-base observation `74182232066eb1639d4c96ab23a544a907f74bc4` also
+passed its exact Foundation and actual native Windows gates. These dated
+observations do not pre-qualify this metadata's own future resulting-main checks.
+
+The technical branch-protection/workflow mechanisms were reviewed unchanged;
+no credential, execution, deployment, migration or release authority is added.
+Residual risk remains unsupported English wording, external observation truth
+and change after a local read. Content commitments establish neither authorship
+nor operational authority; directory checks are local observations rather than
+atomic filesystem custody. Live exact-head queries and explicit written
+conventions remain required. All original archive bytes and historic receipts
+are preserved.
