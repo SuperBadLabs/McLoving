@@ -103,6 +103,16 @@ where
     if request.mode != ExecutionMode::Direct {
         return Err(ExecutionError::UnsupportedMode(request.mode));
     }
+    if request.container.is_some()
+        && request.environment.iter().any(|(key, value)| {
+            let (key, value) = (key.to_string_lossy(), value.to_string_lossy());
+            key.starts_with('#') || key.contains(['=', '\n', '\0']) || value.contains(['\n', '\0'])
+        })
+    {
+        return Err(ExecutionError::ContainerUnsupported(
+            "environment is not representable in a Podman env file",
+        ));
+    }
     validate_redactions(redactions)?;
     if request.workspace_seed.is_some()
         && (!cfg!(target_os = "linux") || !request.environment.is_empty() || !redactions.is_empty())
@@ -234,9 +244,12 @@ where
             let mut env_lines = Vec::new();
             for (key, value) in &request.environment {
                 let (key, value) = (key.to_string_lossy(), value.to_string_lossy());
-                if key.contains(['=', '\n', '\0']) || value.contains(['\n', '\0']) {
+                if key.starts_with('#')
+                    || key.contains(['=', '\n', '\0'])
+                    || value.contains(['\n', '\0'])
+                {
                     return Err(ExecutionError::ContainerUnsupported(
-                        "environment entries must not contain newlines, NUL or '=' in names",
+                        "environment entries must not contain newlines, NUL, '=' in names or names beginning with '#'",
                     ));
                 }
                 env_lines.push(format!("{key}={value}\n"));
@@ -263,7 +276,9 @@ where
             // paths are made absolute against this process's directory.
             let mounted_workspace = std::path::absolute(&workspace)?;
             let cidfile = std::path::absolute(spool.join("container.cid"))?;
+            container.context.validate_configuration()?;
             let mut command = Command::new(&container.runtime);
+            command.args(container.context.arguments());
             command
                 .arg("run")
                 .arg("--rm")
@@ -297,15 +312,8 @@ where
             "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
         )
         .env("LANG", "C.UTF-8");
-    if request.container.is_some() {
-        // The podman client's control environment is fixed by the agent and
-        // never touched by the workload; rootless podman needs these four.
-        command.envs(std::env::vars_os().filter(|(key, _)| {
-            matches!(
-                key.to_str(),
-                Some("HOME" | "XDG_RUNTIME_DIR" | "USER" | "TMPDIR")
-            )
-        }));
+    if let Some(container) = &request.container {
+        command.envs(container.context.environment());
     } else {
         command.envs(&request.environment);
     }
@@ -349,7 +357,7 @@ where
         )
         .await?;
         if let Some(container) = &request.container {
-            reap_container(&container.runtime, &container.name).await?;
+            reap_container(container).await?;
         }
         return Err(error);
     }
@@ -385,7 +393,7 @@ where
                 // error is what the caller must see either way, and recovery
                 // retries the absence proof if this reap did not succeed.
                 if let Some(container) = &request.container {
-                    let _ = reap_container(&container.runtime, &container.name).await;
+                    let _ = reap_container(container).await;
                 }
                 return Err(error);
             }
@@ -431,7 +439,7 @@ where
                 // still be running with the workspace mounted, so it is
                 // reaped here exactly as on every other teardown arm.
                 if let Some(container) = &request.container {
-                    reap_container(&container.runtime, &container.name).await?;
+                    reap_container(container).await?;
                 }
                 return Err(error.into());
             }
@@ -451,7 +459,7 @@ where
     // so nothing keeps writing into the mounted workspace meanwhile, and
     // before any later fallible step could skip the proof.
     if let Some(container) = &request.container {
-        reap_container(&container.runtime, &container.name).await?;
+        reap_container(container).await?;
     }
 
     let exceeded = capture.as_ref().is_some_and(OutputCapture::was_exceeded)
@@ -591,14 +599,17 @@ async fn terminate_group_reaping_on_failure(
         Ok(status) => Ok(status),
         Err(error) => {
             if let Some(container) = container {
-                let _ = reap_container(&container.runtime, &container.name).await;
+                let _ = reap_container(container).await;
             }
             Err(error)
         }
     }
 }
 
-async fn reap_container(runtime: &Path, name: &str) -> Result<(), ExecutionError> {
+async fn reap_container(container: &ContainerSpec) -> Result<(), ExecutionError> {
+    let runtime = &container.runtime;
+    let name = &container.name;
+    container.context.validate_configuration()?;
     let unverified = |reason: String| ExecutionError::ContainerUnverified {
         name: name.to_owned(),
         reason,
@@ -609,18 +620,14 @@ async fn reap_container(runtime: &Path, name: &str) -> Result<(), ExecutionError
     let remove = tokio::time::timeout(
         CONTAINER_REMOVAL_TIMEOUT,
         Command::new(runtime)
+            .args(container.context.arguments())
             .args(["rm", "--force", "--time", "0", "--ignore", name])
             .env_clear()
             .env(
                 "PATH",
                 "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
             )
-            .envs(std::env::vars_os().filter(|(key, _)| {
-                matches!(
-                    key.to_str(),
-                    Some("HOME" | "XDG_RUNTIME_DIR" | "USER" | "TMPDIR")
-                )
-            }))
+            .envs(container.context.environment())
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
@@ -645,18 +652,14 @@ async fn reap_container(runtime: &Path, name: &str) -> Result<(), ExecutionError
     let exists = tokio::time::timeout(
         CONTAINER_EXISTENCE_TIMEOUT,
         Command::new(runtime)
+            .args(container.context.arguments())
             .args(["container", "exists", name])
             .env_clear()
             .env(
                 "PATH",
                 "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
             )
-            .envs(std::env::vars_os().filter(|(key, _)| {
-                matches!(
-                    key.to_str(),
-                    Some("HOME" | "XDG_RUNTIME_DIR" | "USER" | "TMPDIR")
-                )
-            }))
+            .envs(container.context.environment())
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
@@ -1499,6 +1502,55 @@ mod tests {
 
         assert_eq!(outcome.termination, Termination::Cancelled);
         assert_process_gone(pid).await;
+    }
+
+    #[tokio::test]
+    async fn container_env_file_comment_names_are_refused_before_workspace_or_spawn() {
+        let root = tempfile::tempdir().unwrap();
+        for name in ["#", "#NAME", "BAD=NAME", "BAD\nNAME", "BAD\0NAME"] {
+            let request = ExecutionRequest {
+                workspace_seed: None,
+                reuse_existing_workspace: false,
+                step_ordinal: Some(0),
+                container: Some(ContainerSpec {
+                    runtime: "/nonexistent/podman".into(),
+                    image: format!("example/image@sha256:{}", "a".repeat(64)),
+                    name: "refused".into(),
+                    context: super::super::podman::PodmanContext {
+                        graph_root: "/graph".into(),
+                        run_root: "/run".into(),
+                        driver: "vfs".into(),
+                        storage_options: Vec::new(),
+                        config_path: "/missing/containers.conf".into(),
+                        home: None,
+                        runtime_dir: None,
+                        user: None,
+                        temporary_dir: None,
+                    },
+                }),
+                workspace_root: root.path().to_owned(),
+                workspace: "org/refused".into(),
+                mode: ExecutionMode::Direct,
+                program: "/nonexistent/program".into(),
+                arguments: Vec::new(),
+                environment: BTreeMap::from([(name.into(), "value".into())]),
+                output_limit_bytes: None,
+                retained_output_floors: None,
+                timeout: Duration::from_secs(1),
+                termination_grace: Duration::from_millis(50),
+            };
+            assert!(
+                matches!(
+                    execute(&request, CancellationToken::new()).await,
+                    Err(ExecutionError::ContainerUnsupported(_))
+                ),
+                "{name:?}"
+            );
+            assert!(
+                !root.path().join("org").exists(),
+                "refusal must precede workspace mutation"
+            );
+        }
     }
 
     #[tokio::test]

@@ -1316,14 +1316,15 @@ pub fn validate_pipeline(pipeline: &PipelineIr) -> Result<(), IrValidationError>
             // it here rather than fail the attempt at execution.
             for (step_index, step) in stage.steps.iter().enumerate() {
                 if let Step::Process(process) = step
-                    && let Some((name, _)) = process
-                        .env
-                        .iter()
-                        .find(|(name, value)| name.contains('=') || value.contains('\n'))
+                    && let Some((name, _)) = process.env.iter().find(|(name, value)| {
+                        name.starts_with('#')
+                            || name.contains(['=', '\n', '\0'])
+                            || value.contains(['\n', '\0'])
+                    })
                 {
                     return Err(IrValidationError::new(
                         format!("{path}.steps[{step_index}].process.env.{name}"),
-                        "container stage environment values must be single-line and names must not contain '='",
+                        "container stage environment values must be single-line without NUL and names must not begin with '#' or contain '=', newline or NUL",
                     ));
                 }
             }

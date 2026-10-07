@@ -33,6 +33,7 @@ from __future__ import annotations
 import argparse
 import posixpath
 import re
+import stat
 from collections import Counter
 import sys
 from pathlib import Path
@@ -701,20 +702,51 @@ def cited_documents(repository: Path, text: str) -> list[str]:
         for number, row in rows:
             if len(row) != TICKET_TABLE_COLUMNS or row[1] != "DONE":
                 continue
-            for path in sorted(set(CITED_DOC_PATH.findall(row[3]))):
-                # `exists`, not `is_file`. Widening the scan to undelimited text
-                # also picks up the leading fragment of a TEMPLATE such as
-                # `docs/evidence/<TICKET>_SECURITY_REVIEW.md`, which yields the
-                # real directory `docs/evidence`. A directory that is there is
-                # not a document that is missing, and this check exists to
-                # answer the latter question.
+            for match in CITED_DOC_PATH.finditer(row[3]):
+                path = match.group(1)
+                # A complete backticked trailing-slash token names scope,
+                # rather than an evidence file. Do not admit template prefixes
+                # or let a valid scope occurrence hide another invalid citation.
+                directory_scope = (
+                    match.start() > 0
+                    and row[3][match.start() - 1] == "`"
+                    and match.group(0) == path
+                    and row[3][match.end():match.end() + 2] == "/`"
+                )
                 document = contained_document(repository, path)
-                if document is None or not document.is_file():
+                valid = document is not None and (
+                    contained_scope_directory(repository, path)
+                    if directory_scope else document.is_file()
+                )
+                if not valid:
                     errors.append(
                         f"line {number}: {row[0]} is DONE and cites {path}, which "
                         "does not exist; write it, or stop citing it as evidence"
                     )
     return errors
+
+
+def contained_scope_directory(repository: Path, cited: str) -> bool:
+    """Accept a real extensionless scope directory, with no linked ancestors.
+
+    This does not qualify a receipt or attribution, which still requires a file.
+    The caller has already checked resolved docs containment. Each occurrence is
+    checked separately, including another spelling of the same normalized path.
+    """
+    parts = cited.split("/")
+    if parts[0] != "docs" or any(part in ("", ".", "..") for part in parts):
+        return False
+    if "." in parts[-1]:
+        return False
+    current = repository.resolve()
+    try:
+        for part in parts:
+            current /= part
+            if not stat.S_ISDIR(current.lstat().st_mode):
+                return False
+    except OSError:
+        return False
+    return True
 
 
 def receipt_path(repository: Path, ticket: str) -> Path | None:

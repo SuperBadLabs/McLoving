@@ -17,6 +17,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{JournalError, SpoolEntry, validate_relative_path};
 
 mod cleanup;
+pub mod podman;
 #[cfg(unix)]
 mod unix;
 #[cfg(windows)]
@@ -201,6 +202,8 @@ const _: () = assert!(
 pub struct ContainerSpec {
     /// Absolute path of the podman binary the deployment pinned.
     pub runtime: PathBuf,
+    /// Immutable storage and configuration selected before this step was journaled.
+    pub context: podman::PodmanContext,
     /// `name@sha256:<64 hex>`; a tag is refused before this point.
     pub image: String,
     /// Deterministic per-step container name, so cleanup after a crash can

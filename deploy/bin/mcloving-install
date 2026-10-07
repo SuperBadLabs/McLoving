@@ -89,6 +89,7 @@ else
 fi
 unit_root="${xdg_config_base}/systemd/user"
 quadlet_root="${xdg_config_base}/containers/systemd"
+podman_config_root="${config_root}/podman"
 
 # The umask below secures only the ancestors mkdir CREATES. An ancestor that
 # already exists writable -- a pre-existing 0777 ~/.local -- is untouched by
@@ -112,6 +113,9 @@ managed_roots=(
   "${libexec_root}/releases"
   "${config_root}"
   "${config_root}/pki"
+  "${podman_config_root}"
+  "${podman_config_root}/.config"
+  "${podman_config_root}/.config/containers"
   "${unit_root}"
   "${quadlet_root}"
 )
@@ -128,6 +132,11 @@ contract_destinations=(
   "${config_root}/db-init.env"
   "${config_root}/controller.env"
   "${config_root}/agent.env"
+)
+workload_configuration_files=(
+  "${podman_config_root}/containers.conf"
+  "${podman_config_root}/storage.conf"
+  "${podman_config_root}/.config/containers/mounts.conf"
 )
 # The units themselves declare directories this installer never touches --
 # systemd creates StateDirectory= leaves under ~/.local/state at service
@@ -162,9 +171,9 @@ done < <(deployment_unit_declared_contracts "${home_dir}" \
   "${deploy_root}"/podman/*.container \
   "${deploy_root}"/podman/*.volume | sort -u)
 require_secure_ancestors "${home_dir}" "${managed_roots[@]}" \
-  "${contract_destinations[@]}" "${unit_declared_roots[@]}" \
+  "${contract_destinations[@]}" "${workload_configuration_files[@]}" "${unit_declared_roots[@]}" \
   "${declared_contracts[@]}"
-require_secure_files "${home_dir}" "${contract_destinations[@]}" \
+require_secure_files "${home_dir}" "${contract_destinations[@]}" "${workload_configuration_files[@]}" \
   "${declared_contracts[@]}"
 # A reinstall over an existing deployment inherits whatever unit drop-ins
 # the operator has placed there since: the full transition-grade
@@ -202,6 +211,19 @@ acquire_transition_lock "${libexec_root}"
 # established tree. A concurrent sanctioned transition can no longer change
 # what install inspected between its verdict and its lock acquisition.
 require_deployment_integrity "${home_dir}"
+
+# Decide freshness only under transition exclusion, after re-reading the
+# installed tree. A present-but-incomplete root is refused by the integrity
+# gate above; it is never repaired or mistaken for a fresh root.
+if [[ ! -e "${podman_config_root}" && ! -L "${podman_config_root}" ]]; then
+  require_secure_ancestors "${home_dir}" "${podman_config_root}/.config/containers"
+  mkdir -p "${podman_config_root}/.config/containers"
+  chmod 0700 "${podman_config_root}" "${podman_config_root}/.config" "${podman_config_root}/.config/containers"
+  install -T -m 0400 "${deploy_root}/podman/workload-containers.conf" "${podman_config_root}/containers.conf"
+  install -T -m 0400 "${deploy_root}/podman/workload-storage.conf" "${podman_config_root}/storage.conf"
+  install -T -m 0400 "${deploy_root}/podman/workload-mounts.conf" "${podman_config_root}/.config/containers/mounts.conf"
+fi
+require_workload_podman_configuration "${podman_config_root}"
 
 # An established deployment that has lost its current link is NOT a fresh
 # install: releases on disk mean services may be running on them, and
@@ -276,6 +298,11 @@ if [[ "${no_systemd}" != "1" ]]; then
   for asset in "${MCLOVING_DEPLOY_QUADLETS[@]}"; do
     changed_assets+=("${deploy_root}/podman/${asset}:${quadlet_root}/${asset}")
   done
+  changed_assets+=(
+    "${deploy_root}/podman/workload-containers.conf:${podman_config_root}/containers.conf"
+    "${deploy_root}/podman/workload-storage.conf:${podman_config_root}/storage.conf"
+    "${deploy_root}/podman/workload-mounts.conf:${podman_config_root}/.config/containers/mounts.conf"
+  )
   for asset in "${changed_assets[@]}"; do
     source_asset="${asset%%:*}"
     installed_asset="${asset#*:}"

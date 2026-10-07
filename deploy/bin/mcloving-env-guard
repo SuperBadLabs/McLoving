@@ -510,6 +510,28 @@ fi
 # requires this exact deployment file to be immutable, single-link and owned
 # by its service account; the generic secret class alone also accepts 0600.
 if [[ "${service}" == agent ]]; then
+  contract_into workload_podman_path MCLOVING_AGENT_PODMAN_PATH
+  contract_into workload_podman_config MCLOVING_AGENT_PODMAN_CONFIG_PATH
+  contract_into workload_podman_storage MCLOVING_AGENT_PODMAN_STORAGE_PATH
+  contract_into workload_podman_mounts MCLOVING_AGENT_PODMAN_MOUNTS_PATH
+  [[ -z "${workload_podman_path}" || -n "${workload_podman_config}" ]] || fail "Podman runtime requires MCLOVING_AGENT_PODMAN_CONFIG_PATH"
+  if [[ -n "${workload_podman_config}" ]]; then
+    [[ "${workload_podman_config}" == */containers.conf ]] || fail "Podman configuration must name containers.conf"
+    workload_podman_root="${workload_podman_config%/containers.conf}"
+    [[ "${workload_podman_storage}" == "${workload_podman_root}/storage.conf" && "${workload_podman_mounts}" == "${workload_podman_root}/.config/containers/mounts.conf" ]] || fail "Podman companion paths must match the controlled configuration root"
+    for workload_podman_file in "${workload_podman_config}" "${workload_podman_storage}" "${workload_podman_mounts}"; do
+      [[ "$(stat -Lc '%a %u %h' -- "${workload_podman_file}")" == "400 ${EUID} 1" ]] || fail "Podman configuration requires mode 400, service owner and one link (${workload_podman_file})"
+      [[ "$(realpath -e -- "${workload_podman_file}")" == "${workload_podman_file}" ]] || fail "Podman configuration requires a canonical path without symlink components"
+    done
+    for workload_podman_dir in "${workload_podman_root}" "${workload_podman_root}/.config" "${workload_podman_root}/.config/containers"; do
+      [[ "$(stat -Lc '%a %u' -- "${workload_podman_dir}")" == "700 ${EUID}" ]] || fail "Podman configuration directories must be service-owned mode 700"
+    done
+    [[ ! -s "${workload_podman_mounts}" ]] || fail "Podman implicit mounts file must be empty"
+    cmp -s "${workload_podman_config}" <(printf '# McLoving agent-owned workload configuration.\n[containers]\n') || fail "Podman workload configuration differs from the controlled contract"
+    cmp -s "${workload_podman_storage}" <(printf '# Storage is selected by explicit command arguments.\n[storage]\n') || fail "Podman storage configuration differs from the controlled contract"
+  elif [[ -n "${workload_podman_storage}" || -n "${workload_podman_mounts}" ]]; then
+    fail "Podman companion configuration requires the controlled configuration root"
+  fi
   contract_into cache_bindings_path MCLOVING_AGENT_CACHE_BINDINGS_PATH
   if [[ -n "${cache_bindings_path}" ]]; then
     cache_bindings_metadata="$(stat -Lc '%a %u %h' -- "${cache_bindings_path}")"
