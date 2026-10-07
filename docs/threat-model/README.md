@@ -594,6 +594,7 @@ had never claimed one.
 | JCOMP-002C | `docs/evidence/JCOMP-002C_SECURITY_REVIEW.md` |
 | JCOMP-003 | `docs/evidence/JCOMP-003_SECURITY_REVIEW.md` |
 | AGENT-007 | `docs/evidence/AGENT-007_SECURITY_REVIEW.md` |
+| AGENT-008 | `docs/evidence/AGENT-008_SECURITY_REVIEW.md` |
 | JOBSTATE-001 | `docs/evidence/JOBSTATE-001_SECURITY_REVIEW.md` |
 | OBS-001 | `docs/evidence/OBS-001_SECURITY_REVIEW.md` |
 | OUTBOX-001 | `docs/evidence/OUTBOX-001_SECURITY_REVIEW.md` |
@@ -856,10 +857,10 @@ Closed on squash merge `cca42de59271820826248c35ed195e8e81e637a6` with
 exact-main Foundation `34571458905` and Windows Agent `34571458894`; receipt
 `docs/evidence/PAR-010_SECURITY_REVIEW.md`. At PAR-010 closure, journaled step
 logs were not published when recovery completed a cancellation (`AGENT-008`).
-The AGENT-008 candidate assessment below records the subsequent PAR-013
-recovery path and its bounded crash/response-loss proof; formal AGENT-008
-closure remains open. Hostile same-UID access to relocated spools remains
-`SEC-005`.
+The AGENT-008 assessment and subsequent reviewed closure observation below
+record the later PAR-013 recovery path, its bounded crash/response-loss proof
+and successful exact-merge verification. Hostile same-UID access to relocated
+spools remains `SEC-005`.
 
 ## PAR-011 container stage execution review (earned closure)
 
@@ -1649,3 +1650,33 @@ definitive fence retirement remain explicit limits. This controlled Linux
 observation neither grants a stale fence upload authority nor qualifies native
 Windows. Independent review, protected merge and exact post-merge Foundation/
 Windows verification remain owed; no earned closure attribution is added here.
+
+### AGENT-008 subsequent reviewed closure observation
+
+Observed at 2026-10-07T01:23:23.935092+00:00: the complete revised candidate and its
+boundary determinations above were independently reviewed by `/root/milestone_m2`;
+root independently reviewed the authored threat continuation and revised
+per-publication proof. The canonical
+`docs/evidence/AGENT-008_SECURITY_REVIEW.md` binds both reviews, the exact
+current-base composition and original full acceptance. The eight direct
+snapshots establish every descriptor's publication and committed receipt before
+cancellation completion and before the local row leaves `cancelling`; four
+specific semantic RED/restored-GREEN controls cover premature controller
+completion, omitted descriptors, early acknowledgement and early local retirement.
+The second-step SIGKILL, genuine committed-response loss and fresh-session
+idempotent replay, real step-zero CLI logs and existing single-step recovery gate
+remain separately bound to their measured native phases.
+
+PR #178 completed normal protected squash merge
+`fbad5ffd5cda4ee7e66a826bceea007bbf6ccecd`; exact-merge Foundation `37554327122`
+and actual native Windows `37554327158` completed successfully on attempt 1,
+including native job `112576961782` and all 23 steps. These are implementation-
+resulting-main observations, not a claim about later main's gates. The previous
+candidate assessment's pending language is historical. This earns the original
+bounded recovery-publication acceptance without a runtime, protocol, schema,
+credential or authority change. The existing no-change boundary determinations,
+AGENT-011/SEC-005 custody and containment residuals, host/disk failure, definitive
+fence refusal and uncertain-process-identity parking remain in force. No
+production, canary, migration or release authority is granted. Root's independent
+review of this docs-only closure update and its protected checks/normal merge
+remain required before closure bookkeeping is earned.
