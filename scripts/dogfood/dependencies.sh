@@ -4,8 +4,11 @@
 # version; here the release archive is fetched once and verified against
 # tools/versions.env).
 # shellcheck source=lib.sh
+# dogfood-contract-begin dependencies-preamble
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 dogfood_lane dependencies
+# dogfood-contract-end dependencies-preamble
+# dogfood-contract-begin cargo-deny-release
 cache="${HOME}/.cache/mcloving-dogfood"
 mkdir -p "${cache}"
 archive="${cache}/cargo-deny-${CARGO_DENY_VERSION}.tar.gz"
@@ -21,3 +24,4 @@ trap 'rm -rf -- "${tool_dir}"' EXIT
 tar -xzf "${archive}" -C "${tool_dir}" --strip-components=1
 "${tool_dir}/cargo-deny" --version
 "${tool_dir}/cargo-deny" check
+# dogfood-contract-end cargo-deny-release

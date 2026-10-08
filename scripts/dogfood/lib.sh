@@ -16,6 +16,7 @@ export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 export PATH="${CARGO_HOME}/bin:${PATH}"
 export CARGO_TERM_COLOR=never
 export RUST_TOOLCHAIN="${RUST_TOOLCHAIN:-1.97.1}"
+[[ "${RUST_TOOLCHAIN}" == 1.97.1 ]] || { echo "dogfood: unsupported Rust toolchain" >&2; return 1; }
 
 # Every lane runs from the checkout the pipeline's checkout step placed in
 # the workspace; a lane invoked by hand from a checkout works the same.
