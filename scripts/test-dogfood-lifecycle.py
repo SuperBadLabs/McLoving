@@ -208,5 +208,122 @@ class LifecycleTests(unittest.TestCase):
             self.assertNotEqual(result.returncode,0)
             self.assertFalse(list(state.glob('deliveries.*.tsv')))
 
+    def persistence_failure(self, fault):
+        # Exercise the real writer at the two actual pre-activation fences,
+        # rather than replacing its algorithm or claiming every syscall fault.
+        import errno
+        import stat
+        from unittest import mock
+        for gate in ('created-inactive', 'pending-activate'):
+            with self.subTest(fault=fault, gate=gate), self.fixture() as (root,state,_context):
+                receipt_path = state/'hook-owner.json'
+                real_write = LIFE.write_private
+                real_fsync = LIFE.os.fsync
+                real_replace = LIFE.os.replace
+                injected = OSError(errno.EIO, 'public-toy persistence fault')
+                trace = []
+                failed_descriptors = []
+                previous = []
+
+                def fsync(descriptor):
+                    info = os.fstat(descriptor)
+                    if stat.S_ISREG(info.st_mode):
+                        operation = 'file-fsync'
+                        self.assertEqual(stat.S_IMODE(info.st_mode), 0o600)
+                    else:
+                        self.assertTrue(stat.S_ISDIR(info.st_mode))
+                        operation = 'directory-fsync'
+                        self.assertEqual((info.st_dev, info.st_ino),
+                                         (state.stat().st_dev, state.stat().st_ino))
+                        self.assertEqual(stat.S_IMODE(info.st_mode), 0o700)
+                    self.assertEqual(info.st_uid, os.getuid())
+                    trace.append(operation)
+                    if operation == fault:
+                        failed_descriptors.append(descriptor)
+                        raise injected
+                    return real_fsync(descriptor)
+
+                def replace(source, destination):
+                    self.assertEqual(pathlib.Path(destination), receipt_path)
+                    source = pathlib.Path(source)
+                    self.assertEqual(source.parent, state)
+                    self.assertTrue(source.name.startswith('.hook-owner.json.'))
+                    self.assertFalse(source.is_symlink())
+                    info = source.stat()
+                    self.assertTrue(stat.S_ISREG(info.st_mode))
+                    self.assertEqual(stat.S_IMODE(info.st_mode), 0o600)
+                    self.assertEqual(info.st_uid, os.getuid())
+                    trace.append('replace')
+                    if fault == 'replace':
+                        raise injected
+                    return real_replace(source, destination)
+
+                def selected_write(path, value):
+                    if pathlib.Path(path) != receipt_path or value.get('phase') != gate:
+                        return real_write(path, value)
+                    self.assertEqual(previous, [])
+                    previous.append(receipt_path.read_bytes())
+                    with mock.patch.object(LIFE.os, 'fsync', side_effect=fsync), \
+                         mock.patch.object(LIFE.os, 'replace', side_effect=replace):
+                        return real_write(path, value)
+
+                with mock.patch.object(LIFE, 'write_private', side_effect=selected_write):
+                    with self.assertRaises(OSError) as failure:
+                        LIFE.reconcile(state, 'public')
+                self.assertIs(failure.exception, injected)
+                self.assertEqual(failure.exception.errno, errno.EIO)
+                # Observe closure immediately, before later receipt/API reads
+                # can reuse an fd number; this is only the exact failed fd.
+                for descriptor in failed_descriptors:
+                    with self.assertRaises(OSError) as closed:
+                        os.fstat(descriptor)
+                    self.assertEqual(closed.exception.errno, errno.EBADF)
+                expected_trace = {'file-fsync': ['file-fsync'],
+                                  'replace': ['file-fsync', 'replace'],
+                                  'directory-fsync': ['file-fsync', 'replace', 'directory-fsync']}
+                self.assertEqual(trace, expected_trace[fault])
+                self.assertEqual(len(failed_descriptors), 0 if fault == 'replace' else 1)
+                self.assertEqual(len(previous), 1)
+                self.assertEqual(list(state.glob('.hook-owner.json.*')), [])
+                self.assertEqual(list(state.glob('.hook-request.*')), [])
+                calls = self.calls(root)
+                posts = [call for call in calls if call['method'] == 'POST']
+                self.assertEqual(len(posts), 1)
+                self.assertEqual(posts[0]['phase'], 'pending-create')
+                self.assertIsNone(posts[0]['retained_id'])
+                self.assertIs(posts[0]['body']['active'], False)
+                self.assertFalse(any(call.get('body', {}).get('active') is True for call in calls))
+                self.assertFalse(any(call['method'] == 'PATCH' for call in calls))
+                hooks = json.loads((root/'api.json').read_text())['hooks']
+                self.assertEqual(set(hooks), {'73'})
+                self.assertIs(hooks['73']['active'], False)
+                receipt = LIFE.owner(state)
+                previous_phase = 'pending-create' if gate == 'created-inactive' else 'created-inactive'
+                self.assertEqual(receipt['phase'], gate if fault == 'directory-fsync' else previous_phase)
+                expected_id = None if gate == 'created-inactive' and fault != 'directory-fsync' else 73
+                self.assertEqual(receipt['hook_id'], expected_id)
+                self.assertNotEqual(receipt['phase'], 'public-ready')
+                if fault == 'directory-fsync':
+                    self.assertNotEqual(receipt_path.read_bytes(), previous[0])
+                else:
+                    self.assertEqual(receipt_path.read_bytes(), previous[0])
+                before_restart = receipt_path.read_bytes()
+                with self.assertRaisesRegex(LIFE.Refused, 'uncertain_previous_transition'):
+                    LIFE.begin(state)
+                with self.assertRaisesRegex(LIFE.Refused, 'transition_not_prepared'):
+                    LIFE.reconcile(state, 'public')
+                self.assertEqual(receipt_path.read_bytes(), before_restart)
+                self.assertEqual(self.calls(root), calls)
+                self.assertIs(json.loads((root/'api.json').read_text())['hooks']['73']['active'], False)
+
+    def test_file_fsync_refusal_before_activation_preserves_uncertain_restart(self):
+        self.persistence_failure('file-fsync')
+
+    def test_replace_refusal_before_activation_preserves_uncertain_restart(self):
+        self.persistence_failure('replace')
+
+    def test_directory_fsync_refusal_before_activation_preserves_uncertain_restart(self):
+        self.persistence_failure('directory-fsync')
+
 
 if __name__=='__main__': unittest.main()

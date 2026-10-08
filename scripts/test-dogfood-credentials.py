@@ -35,6 +35,12 @@ directory = pathlib.Path(os.environ["FIXTURE"])
 scenario = json.loads((directory / "scenario.json").read_text())
 entry = {"command": name, "argv": args,
          "proc_cmdline": pathlib.Path("/proc/self/cmdline").read_bytes().decode().split("\0")[:-1]}
+if scenario.get("block") == "quiesce" and name == "python3" and args[1:2] == ["run"]:
+    text = pathlib.Path("/proc/self/stat").read_text()
+    fields = text[text.rindex(")") + 2:].split()
+    entry["birth"] = dict(pid=os.getpid(), uid=os.getuid(), ppid=int(fields[1]),
+                          pgrp=os.getpgrp(), session=os.getsid(0), start_ticks=int(fields[19]))
+    entry["requested_public_mode"] = os.environ["MCLOVING_DOGFOOD_PUBLIC_HOOK"]
 owner_path = directory / 'state' / 'hook-owner.json'
 if owner_path.exists():
     entry['sender_phase'] = json.loads(owner_path.read_text())['phase']
@@ -170,10 +176,26 @@ elif name in ("python3", "jq", "openssl", "env"):
     os.execv(actual, [actual, *args])
 with (directory / "commands.jsonl").open("a") as output:
     output.write(json.dumps(entry) + "\n")
+quiesce_block = (scenario.get("block") == "quiesce" and name == "gh" and
+    option("-X") == "PATCH" and "repos/example/repository/hooks/73" in args and
+    entry.get("sender_phase") == "pending-quiesce" and
+    entry.get("request") == {"active": False} and entry.get("request_file"))
 if ((scenario.get("block") == "api" and name == "curl" and entry.get("header_file")) or
     (scenario.get("block") == "bridge" and name == "curl" and entry.get("payload_hex")) or
-    (scenario.get("block") == "registration" and name == "gh" and entry.get("request_file"))):
-    (directory / "blocked.json").write_text(json.dumps(entry))
+    (scenario.get("block") == "registration" and name == "gh" and entry.get("request_file")) or
+    quiesce_block):
+    if quiesce_block:
+        # Publish an entire actual request ACK only after the real helper's
+        # durable pending-quiesce and the toy owned hook's inactive effect.
+        ready = directory / ".quiesce-ready.pending"
+        with ready.open("x") as output:
+            os.fchmod(output.fileno(), 0o600)
+            json.dump(entry, output)
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(ready, directory / "blocked.json")
+    else:
+        (directory / "blocked.json").write_text(json.dumps(entry))
     while True:
         time.sleep(1)
 if entry.get("injected_failure"):
@@ -362,7 +384,95 @@ class CredentialTests(unittest.TestCase):
                     self.assertFalse(any(entry["command"] == "curl" for entry in self.entries(root)))
                 self.assert_private_arguments(self.entries(root), result.stdout, result.stderr)
 
-    def interrupt_request(self, command: list[str], environment: dict[str, str], root: Path, signum: int) -> subprocess.CompletedProcess:
+    def finish_overlap_request(self, process: subprocess.Popen) -> None:
+        # Failure cleanup for this exact owned invocation. The real supervisor
+        # starts its deployment child in a separate session: killing only the
+        # supervisor's group cannot close that child's inherited pipes.
+        import select
+        faults, held = [], []
+        def attempt(label, action):
+            try:
+                return action()
+            except ProcessLookupError:
+                return None
+            except Exception as error:
+                faults.append(label + ':' + type(error).__name__)
+                return None
+        def birth(pid):
+            base = Path('/proc') / str(pid)
+            if base.stat().st_uid != os.getuid():
+                raise RuntimeError('cleanup_owner_changed')
+            text = (base / 'stat').read_text()
+            fields = text[text.rindex(')') + 2:].split()
+            return (int(fields[1]), int(fields[2]), int(fields[3]), int(fields[19]))
+        def retain(pid, expected):
+            fd = os.pidfd_open(pid)
+            held.append(fd)
+            if birth(pid) != expected:
+                raise RuntimeError('cleanup_birth_changed')
+            return fd
+        def retain_children():
+            parent = birth(process.pid)
+            if parent[:3] != (os.getpid(), process.pid, process.pid):
+                raise RuntimeError('cleanup_parent_custody_changed')
+            with (Path('/proc') / str(process.pid) / 'task' / str(process.pid) / 'children').open() as source:
+                raw = source.read(257)
+            if len(raw) > 256 or len(raw.split()) > 8:
+                raise RuntimeError('cleanup_children_bound')
+            for value in raw.split():
+                if not value.isdecimal():
+                    raise RuntimeError('cleanup_child_identity')
+                pid = int(value)
+                observed = birth(pid)
+                # Only the actual direct child in its own session is eligible;
+                # no scan, guessed group or foreign process is terminated.
+                if observed[:3] != (process.pid, pid, pid):
+                    raise RuntimeError('cleanup_child_session_changed')
+                fd = retain(pid, observed)
+                children.append((pid, observed, fd))
+            if birth(process.pid) != parent:
+                raise RuntimeError('cleanup_parent_birth_changed')
+        children = []
+        if attempt('poll', process.poll) is None:
+            attempt('retain_children', retain_children)
+            attempt('term', process.terminate)
+            attempt('cooperative_capture', lambda: process.communicate(timeout=3))
+            # Retained child custody survives supervisor death/reap. Check it
+            # independently: reparenting changes PPID, not the held identity.
+            for pid, observed, fd in children:
+                def kill_child(pid=pid, observed=observed, fd=fd):
+                    if not select.select([fd], [], [], 0)[0]:
+                        if birth(pid)[1:] != observed[1:]:
+                            raise RuntimeError('cleanup_child_birth_changed')
+                        os.killpg(pid, signal.SIGKILL)
+                attempt('kill_child', kill_child)
+            if attempt('poll_after_term', process.poll) is None:
+                attempt('kill_parent', process.kill)
+            # Always attempt terminal/reap independently of capture failure.
+            attempt('terminal_wait', lambda: process.wait(timeout=5))
+            attempt('final_capture', lambda: process.communicate(timeout=5))
+            for _, _, fd in children:
+                def child_terminal(fd=fd):
+                    if not select.select([fd], [], [], 2)[0]:
+                        raise RuntimeError('cleanup_child_terminal_unearned')
+                attempt('child_terminal', child_terminal)
+        for stream in (process.stdout, process.stderr):
+            if stream is not None:
+                attempt('close_stream', stream.close)
+        for fd in held:
+            attempt('close_pidfd', lambda fd=fd: os.close(fd))
+        if process.returncode is None:
+            faults.append('terminal_unearned')
+        if faults:
+            # Refusal remains failure even if a later cleanup attempt works.
+            # Do not mask an already failing assertion with another exception.
+            if sys.exc_info()[0] is None:
+                raise RuntimeError('overlap_cleanup_refused:' + ','.join(faults))
+            print('overlap_cleanup_refused:' + ','.join(faults), file=sys.stderr)
+
+    def interrupt_request(self, command: list[str], environment: dict[str, str], root: Path, signum: int, *, expected_quiesce: bool = False, competing_bridge: bool = False) -> subprocess.CompletedProcess:
+        if competing_bridge:
+            self.assertTrue(expected_quiesce)
         process = subprocess.Popen(command, env=environment, stdout=subprocess.PIPE,
                                    stderr=subprocess.PIPE, text=True, start_new_session=True)
         try:
@@ -374,11 +484,134 @@ class CredentialTests(unittest.TestCase):
             self.assertTrue((root / "blocked.json").exists(), "request never blocked")
             blocked = json.loads((root / "blocked.json").read_text())
             self.assertTrue(Path(blocked.get("header_file", blocked.get("request_file"))).exists())
+            if expected_quiesce:
+                request = Path(blocked["request_file"])
+                self.assertEqual(request.parent, root / "state")
+                self.assertTrue(request.name.startswith(".hook-request."))
+                self.assertEqual(request.lstat().st_mode & 0o777, 0o600)
+                self.assertEqual(request.lstat().st_uid, os.getuid())
+                self.assertFalse(request.is_symlink())
+                self.assertEqual(blocked["command"], "gh")
+                self.assertEqual(blocked["argv"], ["api", "-X", "PATCH",
+                    "repos/example/repository/hooks/73", "--input", str(request)])
+                self.assertEqual(blocked["request"], {"active": False})
+                self.assertEqual(json.loads(request.read_text()), {"active": False})
+                self.assertEqual(blocked["sender_phase"], "pending-quiesce")
+                receipt = json.loads((root / "state" / "hook-owner.json").read_text())
+                self.assertEqual(receipt["phase"], "pending-quiesce")
+                self.assertEqual(receipt["hook_id"], 73)
+                self.assertIs(receipt["hook_quiesced"], False)
+                self.assertEqual(receipt["hook_url"], "https://fixture.invalid/hooks/toy")
+                self.assertEqual(set(blocked["old_runtime_states"]), {"controller", "agent"})
+                self.assertTrue(all(s not in {"absent", "Z", "X"}
+                    for s in blocked["old_runtime_states"].values()))
+                self.assertIs(json.loads((root / "owned-hook.json").read_text())["active"], False)
+                if competing_bridge:
+                    # Two real script/supervisor invocations share this one
+                    # freshly owned state. No mocked Child or lock result.
+                    import fcntl
+                    state = root / "state"
+                    def live_birth(pid):
+                        base = Path("/proc") / str(pid)
+                        self.assertEqual(base.stat().st_uid, os.getuid())
+                        text = (base / "stat").read_text()
+                        fields = text[text.rindex(")") + 2:].split()
+                        self.assertNotIn(fields[0], {"Z", "X"})
+                        return dict(pid=pid, uid=os.getuid(), ppid=int(fields[1]),
+                                    pgrp=int(fields[2]), session=int(fields[3]), start_ticks=int(fields[19]))
+                    self.assertIsNone(process.poll())
+                    first_birth = live_birth(process.pid)
+                    self.assertEqual(first_birth["ppid"], os.getpid())
+                    self.assertEqual((first_birth["pgrp"], first_birth["session"]), (process.pid, process.pid))
+                    old_pids = json.loads((root / "old-runtime-pids.json").read_text())
+                    self.assertEqual(set(old_pids), {"controller", "agent"})
+                    old_births = {role: live_birth(pid) for role, pid in old_pids.items()}
+                    # These exist before quiesce; hook.json is generated only
+                    # later, after the old-runtime fence and API setup.
+                    names = ("hook-owner.json", "sender-context.json", "identities.env", "pki/ca.pem",
+                             "controller.pid", "agent.pid", "controller-process.json", "agent-process.json")
+                    self.assertFalse((state / "hook.json").exists())
+                    before_state = {name: (state / name).read_bytes() for name in names}
+                    before_hook = (root / "owned-hook.json").read_bytes()
+                    before_ready = (root / "blocked.json").read_bytes()
+                    before_request = request.read_bytes()
+                    request_info = request.lstat()
+                    before_names = sorted(path.name for path in state.iterdir())
+                    before_calls = self.entries(root)
+                    run_argv = [str(Path(command[1]).parent / "hook-lifecycle.py"), "run", str(state)]
+                    first_runs = [entry for entry in before_calls if entry["command"] == "python3" and entry["argv"] == run_argv]
+                    self.assertEqual(len(first_runs), 1)
+                    self.assertEqual(first_runs[0]["birth"], first_birth)
+                    self.assertEqual(first_runs[0]["requested_public_mode"], "1")
+                    probe = os.open(state / "transition.lock", os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW)
+                    try:
+                        lock_info = os.fstat(probe)
+                        self.assertEqual(lock_info.st_uid, os.getuid())
+                        self.assertEqual(lock_info.st_mode & 0o777, 0o600)
+                        self.assertEqual(lock_info.st_nlink, 1)
+                        matches = []
+                        for ordinal, path in enumerate((Path("/proc") / str(process.pid) / "fd").iterdir()):
+                            self.assertLess(ordinal, 64)
+                            try:
+                                info = path.stat()
+                                if (info.st_dev, info.st_ino) == (lock_info.st_dev, lock_info.st_ino):
+                                    matches.append(path.name)
+                            except FileNotFoundError:
+                                pass
+                        self.assertEqual(len(matches), 1)
+                        with self.assertRaises(BlockingIOError):
+                            fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        second_environment = dict(environment, MCLOVING_DOGFOOD_PUBLIC_HOOK="0")
+                        second = subprocess.Popen(command, env=second_environment, stdout=subprocess.PIPE,
+                                                  stderr=subprocess.PIPE, text=True, start_new_session=True)
+                        try:
+                            second_output, second_error = second.communicate(timeout=10)
+                            self.assertEqual(second.returncode, 1, second_error)
+                            self.assertIn("state_or_dependency_unavailable", second_error)
+                            self.assertEqual(second_output, "")
+                            after_calls = self.entries(root)
+                            self.assertEqual(after_calls[:len(before_calls)], before_calls)
+                            extra = after_calls[len(before_calls):]
+                            self.assertEqual(len(extra), 1)
+                            self.assertEqual(extra[0]["command"], "python3")
+                            self.assertEqual(extra[0]["argv"], run_argv)
+                            self.assertEqual(extra[0]["requested_public_mode"], "0")
+                            birth = extra[0]["birth"]
+                            self.assertEqual(birth["pid"], second.pid)
+                            self.assertEqual((birth["uid"], birth["ppid"]), (os.getuid(), os.getpid()))
+                            self.assertEqual((birth["pgrp"], birth["session"]), (second.pid, second.pid))
+                            self.assertGreater(birth["start_ticks"], 0)
+                            self.assertNotEqual(second.pid, process.pid)
+                            self.assert_private_arguments(extra, second_output, second_error)
+                        finally:
+                            self.finish_overlap_request(second)
+                        self.assertIsNone(process.poll())
+                        self.assertEqual(live_birth(process.pid), first_birth)
+                        self.assertEqual({role: live_birth(pid) for role, pid in old_pids.items()}, old_births)
+                        self.assertEqual({name: (state / name).read_bytes() for name in names}, before_state)
+                        self.assertEqual((root / "owned-hook.json").read_bytes(), before_hook)
+                        self.assertEqual((root / "blocked.json").read_bytes(), before_ready)
+                        self.assertEqual(request.read_bytes(), before_request)
+                        after_request = request.lstat()
+                        self.assertEqual((after_request.st_dev, after_request.st_ino, after_request.st_mode,
+                                          after_request.st_uid, after_request.st_nlink, after_request.st_size),
+                                         (request_info.st_dev, request_info.st_ino, request_info.st_mode,
+                                          request_info.st_uid, request_info.st_nlink, request_info.st_size))
+                        self.assertEqual(sorted(path.name for path in state.iterdir()), before_names)
+                        self.assertFalse((state / "bridge.pid").exists())
+                        self.assertFalse((state / "bridge-process.json").exists())
+                        self.assertFalse((state / "hook.json").exists())
+                        with self.assertRaises(BlockingIOError):
+                            fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    finally:
+                        os.close(probe)
             os.killpg(process.pid, signum)
             output, error = process.communicate(timeout=10)
             return subprocess.CompletedProcess(command, process.returncode, output, error)
         finally:
-            if process.poll() is None:
+            if competing_bridge:
+                self.finish_overlap_request(process)
+            elif process.poll() is None:
                 os.killpg(process.pid, signal.SIGKILL)
                 process.communicate(timeout=10)
 
@@ -395,7 +628,7 @@ class CredentialTests(unittest.TestCase):
                 self.assertEqual(list(state.glob(".delivery-auth.*")), [])
                 self.assertFalse((state / "last-delivered-event.example__repository.main").exists())
 
-    def run_deployment(self, hook_id: str = "", failure: str = "", existing: str = "404", interrupt: int | None = None, handoff_failure: str = "", signal_stage: str = "api", sealed_output: bool = False) -> None:
+    def run_deployment(self, hook_id: str = "", failure: str = "", existing: str = "404", interrupt: int | None = None, handoff_failure: str = "", signal_stage: str = "api", sealed_output: bool = False, overlap: bool = False) -> None:
         with TemporaryDirectory(prefix="mcloving-deploy-test-") as temporary:
             root = Path(temporary)
             state, environment = self.fixture(root, hook_id=hook_id, failure=failure, existing=existing,
@@ -480,7 +713,8 @@ class CredentialTests(unittest.TestCase):
                 for path in (tree, tree.parent, tree.parent.parent, tree.parent.parent.parent): path.chmod(0o500)
             command = ["bash", str(scripts / "heman-up.sh"), str(state)]
             try:
-                result = self.interrupt_request(command, environment, root, interrupt) if interrupt else subprocess.run(
+                result = self.interrupt_request(command, environment, root, interrupt,
+                    expected_quiesce=signal_stage == "quiesce", competing_bridge=overlap) if interrupt else subprocess.run(
                     command, env=environment, capture_output=True, text=True, timeout=30)
             finally:
                 old_status_before_fixture_cleanup = [child.poll() for child in old_children]
@@ -494,6 +728,50 @@ class CredentialTests(unittest.TestCase):
                         except ProcessLookupError:
                             pass
                 reap_old_fixture_children()
+            if signal_stage == "quiesce":
+                # Check the cancelled early branch before downstream-success
+                # assertions that require controller/API work it must prevent.
+                self.assertIn(interrupt, (signal.SIGINT, signal.SIGTERM))
+                self.assertEqual(hook_id, "73")
+                self.assertEqual(result.returncode, 128 + interrupt, result.stderr)
+                self.assertEqual(old_status_before_fixture_cleanup, [None, None])
+                entries = self.entries(root)
+                self.assert_private_arguments(entries, result.stdout, result.stderr)
+                self.assertFalse(any(e["command"] in {"cargo", "podman", "sudo", "curl", "env",
+                    "mcloving-cli", "mcloving-identity-admin", "render_source_binding"} for e in entries))
+                self.assertFalse(any(e["command"] == "python3" and e["argv"][1:2] == ["stop"] for e in entries))
+                requests = [e for e in entries if "request" in e]
+                self.assertEqual(len(requests), 1)
+                self.assertEqual(requests[0]["request"], {"active": False})
+                self.assertEqual(requests[0]["sender_phase"], "pending-quiesce")
+                self.assertEqual(requests[0]["request_mode"], 0o600)
+                self.assertEqual(requests[0]["request_owner"], os.getuid())
+                self.assertFalse(Path(requests[0]["request_file"]).exists())
+                self.assertFalse(any(e["command"] == "gh" and "POST" in e["argv"] for e in entries))
+                self.assertEqual(list(state.glob(".hook-request.*")), [])
+                self.assertEqual(list(state.glob(".api-auth.*")), [])
+                self.assertEqual(list(state.glob("deliveries.*.tsv")), [])
+                self.assertEqual(list(state.glob("last-delivered-event.*")), [])
+                receipt = lifecycle.owner(state)
+                self.assertEqual(receipt["hook_id"], 73)
+                self.assertEqual(receipt["phase"], "pending-quiesce")
+                self.assertIs(receipt["hook_quiesced"], False)
+                self.assertIs(json.loads((root / "owned-hook.json").read_text())["active"], False)
+                before = (state / "hook-owner.json").read_bytes()
+                from unittest.mock import patch
+                with patch.dict(os.environ, environment, clear=True):
+                    with self.assertRaisesRegex(lifecycle.Refused, "uncertain_previous_transition"):
+                        lifecycle.begin(state)
+                self.assertEqual((state / "hook-owner.json").read_bytes(), before)
+                # The real supervisor must release its one held lock after
+                # terminal cancellation, without weakening the uncertain phase.
+                import fcntl
+                held = os.open(state / "transition.lock", os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW)
+                try:
+                    fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                finally:
+                    os.close(held)
+                return
             if failure in {'early-disable', 'early-readback'}:
                 self.assertEqual(result.returncode, 23, result.stderr)
                 entries = self.entries(root)
@@ -616,6 +894,18 @@ class CredentialTests(unittest.TestCase):
 
     def test_same_mode_restart_removes_actual_sealed_readonly_output_only(self) -> None:
         self.run_deployment(hook_id='73',existing='200',sealed_output=True)
+
+    def test_retained_public_quiesce_request_cleanup_on_interrupt(self) -> None:
+        self.run_deployment(hook_id="73", existing="200", interrupt=signal.SIGINT,
+                            signal_stage="quiesce")
+
+    def test_retained_public_quiesce_request_cleanup_on_terminate(self) -> None:
+        self.run_deployment(hook_id="73", existing="200", interrupt=signal.SIGTERM,
+                            signal_stage="quiesce")
+
+    def test_overlapping_bridge_deployment_refused_before_effects(self) -> None:
+        self.run_deployment(hook_id="73", existing="200", interrupt=signal.SIGTERM,
+                            signal_stage="quiesce", overlap=True)
 
 
 
