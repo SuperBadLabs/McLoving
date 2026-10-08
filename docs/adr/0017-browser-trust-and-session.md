@@ -1,10 +1,15 @@
 # ADR 0017: Browser trust and bearer session for rendered representations
 
-Status: Proposed decision; this exact-pin successor awaits independent source
-and owner review. The htmx 4 fidelity V4 records were independently reviewed and
-published as draft PR #189; acceptance and deployment remain unrecorded.
+Status: Independently source-reviewed preparatory decision; rollout DEFERRED.
+UI-003 remains DEFERRED. Final integration of this attribution refresh is pending;
+no separately claimed human risk acceptance, implementation, deployment or closure
+is recorded.
 Ticket: UI-003. Recorded 2026-10-08 against source revision
 `7e5de0785a0ac5b1f98bd28dbcf50980806cf871`.
+Exact-pin V5 source binding: PR #189 head
+`b35682b552a103140f963a491c6ba13b79ad1e11`; Root joined all 2,215 frozen
+V5 source files to that Git tree. This attribution refresh is a new candidate,
+not that head's checks or a new protected-main result.
 
 ## Scope and present facts
 
@@ -237,16 +242,21 @@ It is not a withdrawal fallback silently chosen by this record.
 
 The supported-upgrade direction is the 4.x line, with each move separately
 reviewed and pinned by exact version and SHA-256, never a floating registry tag.
-The proposed exact pin is **htmx.org 4.0.0, `package/dist/htmx.js`**, the
+The preparatory exact pin is **htmx.org 4.0.0, `package/dist/htmx.js`**, the
 classical entry declared by that release's `package.main`: **102,533 bytes**,
 SHA-256 **`5d0833e3b435d357221955566f46fa378cb653c4f119c0a8533b4bb4098cf9ad`**.
 Root obtained the fixed public npm release in a private inspection directory,
 verified its tarball SHA-1 and SHA-512 against the version metadata, and verified
 the npm registry ECDSA signature using the registry's public key. The exact
 receipt hashes and acquisition URL appear in the security review. This records
-a concrete proposed version AND digest for UI-003 clause (5); independent review
-and owner adoption of the pin remain open. Upstream Git tag/source equivalence,
-maintenance promises and integration compatibility have not been established.
+a concrete version AND digest for UI-003 clause (5). The exact-pin V5 source
+received independent source review by `/root/milestone_m1/dogfood001`, with no
+findings, for required document validation and authorized draft publication only.
+Root records this exact pin as the preparatory decision under the user's
+authorized full-goal work and recorded htmx 4 direction. This is not a separately
+claimed human risk acceptance; acquisition and rollout remain DEFERRED.
+Upstream Git tag/source equivalence, maintenance promises and integration
+compatibility have not been established.
 
 The private upstream inspection did not place library bytes in the project or
 execute JavaScript. UI-004 owns subsequent reviewed tree acquisition, digest
@@ -309,8 +319,10 @@ the exact pinned bytes before implementation. This is an acquisition direction
 and contract, not a claim of htmx compatibility or rendered-browser behavior.
 
 The actual records review is in `docs/evidence/UI-003_SECURITY_REVIEW.md`, cited
-by TM-055 and its decision-review attribution. That review is not an independent
-sign-off, owner risk acceptance or closure receipt. The normal Closure attribution
+by TM-055 and its decision-review attribution. It records the author review and
+separate independent exact-pin V5 source review; neither is human risk acceptance,
+runtime qualification or a closure receipt. Each attribution refresh requires its own independent review and required
+validation; current candidate observations are recorded in PR #189. The normal Closure attribution
 table must acquire `UI-003 | docs/evidence/UI-003_SECURITY_REVIEW.md` only after
 exact-head checks, independent review, protected merge and post-merge required
 verification are observed and UI-003 is legitimately DONE. Adding that machine

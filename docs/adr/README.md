@@ -22,4 +22,4 @@ session on 2026-07-28. ADR 0016 and the amendment to ADR 0006 were approved on
 | [0014](0014-verification.md) | Verification and war testing |
 | [0015](0015-roadmap.md) | Repository and implementation roadmap |
 | [0016](0016-product-parity-before-migration-authority.md) | Product parity before migration authority |
-| [0017](0017-browser-trust-and-session.md) | Proposed browser trust and bearer session; UI-003 records only, rewrite remains deferred |
+| [0017](0017-browser-trust-and-session.md) | Independently source-reviewed preparatory browser trust and bearer session; UI-003 records only, rewrite remains deferred |

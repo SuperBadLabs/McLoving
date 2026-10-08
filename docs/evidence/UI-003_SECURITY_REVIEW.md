@@ -4,8 +4,13 @@ Ticket: UI-003. Date: 2026-10-08.
 Original decision author: the UI-003 child agent, `/root/milestone_m4/ui_003`.
 Exact-pin successor author: Root, 2026-10-08. Independent source reviewer of
 earlier corrected V2 and htmx 4 fidelity V4: `/root/milestone_m3`.
-Independent source review of this exact-pin successor: pending.
-Final integration/owner review: pending. Owner acceptance: not recorded.
+Independent exact-pin V5 source reviewer: `/root/milestone_m1/dogfood001`,
+2026-10-08; no findings; document validation and authorized draft publication only.
+Preparatory pin disposition: recorded by Root under the user's authorized
+full-goal work and recorded htmx 4 direction; acquisition and rollout DEFERRED.
+Final integration: pending. Each attribution refresh requires independent source
+review and document validation; current candidate observations are recorded in PR #189.
+Separately claimed human risk acceptance: not recorded. UI-003 remains DEFERRED.
 Scope: authored decision records in an isolated copy of
 `7e5de0785a0ac5b1f98bd28dbcf50980806cf871`; no runtime changes or execution.
 
@@ -62,9 +67,9 @@ clear protected DOM and pending work before new authority is installed. Every
 asynchronous operation captures its context generation before starting and checks
 it again before DOM, popup or pair-refresh commit; best-effort abort is insufficient.
 The present mutable client lacks these guards and is not described as conformant.
-This records the author's correction, not completed independent V2 review or a
-passing browser race test; downstream implementation must prove those refusal and
-clearing cases.
+This records the author's correction; the later V2 and exact-pin V5 independent
+source reviews are attributed below. It is not a passing browser race test;
+downstream implementation must prove those refusal and clearing cases.
 
 TM-055 names every rendered value as an injection site and requires context
 encoding for documents and fragments, inert hostile-value proofs per field,
@@ -78,10 +83,12 @@ The roadmap retains owner-selected htmx 4. The prior no-library proposal has
 not received owner approval and is now a future reviewed alternative only.
 Root privately obtained and inertly inspected the exact public npm 4.0.0
 release after V4. Tarball integrity and the public registry signature were
-actually verified; the proposed classical artifact version AND SHA-256 are
-recorded below and in ADR 0017. UI-003 clause (5) still requires independent
-review and owner adoption of that concrete pin; its conditional obligation is
-applicable while the library direction is retained. UI-004 still owns reviewed
+actually verified; the classical artifact version AND SHA-256 are recorded
+below and in ADR 0017. The exact-pin V5 record received independent source review.
+Root now records that concrete preparatory pin under the user's authorized
+full-goal work and recorded htmx 4 direction, without separately claiming human
+risk acceptance. Clause (5)'s version/digest, upgrade and withdrawal decisions
+remain intact; acquisition and rollout remain DEFERRED. UI-004 still owns reviewed
 project-tree acquisition, digest verification, embedding and compatibility
 gates. No library bytes were vendored and no JavaScript or browser test ran. ADR 0017 records a reviewed 4.x
 upgrade direction/triggers and the named withdrawal fallback of retaining the
@@ -104,8 +111,9 @@ review does not execute or qualify those future gates.
 ## Residual risks and proof still owed
 
 The author/source review records the session decision and htmx acquisition
-constraints and observed exact artifact pin; independent adoption of clause (5)
-and passing runtime proof remain outstanding.
+constraints and exact artifact pin. Independent exact-pin V5 source review is
+complete and Root records the preparatory pin disposition. Final integration,
+separately claimed human risk acceptance and runtime proof remain unearned.
 A same-origin script compromise can steal either credential or make authorized
 requests; memory-only reduces persistence, not the authority of injected script.
 Extensions, developer tools, browser internals and garbage collection prevent a
@@ -136,8 +144,21 @@ at PR #189 head `ca60ac6fe9f51b09890c77ce7e0baa1263a8df3d`. Its Foundation
 run `37753884063` completed successfully with all 15 jobs passing; its 18 checks
 were 17 successes and the classified native Windows job skipped. Those checks
 cover that unchanged-runtime draft and do not qualify a future rendered
-interface. This exact-pin successor still needs independent source review and
-final integration/owner review.
+interface. These ca60/V4 observations are historical. The exact-pin V5 successor
+was independently source-reviewed by `/root/milestone_m1/dogfood001`, with no
+findings, for required document validation and authorized draft publication only.
+Root subsequently joined all 2,215 frozen V5 source files to PR #189 head
+`b35682b552a103140f963a491c6ba13b79ad1e11`. At Root's readback that draft was
+OPEN/CLEAN with 18 checks: 17 SUCCESS and the classified Windows-agent job
+SKIPPED; the UI browser gate was SUCCESS. The head-bound run references were
+Foundation `37763692793` and Windows `37763692786`. These observations cover
+b356, not this attribution refresh, protected merge, post-merge verification,
+successor browser/session compatibility, real-team qualification or closure.
+`/root/milestone_m4` also audited all five literal decision clauses and their
+separation from downstream implementation. Root records the exact preparatory
+pin under existing full-goal authorization and the recorded htmx 4 direction;
+no separately claimed human risk acceptance is recorded. Each attribution refresh requires its own source review and required validators;
+final integration remains pending. Current candidate observations are recorded in PR #189.
 
 Required eventual machine attribution, after observed normal closure gates:
 
@@ -178,12 +199,14 @@ acquisition and integrity/signature status, leaving adoption and compatibility
 open.
 
 Earlier independent and Root document validations describe their exact V2/V3
-sources; the separate V4 review/check observations cover only V4. None validates
-this exact-pin successor. Owner risk acceptance, the real-team condition,
-rollout, DEFERRED resumption, browser/session proof and closure remain unearned.
+sources; the separate V4 review/check observations cover only V4. The later
+exact-pin V5 source review and b356 checks are separately attributed above;
+none validates this attribution refresh. Separately claimed human risk acceptance,
+the real-team condition, rollout, DEFERRED resumption, browser/session proof and
+closure remain unearned.
 
 
-## Exact htmx 4 artifact observations for the proposed pin
+## Exact htmx 4 artifact observations for the preparatory pin
 
 Root inspected the fixed public release on 2026-10-08 in a private `/tmp`
 directory. No package script, JavaScript, Node import or browser executed, and
@@ -224,8 +247,11 @@ protected-DOM clearing, every-field encoding/disclosure, history exclusion and
 inline/evaluated-feature exclusion remain required. Older 2.x option names
 are not evidence of those properties in 4.0.0.
 
-This successor records UI-003's exact version/digest proposal and observed
-registry provenance. Independent source review, pin adoption, UI-004 project
-acquisition/embedding, compatibility gates, ADR 0016 real-team evidence and
-normal ticket closure remain open. No closure-attribution row or board state
-is changed.
+This record preserves UI-003's exact version/digest, upgrade and withdrawal
+fallback and observed registry provenance. Independent exact-pin V5 source review
+is complete. Root records the preparatory pin under existing full-goal
+authorization and the recorded htmx 4 direction, without separately claiming
+human risk acceptance. Each attribution refresh requires separate source review and validators. Final
+integration, UI-004 project acquisition/embedding, compatibility gates, ADR 0016
+real-team evidence and normal ticket closure remain open. Acquisition
+and rollout remain DEFERRED. No closure-attribution row or board state is changed.
