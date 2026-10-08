@@ -1,8 +1,8 @@
 # ADR 0017: Browser trust and bearer session for rendered representations
 
-Status: Proposed decision; this htmx 4 fidelity successor awaits independent
-source and owner review. Earlier V2/V3 reviews do not approve this changed
-library direction; no acceptance or deployment is recorded.
+Status: Proposed decision; this exact-pin successor awaits independent source
+and owner review. The htmx 4 fidelity V4 records were independently reviewed and
+published as draft PR #189; acceptance and deployment remain unrecorded.
 Ticket: UI-003. Recorded 2026-10-08 against source revision
 `7e5de0785a0ac5b1f98bd28dbcf50980806cf871`.
 
@@ -237,16 +237,24 @@ It is not a withdrawal fallback silently chosen by this record.
 
 The supported-upgrade direction is the 4.x line, with each move separately
 reviewed and pinned by exact version and SHA-256, never a floating registry tag.
-UI-004's filing names 4.0.0 and describes its early-adoption/registry-tag and
-inheritance costs; those are recorded filing facts, not newly verified upstream
-bytes, support promises or exact artifact provenance. No version/digest pair
-has been verified or acquired in this source-only task. **UI-003 acceptance
-clause (5) remains open until the exact version AND digest and provenance are
-recorded and reviewed**; selection of the 4.x direction alone is not a pin.
-UI-004 owns subsequent acquisition and digest verification with the repository's
-other pinned dependencies; it must embed same-origin bytes with no runtime
-toolchain and preserve the existing CSP. Acquisition and compatibility tests
-are unrun, not inapplicable.
+The proposed exact pin is **htmx.org 4.0.0, `package/dist/htmx.js`**, the
+classical entry declared by that release's `package.main`: **102,533 bytes**,
+SHA-256 **`5d0833e3b435d357221955566f46fa378cb653c4f119c0a8533b4bb4098cf9ad`**.
+Root obtained the fixed public npm release in a private inspection directory,
+verified its tarball SHA-1 and SHA-512 against the version metadata, and verified
+the npm registry ECDSA signature using the registry's public key. The exact
+receipt hashes and acquisition URL appear in the security review. This records
+a concrete proposed version AND digest for UI-003 clause (5); independent review
+and owner adoption of the pin remain open. Upstream Git tag/source equivalence,
+maintenance promises and integration compatibility have not been established.
+
+The private upstream inspection did not place library bytes in the project or
+execute JavaScript. UI-004 owns subsequent reviewed tree acquisition, digest
+verification and same-origin embedding with no runtime toolchain, retaining
+the existing CSP and repository dependency gates. UI-004 acquisition into the
+tree and library compatibility tests remain unrun. UI-004's filing facts about
+early adoption, registry tags and inheritance costs remain recorded claims;
+the artifact observation does not newly verify those claims.
 
 Upgrade triggers are a reviewed security advisory, upstream maintenance or
 withdrawal notice, or a required compatibility fix demonstrated against the
@@ -279,10 +287,18 @@ Disable or reject library browser-history persistence and restoration of
 protected HTML, context or credentials; no local/session storage or history
 cache exception is permitted. The adapter must preserve cookie omission,
 same-origin destination checks, redirect refusal and current-context checks
-for every request. No htmx 4 option name, hook name or claimed configuration
-support is asserted before the exact upstream artifact is verified. If that
-version cannot enforce any required guard or prohibition, refuse acquisition
-and rollout instead of weakening the contract.
+for every request. Inert inspection of the pinned source found default request
+`credentials: "same-origin"`, configuration `history: true` and
+`includeIndicatorCSS: true`, an `htmx:before:request` event carrying `{ctx}`,
+and dispatch through `ctx.fetch(ctx.request.action, ctx.request)`. It also
+found `hx-on` handlers invoking the JavaScript evaluator. These are source
+observations, not verified enforcement mechanisms. The integration must prove
+actual cookie omission, complete request/response mediation, disabled protected
+history, absence of injected indicator styles and every inline/evaluated
+feature under the unchanged CSP. Older-library option names must not substitute
+for proof against this artifact. If this version cannot enforce any required
+guard or prohibition, refuse acquisition and rollout instead of weakening the
+contract.
 
 UI-004 owes unchanged-header operation, separately named absence of every
 inline/evaluated feature, exact digest validation and mutation proofs. UI-005

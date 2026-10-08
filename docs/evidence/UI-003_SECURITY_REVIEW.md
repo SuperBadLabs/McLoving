@@ -1,9 +1,10 @@
 # UI-003 decision-record source review
 
 Ticket: UI-003. Date: 2026-10-08.
-Author/source reviewer: the original UI-003 child agent, `/root/milestone_m4/ui_003`.
-Independent source review of earlier corrected V2: `/root/milestone_m3`,
-2026-10-08. Independent review of this htmx 4 fidelity successor: pending.
+Original decision author: the UI-003 child agent, `/root/milestone_m4/ui_003`.
+Exact-pin successor author: Root, 2026-10-08. Independent source reviewer of
+earlier corrected V2 and htmx 4 fidelity V4: `/root/milestone_m3`.
+Independent source review of this exact-pin successor: pending.
 Final integration/owner review: pending. Owner acceptance: not recorded.
 Scope: authored decision records in an isolated copy of
 `7e5de0785a0ac5b1f98bd28dbcf50980806cf871`; no runtime changes or execution.
@@ -75,11 +76,14 @@ evaluated strings or a later silent policy relaxation.
 
 The roadmap retains owner-selected htmx 4. The prior no-library proposal has
 not received owner approval and is now a future reviewed alternative only.
-No asset was acquired, no exact version/digest provenance was verified and no
-library compatibility test ran. UI-003 clause (5) remains open pending an exact
-reviewed version AND SHA-256; the conditional pin obligation is not inapplicable
-now that the library direction is retained. UI-004 still owns acquisition,
-digest verification and compatibility gates. ADR 0017 records a reviewed 4.x
+Root privately obtained and inertly inspected the exact public npm 4.0.0
+release after V4. Tarball integrity and the public registry signature were
+actually verified; the proposed classical artifact version AND SHA-256 are
+recorded below and in ADR 0017. UI-003 clause (5) still requires independent
+review and owner adoption of that concrete pin; its conditional obligation is
+applicable while the library direction is retained. UI-004 still owns reviewed
+project-tree acquisition, digest verification, embedding and compatibility
+gates. No library bytes were vendored and no JavaScript or browser test ran. ADR 0017 records a reviewed 4.x
 upgrade direction/triggers and the named withdrawal fallback of retaining the
 shipped static UI while suspending rollout; it does not silently select htmx 2,
 a CDN, weaker policy or a no-library replacement.
@@ -90,14 +94,18 @@ Access header, JSON DTO transport, same-origin checks, cookie omission and
 redirect refusal cannot be delegated to unchecked defaults. Refresh has no
 attribute/global/default or second credential path. All inline/evaluated
 features and protected browser-history persistence/restoration must be disabled
-or rejected; required support or specific option names are not claimed without
-verified upstream bytes. If any guard cannot be enforced, refuse acquisition
-and rollout. This source review does not execute or qualify those future gates.
+or rejected. Inert artifact inspection found same-origin cookie credentials,
+enabled history and indicator CSS defaults, a request-context event/dispatch
+path and evaluated hx-on handlers. Those source facts require explicit future
+guards; they do not prove a working wrapper or CSP-compatible integration.
+If any guard cannot be enforced, refuse acquisition and rollout. This source
+review does not execute or qualify those future gates.
 
 ## Residual risks and proof still owed
 
 The author/source review records the session decision and htmx acquisition
-constraints, **not** a passing runtime or a fulfilled exact library pin clause.
+constraints and observed exact artifact pin; independent adoption of clause (5)
+and passing runtime proof remain outstanding.
 A same-origin script compromise can steal either credential or make authorized
 requests; memory-only reduces persistence, not the authority of injected script.
 Extensions, developer tools, browser internals and garbage collection prevent a
@@ -122,8 +130,14 @@ resolved both; its 2,215 file bytes and modes and all five clauses were checked.
 The reviewer approved the earlier V2 records and count maintenance for required checks;
 no tests, runtime, browser, owner acceptance or closure were credited by that
 source-only review. That approval covered the earlier no-library proposal,
-not this htmx 4 fidelity successor. Fresh independent source review and final
-integration/owner review remain pending.
+not the later exact-pin successor. The htmx 4 fidelity V4 source was separately
+reviewed by that reviewer, approved for a draft proposal update, and published
+at PR #189 head `ca60ac6fe9f51b09890c77ce7e0baa1263a8df3d`. Its Foundation
+run `37753884063` completed successfully with all 15 jobs passing; its 18 checks
+were 17 successes and the classified native Windows job skipped. Those checks
+cover that unchanged-runtime draft and do not qualify a future rendered
+interface. This exact-pin successor still needs independent source review and
+final integration/owner review.
 
 Required eventual machine attribution, after observed normal closure gates:
 
@@ -156,11 +170,62 @@ access/refresh lifecycle, current-client nonconformance, context-generation and
 protected-display rules, CSRF/login/popup/no-script costs, common public DTO and
 authorization boundary, every-field encoding/disclosure denials and exact CSP.
 It restores htmx 4 as the acquisition direction and preserves no-library only as
-a future owner-reviewed alternative. Exact pin/provenance, acquisition, library
-configuration support and compatibility remain unearned; none was checked via
-network, registry, code parsing or executing tools in this authoring task.
+a future owner-reviewed alternative. At V4 authoring time exact pin/provenance,
+acquisition, library configuration support and compatibility remained unearned;
+that source-only author performed no registry, network or execution checks.
+The later Root artifact observations below supersede only the private upstream
+acquisition and integrity/signature status, leaving adoption and compatibility
+open.
 
-Earlier independent and Root document validations above describe their exact
-V2/V3 sources only. They do not validate this changed successor. No new
-independent reviewer, owner risk acceptance, real-team condition, rollout,
-DEFERRED resumption, browser/session proof or closure is asserted.
+Earlier independent and Root document validations describe their exact V2/V3
+sources; the separate V4 review/check observations cover only V4. None validates
+this exact-pin successor. Owner risk acceptance, the real-team condition,
+rollout, DEFERRED resumption, browser/session proof and closure remain unearned.
+
+
+## Exact htmx 4 artifact observations for the proposed pin
+
+Root inspected the fixed public release on 2026-10-08 in a private `/tmp`
+directory. No package script, JavaScript, Node import or browser executed, and
+the release was not placed in the project tree. The tarball response was HTTP
+200 without redirects; the observed SHA-1 and SHA-512 matched the published
+version metadata before the inert archive inspection. Root verified the
+registry signature with the matching public npm key and OpenSSL (`Verified OK`).
+
+| Observed item | Exact value |
+|---|---|
+| Package/version | `htmx.org@4.0.0` |
+| Fixed tarball URL | `https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz` |
+| Selected artifact | `package/dist/htmx.js` (`package.main`, classical entry) |
+| Selected artifact bytes | 102,533 |
+| Selected artifact SHA-256 | `5d0833e3b435d357221955566f46fa378cb653c4f119c0a8533b4bb4098cf9ad` |
+| Published tarball SHA-1 | `72323bd24261364fe3111803c46b80da1fb33445` |
+| Published/observed tarball integrity | `sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==` |
+| Registry signature key ID | `SHA256:DhQ8wR5APBvFHLF/+Tc+AYvPOdTpcIDqOhxsBHRwC7U` |
+| Public metadata receipt SHA-256 | `545cb7084863f560a0fe90389d8c3b437623c4c23ff9244f182a3211803e0342` |
+| Inert artifact/integrity receipt SHA-256 | `01d5b03df927e2352c0ef33dc3c7de19eb092a8ae2e21db8cfb67b8bfceb19b0` |
+| Public registry signature receipt SHA-256 | `30fd2c29542b892f02a3f5340df0eb51f3f3f1ff90912b37d0a2280fe7ebc0e0` |
+
+The registry metadata claims upstream Git head
+`4195bc0dc26b612ea5bea46f5914c6386eadeba3`; Git tag/source equivalence has not
+been independently reconciled. Registry integrity/signature verification is
+specific to these downloaded package bytes. It does not prove upstream source
+equivalence, maintainer identity beyond the observed registry chain, future
+maintenance, vulnerability absence, CSP compatibility or owner adoption.
+
+Raw inspection of this exact source found `credentials: "same-origin"` in
+the request defaults, `history: true`, `includeIndicatorCSS: true`, an
+`htmx:before:request` event with `{ctx}`, dispatch through
+`ctx.fetch(ctx.request.action, ctx.request)` and hx-on evaluated handlers.
+The defaults do not satisfy the proposed cookie-free/unchanged-CSP contract
+without a separately reviewed integration and actual browser/mutation proofs.
+All access/refresh context checks, public JSON transport, redirect refusal,
+protected-DOM clearing, every-field encoding/disclosure, history exclusion and
+inline/evaluated-feature exclusion remain required. Older 2.x option names
+are not evidence of those properties in 4.0.0.
+
+This successor records UI-003's exact version/digest proposal and observed
+registry provenance. Independent source review, pin adoption, UI-004 project
+acquisition/embedding, compatibility gates, ADR 0016 real-team evidence and
+normal ticket closure remain open. No closure-attribution row or board state
+is changed.
