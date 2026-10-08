@@ -1,0 +1,259 @@
+{
+  "exceptions": {
+    "architecture-self-check": "Required once in the lane.",
+    "cargo-deny-action-release": "Exact opaque pinned action and separately pinned release are a finite policy-check correspondence, not evidence that action internals use the same tool release.",
+    "retained-ancestry": "Foundation only; sealed source is history-free. Exact occurrence and bytes required.",
+    "runner-setup": "Only the enumerated byte-bound checkout/cache/disk/tool install blocks. No step-name exemption.",
+    "secret-history": "Exact pinned Foundation full-history Docker scan versus rootless tree-only Podman scan; history is unavailable in a sealed tree."
+  },
+  "inputs": {
+    ".gitleaks.toml": "e68b7284ed0c783bd7383d4eb1e71b6be1c05dbb56515a2f50bc9b78c95e7bd6",
+    "deny.toml": "499deee5cb460179fe871b48f96f7f632916ad7ffe1ce9b2b63a736db7a7407f",
+    "scripts/dogfood/lib.sh": "8971e304a9cde610ade47618368f57d084fc00f972b55acd96d471ac5c985c80",
+    "scripts/dogfood/versions.env": "8aae397ae37cf609fbfaab80826401e54ffb68d996554151552c5aac942e72e3",
+    "scripts/run-verified-rust-test.sh": "e30aa84bf2db77aa549cfe2c5740ee2fdad581496c02292df3235588eb2fd6c6",
+    "scripts/verify-rust-test-execution.py": "572f3263c82f1ecafddc4fc9e61cc009380598e74766c65cf47db2c81c65c8bf",
+    "tools/versions.env": "3848b71d9e9d083a48f1c9c6f1c34a2daa161ea2d851b6e2d254df478c2ddc20"
+  },
+  "jobs": {
+    "architecture": {
+      "env": {},
+      "header_sha256": "4662d9ea45b704bdf3c9f3e28a83d161571fd6f5b79ee0e3e7e9d1f951fde8d6"
+    },
+    "controller-postgres": {
+      "env": {
+        "MCLOVING_TEST_DATABASE_URL": "postgres://mcloving@127.0.0.1:5432/mcloving"
+      },
+      "header_sha256": "3117531517fa13746ca2e5c11ec765042c6fc23b73f3494afe5ed336f566dabc"
+    },
+    "dependencies": {
+      "env": {},
+      "header_sha256": "538e0a7811a910da00c1e18d7f60cd046d83ad8bb756f5ec798cde3d81a79d6f"
+    },
+    "rust-lint": {
+      "env": {},
+      "header_sha256": "59d6f03315e8314482571b98e707e339cd381ad8a415adeadf664fa83056fa4f"
+    },
+    "rust-tests": {
+      "env": {},
+      "header_sha256": "e3c8c1b2aab32398b823d56eff4e34a302358332b9bdd746beb8d7527fe6e217"
+    },
+    "secrets": {
+      "env": {},
+      "header_sha256": "e3a9c9dda2ad9bd76a37b6cda8d339c58f9d17f6a825be8f0a00c94f0ec674d1"
+    }
+  },
+  "lane_blocks": {
+    "actionlint-release": {
+      "reason": "Real archive verification/explicit empty config/all .yml+.yaml inventory.",
+      "records": [
+        "{\"binding\": {\"archive_sha256\": \"8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8\", \"configuration\": \"explicit-empty-file\", \"dotglob\": true, \"failglob\": false, \"globignore\": \"unset\", \"inventory\": [\".github/workflows/*.yml\", \".github/workflows/*.yaml\"], \"nullglob\": true, \"require_nonempty\": true, \"version\": \"1.7.12\"}, \"contract\": \"actionlint\", \"cwd\": \".\", \"environment\": {}}"
+      ],
+      "script": "architecture.sh",
+      "sha256": "44df4196b575784e9c8b07bfc12299d8d7f68b95d38cd01173556435555aeba8"
+    },
+    "architecture-preamble": {
+      "reason": "Actual common setup/pinned lib; no caller-selected toolchain.",
+      "records": [],
+      "script": "architecture.sh",
+      "sha256": "d863516d2dcd3503b95366d847d6ee9f4dd69850a50f740f2751d932b2885408"
+    },
+    "cargo-deny-release": {
+      "reason": "Whole real download/hash/extract/version/check; every byte is checked, no scaffolding regex.",
+      "records": [
+        "{\"binding\": {\"action\": \"EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25\", \"action_inputs\": {\"command\": \"check\"}, \"commands\": [\"--version\", \"check\"], \"lane_archive_sha256\": \"9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f\", \"lane_release\": \"0.20.2\", \"limitation\": \"exact source correspondence; opaque action tool version not inferred\", \"policy_sha256\": \"499deee5cb460179fe871b48f96f7f632916ad7ffe1ce9b2b63a736db7a7407f\"}, \"contract\": \"cargo-deny-check\", \"cwd\": \".\", \"environment\": {}}"
+      ],
+      "script": "dependencies.sh",
+      "sha256": "6ce803fd29da1684ab7be45cf8ef1b3dac36cac8cb0d119a56a320ff47336fd2"
+    },
+    "clojure-release": {
+      "reason": "Real pinned archive/install/version assertion; four verification commands are parsed separately.",
+      "records": [
+        "{\"binding\": {\"action\": \"DeLaGuardo/setup-clojure@4c7a6f613e5089821bb3bb2a33a3ee115578580d\", \"archive_sha256\": \"13769da6d63a98deb2024378ae1a64e4ee211ac1035340dfca7a6944c41cde21\", \"classpath_cwd\": \"compat/jenkins-worker\", \"lane_install\": \"verified release archive/layout/version assertion\", \"version\": \"1.12.4.1618\"}, \"contract\": \"clojure-cli\", \"cwd\": \".\", \"environment\": {}}"
+      ],
+      "script": "architecture.sh",
+      "sha256": "2c4d34a9b743827caf869b7848139d168383ee57d8251a4ea69124729a3bbfca"
+    },
+    "controller-postgres-preamble": {
+      "reason": "Actual common setup/pinned lib; no caller-selected toolchain.",
+      "records": [],
+      "script": "controller-postgres.sh",
+      "sha256": "8df6c5161a4b066f1e2222d111b836df04a3bfe15d2137597768005b4f30fe40"
+    },
+    "dependencies-preamble": {
+      "reason": "Actual common setup/pinned lib; no caller-selected toolchain.",
+      "records": [],
+      "script": "dependencies.sh",
+      "sha256": "1cd7bb3046fdce74f27af6a0803604d2f2ea57804ac14a7b0f56fde48bff2482"
+    },
+    "gitleaks-tree": {
+      "reason": "Exact pinned Foundation full-history Docker scan versus rootless tree-only Podman scan; history is unavailable in a sealed tree.",
+      "records": [
+        "{\"binding\": {\"arguments\": [\"detect\", \"--no-banner\", \"--redact\", \"--verbose\"], \"exception\": \"sealed tree cannot inspect history; --no-git is required only in lane\", \"image_sha256\": \"c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f\", \"lane\": [\"podman\", \"tree-only\", \"ro,Z\", \"/repo\", \".\"], \"rules_sha256\": \"e68b7284ed0c783bd7383d4eb1e71b6be1c05dbb56515a2f50bc9b78c95e7bd6\", \"workflow\": [\"docker\", \"history\", \"/repo\"]}, \"contract\": \"gitleaks\", \"cwd\": \".\", \"environment\": {}}"
+      ],
+      "script": "secrets.sh",
+      "sha256": "b084e4807f91962042878ec3b16ad992d421484c489048554b4fad714dfffafd"
+    },
+    "postgres-service": {
+      "reason": "Exact pinned service/user/db/trust/loopback ephemeral port/readiness/cleanup. Logical database URL normalizes only that independently bound port.",
+      "records": [],
+      "script": "controller-postgres.sh",
+      "sha256": "4e60a222998f8dba6c5194166ed38f0edbe03e51a83778b33f3bfa679ee9e3c6"
+    },
+    "rust-lint-preamble": {
+      "reason": "Actual common setup/pinned lib; no caller-selected toolchain.",
+      "records": [],
+      "script": "rust-lint.sh",
+      "sha256": "e2b0533177062378b7cc88ee6a2822e725379616c46117c2e5894f290a54bd22"
+    },
+    "rust-tests-preamble": {
+      "reason": "Actual common setup/pinned lib; no caller-selected toolchain.",
+      "records": [],
+      "script": "rust-tests.sh",
+      "sha256": "15f8af69265a822ba2553d4e95e550db38a0577e4f4e6ba3fa83243d912405e9"
+    },
+    "secrets-preamble": {
+      "reason": "Actual common setup/pinned lib; no caller-selected toolchain.",
+      "records": [],
+      "script": "secrets.sh",
+      "sha256": "c3f0acfd4673074c5012dd4570c1e0bb0113f35e0539c2903e3a441b8e866807"
+    }
+  },
+  "protocol": "mcloving.dogfood-lane-contracts/v1",
+  "workflow_blocks": {
+    "0168508a3d362ddbe8e60be923fac073529591fab24556ac19e91c007326b2da": {
+      "count": 1,
+      "jobs": [
+        "architecture"
+      ],
+      "reason": "Exact provisioning body/action/config; changed bytes cannot hide commands.",
+      "records": []
+    },
+    "07206ccc076feb7e3a498ed8e1f51d1a6f4aa63c6bb5fd70c77d122e732136bc": {
+      "count": 2,
+      "jobs": [
+        "rust-lint",
+        "rust-tests"
+      ],
+      "reason": "Exact provisioning body/action/config; changed bytes cannot hide commands.",
+      "records": []
+    },
+    "080e9fae4c62f6ff2d0ba9245585e5d76f2b00d39edc8eff7718c47347e5a1fb": {
+      "count": 4,
+      "jobs": [
+        "rust-lint",
+        "rust-tests",
+        "dependencies",
+        "controller-postgres"
+      ],
+      "reason": "Exact provisioning body/action/config; changed bytes cannot hide commands.",
+      "records": []
+    },
+    "14f13743f70a41fc8d840ff5518ba0dbc52a14c6490839c7a2d78c0f23f5c8eb": {
+      "count": 2,
+      "jobs": [
+        "rust-tests",
+        "controller-postgres"
+      ],
+      "reason": "Exact provisioning body/action/config; changed bytes cannot hide commands.",
+      "records": []
+    },
+    "1bc66d831bc24059759f950f7f0cca02fbfa55e4950156cc1c440be5f9fb5464": {
+      "count": 1,
+      "jobs": [
+        "secrets"
+      ],
+      "reason": "Exact pinned Foundation full-history Docker scan versus rootless tree-only Podman scan; history is unavailable in a sealed tree.",
+      "records": [
+        "{\"binding\": {\"arguments\": [\"detect\", \"--no-banner\", \"--redact\", \"--verbose\"], \"exception\": \"sealed tree cannot inspect history; --no-git is required only in lane\", \"image_sha256\": \"c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f\", \"lane\": [\"podman\", \"tree-only\", \"ro,Z\", \"/repo\", \".\"], \"rules_sha256\": \"e68b7284ed0c783bd7383d4eb1e71b6be1c05dbb56515a2f50bc9b78c95e7bd6\", \"workflow\": [\"docker\", \"history\", \"/repo\"]}, \"contract\": \"gitleaks\", \"cwd\": \".\", \"environment\": {}}"
+      ]
+    },
+    "38159c4cb7f7e1944da14b75c4fe3b446cd077dea88c741360ee5e0e2af41552": {
+      "count": 1,
+      "jobs": [
+        "architecture"
+      ],
+      "reason": "Exact provisioning body/action/config; changed bytes cannot hide commands.",
+      "records": []
+    },
+    "3bf0cc43f284f3d846207b9bc5d6cace8f431ff8704f6efaed960aa088fc9178": {
+      "count": 1,
+      "jobs": [
+        "rust-lint"
+      ],
+      "reason": "Exact provisioning body/action/config; changed bytes cannot hide commands.",
+      "records": []
+    },
+    "4a1f82cd297d31920d03ae8aa13f84326451f5bde4307e992aa8db1cd9904d8e": {
+      "count": 1,
+      "jobs": [
+        "dependencies"
+      ],
+      "reason": "Exact opaque pinned action and separately pinned release are a finite policy-check correspondence, not evidence that action internals use the same tool release.",
+      "records": [
+        "{\"binding\": {\"action\": \"EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25\", \"action_inputs\": {\"command\": \"check\"}, \"commands\": [\"--version\", \"check\"], \"lane_archive_sha256\": \"9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f\", \"lane_release\": \"0.20.2\", \"limitation\": \"exact source correspondence; opaque action tool version not inferred\", \"policy_sha256\": \"499deee5cb460179fe871b48f96f7f632916ad7ffe1ce9b2b63a736db7a7407f\"}, \"contract\": \"cargo-deny-check\", \"cwd\": \".\", \"environment\": {}}"
+      ]
+    },
+    "6901e022f20fb6f63809d6c8de9e830b6c451695063fe26646e51663f3356f46": {
+      "count": 1,
+      "jobs": [
+        "rust-tests"
+      ],
+      "reason": "Exact provisioning body/action/config; changed bytes cannot hide commands.",
+      "records": []
+    },
+    "73afbdc37a3163d396c815c2067e238157a58d0cecbd807baed7bde74e1d4198": {
+      "count": 1,
+      "jobs": [
+        "secrets"
+      ],
+      "reason": "Exact provisioning body/action/config; changed bytes cannot hide commands.",
+      "records": []
+    },
+    "8950bc90ccdea517c2116b767a6b124911c065e2781ba27f7b55a1104d2410e1": {
+      "count": 1,
+      "jobs": [
+        "architecture"
+      ],
+      "reason": "Foundation only; sealed source is history-free. Exact occurrence and bytes required.",
+      "records": []
+    },
+    "8e95d7301820d2105c3e3581867f4367f7e3a0bc850667b6d90f85e5e7aafbfd": {
+      "count": 1,
+      "jobs": [
+        "controller-postgres"
+      ],
+      "reason": "Exact provisioning body/action/config; changed bytes cannot hide commands.",
+      "records": []
+    },
+    "bf13fa8159cb8d88757e9e1ef06b1e4abff2e2e061fb5e6a8c64b910643a98fe": {
+      "count": 1,
+      "jobs": [
+        "rust-lint"
+      ],
+      "reason": "Exact provisioning body/action/config; changed bytes cannot hide commands.",
+      "records": []
+    },
+    "f1e9bc876bc19f164471379a4dd4836cf3fedf6fbe7cb363e547b0229f41204c": {
+      "count": 1,
+      "jobs": [
+        "architecture"
+      ],
+      "reason": "Pins action/version and finite release correspondence.",
+      "records": [
+        "{\"binding\": {\"action\": \"DeLaGuardo/setup-clojure@4c7a6f613e5089821bb3bb2a33a3ee115578580d\", \"archive_sha256\": \"13769da6d63a98deb2024378ae1a64e4ee211ac1035340dfca7a6944c41cde21\", \"classpath_cwd\": \"compat/jenkins-worker\", \"lane_install\": \"verified release archive/layout/version assertion\", \"version\": \"1.12.4.1618\"}, \"contract\": \"clojure-cli\", \"cwd\": \".\", \"environment\": {}}"
+      ]
+    },
+    "f8e9a5c6ef190a7f96433a363e19e89d46e068965577203c864578bdc8a1df7c": {
+      "count": 1,
+      "jobs": [
+        "architecture"
+      ],
+      "reason": "Retains meaningful pinned workflow lint/inventory/config assertion.",
+      "records": [
+        "{\"binding\": {\"archive_sha256\": \"8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8\", \"configuration\": \"explicit-empty-file\", \"dotglob\": true, \"failglob\": false, \"globignore\": \"unset\", \"inventory\": [\".github/workflows/*.yml\", \".github/workflows/*.yaml\"], \"nullglob\": true, \"require_nonempty\": true, \"version\": \"1.7.12\"}, \"contract\": \"actionlint\", \"cwd\": \".\", \"environment\": {}}"
+      ]
+    }
+  },
+  "workflow_header_sha256": "26246afe87682b4add314219c5fec5a5b9bca9f848adeb6f402961cfae573fe2"
+}

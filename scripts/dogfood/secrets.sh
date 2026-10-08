@@ -5,11 +5,15 @@
 # the scan is of the tree (`--no-git`) where Foundation scans the commits;
 # the same rules and the same pinned image decide.
 # shellcheck source=lib.sh
+# dogfood-contract-begin secrets-preamble
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 dogfood_lane secrets
+# dogfood-contract-end secrets-preamble
 # The scan runs from the tree root with a relative source so the
 # repository's .gitleaks.toml path allowlists match as they do in Foundation.
+# dogfood-contract-begin gitleaks-tree
 podman run --rm \
   --volume "${dogfood_repo}:/repo:ro,Z" --workdir /repo \
   "${MCLOVING_GITLEAKS_IMAGE}" \
   detect --source . --no-banner --redact --verbose --no-git
+# dogfood-contract-end gitleaks-tree

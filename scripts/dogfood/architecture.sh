@@ -8,11 +8,14 @@
 # so that one step is Foundation's alone; verify-lanes.py records it as
 # unmirrored rather than pretending.
 # shellcheck source=lib.sh
+# dogfood-contract-begin architecture-preamble
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 dogfood_lane architecture
+# dogfood-contract-end architecture-preamble
 /usr/bin/python3 -I scripts/test-workflow-aggregate.py
 /usr/bin/python3 -I scripts/test-sequential-runtime-gate.py
 
+# dogfood-contract-begin actionlint-release
 cache="${HOME}/.cache/mcloving-dogfood"
 mkdir -p "${cache}"
 actionlint_archive="${cache}/actionlint-${ACTIONLINT_VERSION}.tar.gz"
@@ -40,11 +43,13 @@ workflow_files=(
   -config-file "${actionlint_config}" \
   "${workflow_files[@]}"
 shopt -u nullglob dotglob
+# dogfood-contract-end actionlint-release
 
 # The Jenkins compatibility contracts run under the Clojure CLI Foundation
 # pins (the setup-clojure action's `cli:`), fetched once from the release
 # archive, verified against scripts/dogfood/versions.env and installed under the
 # dogfood cache; a host Java is the one prerequisite.
+# dogfood-contract-begin clojure-release
 clojure_prefix="${cache}/clojure-${CLOJURE_CLI_VERSION}"
 if [ ! -x "${clojure_prefix}/bin/clojure" ]; then
   clojure_archive="${cache}/clojure-tools-${CLOJURE_CLI_VERSION}.tar.gz"
@@ -70,13 +75,7 @@ if [ ! -x "${clojure_prefix}/bin/clojure" ]; then
 fi
 export PATH="${clojure_prefix}/bin:${PATH}"
 test "$(clojure --version)" = "Clojure CLI version ${CLOJURE_CLI_VERSION}"
-(
-  cd compat/jenkins-worker
-  timeout 60 clojure -M:test
-  ./test-plugin-directory.sh
-  ../../scripts/test-jenkins-sequential-contract.sh
-  ../../scripts/test-jenkins-sequential-compiler.sh
-)
+# dogfood-contract-end clojure-release
 
 bash -n scripts/validate-foundation.sh
 bash -n scripts/validate-source-acquirer-apparmor.sh
@@ -105,11 +104,22 @@ python3 scripts/verify-ticket-closure-receipts.py
 python3 scripts/test-verify-rust-test-execution.py
 python3 scripts/test-dogfood-verdicts.py
 python3 scripts/test-dogfood-credentials.py
+python3 scripts/test-dogfood-lanes.py
+python3 scripts/test-dogfood-lifecycle.py
 python3 scripts/verify-ui-browser-gate.py
 test "$(find docs/adr -maxdepth 1 -name '[0-9][0-9][0-9][0-9]-*.md' | wc -l)" -eq 16
 test -s docs/architecture/CHARTER.md
 test -s docs/ALPHA_DEMO.md
 test -s docs/threat-model/README.md
 test -s docs/EXECUTION_BOARD.md
+(
+  cd compat/jenkins-worker
+  timeout 60 clojure -M:test
+  ./test-plugin-directory.sh
+  ../../scripts/test-jenkins-sequential-contract.sh
+  ../../scripts/test-jenkins-sequential-compiler.sh
+)
+
+
 # The dogfood's own alignment with Foundation is checked on every run.
 python3 scripts/dogfood/verify-lanes.py

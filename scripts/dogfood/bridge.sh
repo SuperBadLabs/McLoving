@@ -19,6 +19,13 @@
 set -euo pipefail
 state="$1"
 interval="${2:-60}"
+lifecycle="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/hook-lifecycle.py"
+if [[ "${interval}" == --owned-delivery ]]; then
+  [[ $# == 5 ]] || exit 2
+  python3 "${lifecycle}" owned-delivery-guard "${state}" "$3" "$4" "$5"
+else
+  python3 "${lifecycle}" bridge-guard "${state}"
+fi
 repository="${MCLOVING_DOGFOOD_REPOSITORY:?owner/name}"
 branch="${MCLOVING_DOGFOOD_BRANCH:-main}"
 hook_path="$(jq -r .path "${state}/hook.json")"
@@ -102,11 +109,11 @@ PY
 # "<event id> <head> <created_at>" lines: GitHub's push events, paged newest first until
 # the watermark is found. A page request that fails aborts the pass (answer
 # 1) rather than being read as the end of the events, so nothing is skipped
-# on a transient error. Without a record yet, only the newest push (or the
-# branch head, if the events list none) is delivered. If the watermark is
-# older than the events GitHub still lists (an outage longer than its event
-# window), the newest push alone is delivered and the gap is logged, since
-# the pushes between cannot be known.
+# on a transient error. A fresh sender delivers only the newest visible push;
+# that is a declared bootstrap policy, not a full-history claim. No visible
+# push means no delivery. An existing watermark outside the visible window
+# refuses the pass: neither a branch-SHA synthetic identity nor a newest-only
+# fallback can establish which historical public delivery admitted a build.
 pending_pushes() {
   local last page events batch pushes found
   last="$(cat "${last_file}" 2>/dev/null || true)"
@@ -133,32 +140,25 @@ pending_pushes() {
   if [ -z "${last}" ]; then
     if [ -n "$(printf '%s' "${pushes}" | head -1)" ]; then
       printf '%s' "${pushes}" | awk 'NF { print; exit }'
-    else
-      local head
-      head="$(gh api "repos/${repository}/branches/${branch}" --jq .commit.sha)" || return 1
-      printf 'branch-%s %s -\n' "${head}" "${head}"
+
     fi
     return 0
   fi
   if [ -z "${found}" ]; then
-    if [ -n "$(printf '%s' "${pushes}" | head -1)" ]; then
-      log "watermark ${last} is older than the push events GitHub lists; delivering the newest push only" >&2
-      printf '%s' "${pushes}" | awk 'NF { print; exit }'
-      return 0
-    fi
-    # No push to the branch is listed at all: the branch head is delivered
-    # under a branch-<sha> id unless it is the head last delivered.
-    local head last_sha
-    head="$(gh api "repos/${repository}/branches/${branch}" --jq .commit.sha)" || return 1
-    last_sha="$(awk '$4 != "-" { sha = $3 } END { print sha }' "${ledger}" 2>/dev/null || true)"
-    if [ "${head}" != "${last_sha}" ]; then
-      log "watermark ${last} is older than the events GitHub lists and none is a push to ${branch}; delivering the branch head" >&2
-      printf 'branch-%s %s -\n' "${head}" "${head}"
-    fi
-    return 0
+    log "event watermark is outside the visible feed; history unresolved, refusing delivery" >&2
+    return 1
   fi
   printf '%s' "${pushes}" | awk -v last="${last}" '$1 == last { exit } NF && !seen[$1]++ { print }' | tac
 }
+
+if [[ "${interval}" == --owned-delivery ]]; then
+  deliver "$3" "$4" "$5"
+  event="$3"
+  printf '%s\n' "${event}" >"${last_file}.next"
+  sync "${last_file}.next"
+  mv -f "${last_file}.next" "${last_file}"
+  exit 0
+fi
 
 while :; do
   # The watermark is contiguous: a failed delivery stops this pass, so the
@@ -166,12 +166,7 @@ while :; do
   if pending="$(pending_pushes)"; then
     while read -r event sha pushed_at; do
       [ -z "${event}" ] && continue
-      deliver "${event}" "${sha}" "${pushed_at}" || break
-      # Written beside and renamed over, so a crash mid-write leaves the
-      # previous watermark rather than an empty one.
-      printf '%s\n' "${event}" >"${last_file}.next"
-      sync "${last_file}.next"
-      mv -f "${last_file}.next" "${last_file}"
+      python3 "${lifecycle}" bridge-send "${state}" "${event}" "${sha}" "${pushed_at}" || break
     done <<<"${pending}"
   fi
   [ "${interval}" = "once" ] && exit 0

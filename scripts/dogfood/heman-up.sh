@@ -13,7 +13,18 @@
 # needs: podman, sudo (a tmpfs for the acquirer transport), gh (the GitHub
 # token for commit statuses), a built target/debug (the script builds it).
 set -euo pipefail
-state="$(mkdir -p "$1" && chmod 0700 "$1" && cd "$1" && pwd)"
+lifecycle="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/hook-lifecycle.py"
+if [[ "${2:-}" != --under-transition-lock ]]; then
+  [[ $# == 1 ]] || { echo 'usage: heman-up.sh state-dir' >&2; exit 2; }
+  exec python3 "${lifecycle}" run "$1"
+fi
+[[ $# == 2 ]] || exit 2
+state="$1"
+python3 "${lifecycle}" assert-lock "${state}"
+python3 "${lifecycle}" begin "${state}"
+# The old public sender must be durably observed inactive while its old
+# runtime/route still exists. A failed fence leaves every runtime untouched.
+python3 "${lifecycle}" quiesce "${state}"
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "${repo}"
 # shellcheck source=../../tools/versions.env
@@ -29,9 +40,6 @@ uuid() { python3 -c 'import uuid; print(uuid.uuid4())'; }
 secret() { python3 -c 'import secrets; print(secrets.token_hex(32))'; }
 sha() { sha256sum "$1" | cut -d' ' -f1; }
 
-echo "== build"
-cargo build --locked -p mcloving-controller -p mcloving-agent -p mcloving-source-acquirer -p mcloving-cli 2>&1 | tail -1
-cargo build --locked -p mcloving-agent --example render_source_binding 2>&1 | tail -1
 controller="${repo}/target/debug/mcloving-controller"
 agent_bin="${repo}/target/debug/mcloving-agent"
 admin="${repo}/target/debug/mcloving-identity-admin"
@@ -40,22 +48,14 @@ acquirer="${repo}/target/debug/mcloving-source-acquirer"
 render="${repo}/target/debug/examples/render_source_binding"
 
 echo "== stop the previous instance"
-# A recorded pid is signalled only while its command line still names the
-# binary or script we started; a reused pid is left alone and the stale
-# record removed.
-stop_recorded() {
-  local pid_file="$1" expected="$2" pid
-  [ -f "${pid_file}" ] || return 0
-  pid="$(cat "${pid_file}")"
-  if [ -r "/proc/${pid}/cmdline" ] && tr '\0' ' ' <"/proc/${pid}/cmdline" | rg -q -F "${expected}"; then
-    kill "${pid}" 2>/dev/null || true
-  fi
-  rm -f "${pid_file}"
-}
-stop_recorded "${state}/bridge.pid" "scripts/dogfood/bridge.sh"
-stop_recorded "${state}/agent.pid" "${agent_bin}"
-stop_recorded "${state}/controller.pid" "${controller}"
-sleep 1
+# Retain ambiguous receipts; pidfds bind termination to the recorded process.
+python3 "${lifecycle}" stop "${state}" bridge "${repo}/scripts/dogfood/bridge.sh"
+python3 "${lifecycle}" stop "${state}" agent "${agent_bin}"
+python3 "${lifecycle}" stop "${state}" controller "${controller}"
+
+echo "== build"
+cargo build --locked -p mcloving-controller -p mcloving-agent -p mcloving-source-acquirer -p mcloving-cli 2>&1 | tail -1
+cargo build --locked -p mcloving-agent --example render_source_binding 2>&1 | tail -1
 
 echo "== identities (kept across restarts)"
 ids="${state}/identities.env"
@@ -132,7 +132,8 @@ fi
 
 echo "== sealed source binding for ${repository}"
 mkdir -p "${state}/agent-workspace" "${state}/objects" "${state}/embedded"
-rm -rf "${state}/source-output"
+python3 "${lifecycle}" writable-output "${state}"
+rm -rf -- "${state}/source-output"
 cat >"${state}/source-intent.json" <<EOF
 {"mapping_id":"source.mcloving","organization_id":"${organization_id}","project_id":"${project_id}",
  "pipeline_id":"${pipeline_id}","trust_pool":"trusted-linux",
@@ -189,7 +190,9 @@ env -i HOME="${HOME}" PATH=/usr/local/bin:/usr/bin:/bin TMPDIR="${state}" \
   MCLOVING_PUBLIC_BASE_URL="${MCLOVING_DOGFOOD_PUBLIC_BASE_URL:-http://127.0.0.1:${api_port}}" \
   nohup /bin/bash -c 'set -euo pipefail; . "$1"; export MCLOVING_API_TOKEN="${api_token:?missing API token}" MCLOVING_ARTIFACT_AGENT_TOKEN="${artifact_token:?missing artifact token}"; exec "$2"' \
     dogfood-controller "${ids}" "${controller}" >>"${state}/controller.log" 2>&1 &
-echo $! >"${state}/controller.pid"
+controller_pid=$!
+printf '%s\n' "${controller_pid}" >"${state}/controller.pid"
+python3 "${lifecycle}" record-pid "${state}" controller "${controller_pid}" "${controller}"
 
 export MCLOVING_URL="http://127.0.0.1:${api_port}" MCLOVING_API_TOKEN="${api_token}"
 export MCLOVING_ORGANIZATION_ID="${organization_id}" MCLOVING_PROJECT_ID="${project_id}"
@@ -211,7 +214,9 @@ env -i HOME="${HOME}" PATH=/usr/local/bin:/usr/bin:/bin TMPDIR="${state}" USER="
   MCLOVING_AGENT_LEASE_SECONDS=30 MCLOVING_AGENT_POLL_MILLISECONDS=500 \
   MCLOVING_AGENT_RENEW_MILLISECONDS=5000 MCLOVING_AGENT_TERMINATION_GRACE_MILLISECONDS=2000 \
   nohup "${agent_bin}" >>"${state}/agent.log" 2>&1 &
-echo $! >"${state}/agent.pid"
+agent_pid=$!
+printf '%s\n' "${agent_pid}" >"${state}/agent.pid"
+python3 "${lifecycle}" record-pid "${state}" agent "${agent_pid}" "${agent_bin}"
 
 echo "== pipeline ${pipeline_id} from .mcloving/pipeline.yaml"
 head_commit="$(gh api "repos/${repository}/branches/main" --jq .commit.sha)"
@@ -264,20 +269,26 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 api_header_file="$(mktemp "${state}/.api-auth.XXXXXX")"
 printf 'Authorization: Bearer %s\n' "${api_token}" >"${api_header_file}"
+trigger_created=false
 existing="$(curl -sS -o "${state}/trigger-current.json" -w '%{http_code}' "${base}" --header "@${api_header_file}")"
-if [ "${existing}" != "200" ]; then
-  curl -sS -o "${state}/trigger.json" -w 'trigger PUT %{http_code}\n' -X PUT "${base}" \
+if [ "${existing}" = "404" ]; then
+  trigger_created=true
+  curl --fail-with-body -sS -o "${state}/trigger.json" -w 'trigger PUT %{http_code}\n' -X PUT "${base}" \
     --header "@${api_header_file}" -H 'Content-Type: application/json' \
     -H 'If-Match: "0"' -H 'Idempotency-Key: dogfood-trigger' --data "${trigger_body}"
+elif [ "${existing}" != "200" ]; then
+  echo "trigger readback refused" >&2; exit 1
 elif [ "$(jq -r .configuration.repository_identity "${state}/trigger-current.json")" != "${repository}" ]; then
   generation="$(jq -r .generation "${state}/trigger-current.json")"
   trigger_body="$(printf '%s' "${trigger_body}" | jq -c --arg g "dogfood-$((generation + 1))" '.source_generation = $g')"
-  curl -sS -o "${state}/trigger.json" -w 'trigger PUT (reconcile) %{http_code}\n' -X PUT "${base}" \
+  curl --fail-with-body -sS -o "${state}/trigger.json" -w 'trigger PUT (reconcile) %{http_code}\n' -X PUT "${base}" \
     --header "@${api_header_file}" -H 'Content-Type: application/json' \
     -H "If-Match: \"${generation}\"" -H "Idempotency-Key: dogfood-trigger-${generation}" --data "${trigger_body}"
 fi
 umask 077
-curl -sS "${base}/webhook" --header "@${api_header_file}" >"${state}/hook.json"
+curl --fail-with-body -sS "${base}" --header "@${api_header_file}" >"${state}/trigger-final.json"
+chmod 0600 "${state}/trigger-final.json"
+curl --fail-with-body -sS "${base}/webhook" --header "@${api_header_file}" >"${state}/hook.json"
 chmod 0600 "${state}/hook.json"
 umask 022
 jq '{path, provider}' "${state}/hook.json"
@@ -292,42 +303,49 @@ export MCLOVING_DOGFOOD_PIPELINE_ID=${pipeline_id}
 EOF
 chmod 0600 "${state}/env"
 
-# Without public ingress the bridge stays up and polls; with the hook
-# registered at GitHub (MCLOVING_DOGFOOD_PUBLIC_HOOK=1) nothing polls, since
-# GitHub delivers to the route directly.
-if [ "${MCLOVING_DOGFOOD_PUBLIC_HOOK:-0}" != "1" ]; then
+# Exact nonsecret trigger/repository/route metadata is produced by this
+# locked deployment from the actual trigger readback and private descriptor.
+mode=bridge
+route_base="${MCLOVING_URL}"
+if [[ "${MCLOVING_DOGFOOD_PUBLIC_HOOK:-0}" == 1 ]]; then
+  mode=public
+  route_base="${MCLOVING_DOGFOOD_PUBLIC_BASE_URL:?public base url for the hook}"
+fi
+python3 - "${state}" "${repository}" "${organization_id}" "${project_id}" "${pipeline_id}" "${trigger_id}" "${route_base}" "${trigger_created}" <<'PY_CONTEXT'
+import json, os, pathlib, sys, tempfile
+state, repository, organization, project, pipeline, trigger, base, created = sys.argv[1:]
+state = pathlib.Path(state)
+current = json.loads((state / "trigger-final.json").read_text())
+descriptor = json.loads((state / "hook.json").read_text())
+if current.get("configuration", {}).get("repository_identity") != repository or current.get("state") != "enabled" or type(current.get("generation")) is not int or current["generation"] < 1 or not isinstance(current.get("source_generation"), str):
+    raise SystemExit("trigger binding readback refused")
+if descriptor.get("provider") != "github" or not isinstance(descriptor.get("path"), str) or not descriptor["path"].startswith("/"):
+    raise SystemExit("hook descriptor readback refused")
+value = dict(repository=repository, organization=organization, project=project, pipeline=pipeline, trigger=trigger,
+             generation=current["generation"], source_generation=current["source_generation"],
+             route_url=base.rstrip("/") + descriptor["path"], trigger_created=created == "true")
+fd, tmp = tempfile.mkstemp(prefix=".sender-context.", dir=state)
+try:
+    os.fchmod(fd, 0o600)
+    with os.fdopen(fd, "w") as out:
+        json.dump(value, out); out.flush(); os.fsync(out.fileno())
+    os.replace(tmp, state / "sender-context.json")
+    directory = os.open(state, os.O_RDONLY | os.O_DIRECTORY)
+    try: os.fsync(directory)
+    finally: os.close(directory)
+finally:
+    if os.path.exists(tmp): os.unlink(tmp)
+PY_CONTEXT
+python3 "${lifecycle}" reconcile "${state}" "${mode}"
+if [[ "${mode}" == bridge ]]; then
   env -i HOME="${HOME}" PATH=/usr/local/bin:/usr/bin:/bin \
     MCLOVING_URL="${MCLOVING_URL}" MCLOVING_DOGFOOD_REPOSITORY="${repository}" \
     nohup bash "${repo}/scripts/dogfood/bridge.sh" "${state}" "${MCLOVING_DOGFOOD_BRIDGE_INTERVAL:-60}" >>"${state}/bridge.log" 2>&1 &
-  echo $! >"${state}/bridge.pid"
-  echo "== bridge polling ${repository} every ${MCLOVING_DOGFOOD_BRIDGE_INTERVAL:-60}s (pid $(cat "${state}/bridge.pid"))"
+  bridge_pid=$!
+  printf '%s\n' "${bridge_pid}" >"${state}/bridge.pid"
+  python3 "${lifecycle}" record-pid "${state}" bridge "${bridge_pid}" "${repo}/scripts/dogfood/bridge.sh"
+  echo "== verified bridge sender started"
 else
-  # The repository webhook at GitHub is created, or its configuration
-  # replaced, for the public base URL and the trigger's current secret; it
-  # is found again by its URL on the next run, so the registration is
-  # idempotent and a rotated secret (a re-PUT trigger) is re-registered.
-  hook_url="${MCLOVING_DOGFOOD_PUBLIC_BASE_URL:?public base url for the hook}$(jq -r .path "${state}/hook.json")"
-  hook_id="$(gh api "repos/${repository}/hooks" --paginate --jq ".[] | select(.config.url == \"${hook_url}\") | .id" | head -1)"
-  hook_request_file="$(mktemp "${state}/.hook-request.XXXXXX")"
-  python3 - "${state}/hook.json" "${hook_url}" "${hook_id}" "${hook_request_file}" <<'PY'
-import json, sys
-hook_path, hook_url, hook_id, request_path = sys.argv[1:]
-with open(hook_path, encoding="utf-8") as source:
-    secret = json.load(source)["secret"]
-request = {"active": True, "events": ["push"], "config": {
-    "url": hook_url, "content_type": "json", "secret": secret, "insecure_ssl": "0",
-}}
-if not hook_id:
-    request["name"] = "web"
-with open(request_path, "w", encoding="utf-8") as output:
-    json.dump(request, output)
-PY
-  if [ -z "${hook_id}" ]; then
-    hook_id="$(gh api -X POST "repos/${repository}/hooks" --input "${hook_request_file}" --jq .id)"
-    echo "== hook ${hook_id} registered at GitHub for ${hook_url}"
-  else
-    gh api -X PATCH "repos/${repository}/hooks/${hook_id}" --input "${hook_request_file}" --jq .id >/dev/null
-    echo "== hook ${hook_id} at GitHub updated for ${hook_url}"
-  fi
+  echo "== verified owned public hook retained"
 fi
 echo "== up: . ${state}/env"
