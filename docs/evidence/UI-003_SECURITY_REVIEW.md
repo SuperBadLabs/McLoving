@@ -2,7 +2,8 @@
 
 Ticket: UI-003. Date: 2026-10-08.
 Author/source reviewer: the original UI-003 child agent, `/root/milestone_m4/ui_003`.
-Independent source review: `/root/milestone_m3`, 2026-10-08, corrected V2.
+Independent source review of earlier corrected V2: `/root/milestone_m3`,
+2026-10-08. Independent review of this htmx 4 fidelity successor: pending.
 Final integration/owner review: pending. Owner acceptance: not recorded.
 Scope: authored decision records in an isolated copy of
 `7e5de0785a0ac5b1f98bd28dbcf50980806cf871`; no runtime changes or execution.
@@ -30,13 +31,13 @@ production effect, session rollout, real-team qualification or ticket closure.
 | `crates/controller-api/ui/app.js:164-171, 244-248, 280-282` | Present client writes public text using DOM APIs. Server HTML introduces parser/context encoding risks that JSON or current text sinks cannot prove away. |
 | `crates/controller-api/src/lib.rs:845, 859-864`; `crates/controller-api/tests/route_denials.rs` | Exact shipped header and existing structural/text assertions remain unchanged. Textual checks are not successor browser evidence. |
 | `docs/architecture/UI_BROWSER_GATE_V1.md:190-210`; retained `docs/evidence/ui-002-browser-v1/` and `ui-002-browser-v2/` | Historical initial/accepted browser observations are source-bound to UI-002, not current rendered-session or SSR proof. Their files are preserved unchanged. Screen-reader announcements and cross-engine claims are explicitly limited. |
-| `docs/EXECUTION_BOARD.md:111-117, 1135-1140`; `docs/adr/0016-product-parity-before-migration-authority.md:36-40` | UI-003 is DEFERRED; UI-004 allows a reviewed no-library disposition; closure and real-team gates remain. Record authoring makes neither gate true. |
+| `docs/EXECUTION_BOARD.md:111-117, 1135-1140`; `docs/adr/0016-product-parity-before-migration-authority.md:36-40` | UI-003 is DEFERRED; UI-004 records owner-selected htmx 4 and permits only a reviewed future no-library disposition; closure and real-team gates remain. Record authoring makes neither gate true. |
 | `docs/threat-model/README.md`, `## Closure attribution`; `scripts/verify-ticket-closure-receipts.py:1063-1103` | Closure attribution means a reviewed closed ticket and rejects attribution to a non-DONE ticket. Decision-review attribution below is deliberately distinct and does not create a machine closure row. |
 
 ## Decision assessment
 
 ADR 0017 chooses tab-local memory for both credentials, explicit bearer resource
-requests, JSON refresh and no client library. It evaluates cookie sessions and
+requests, JSON refresh and the roadmap-selected htmx 4 acquisition direction. It evaluates cookie sessions and
 persistent storage, rejects them for this lane, and records their benefits and
 the costs accepted by the chosen model. Ordinary initial navigation is public
 shell only; reload loses authority, authenticated no-script behavior is unavailable,
@@ -69,19 +70,34 @@ encoding for documents and fragments, inert hostile-value proofs per field,
 separate log/failure cases, authorized public-field disclosure parity and common
 JSON/HTML denial parity. These are distinct **unexecuted** UI-005 obligations.
 Untrusted URI values need scheme/origin validation as well as escaping. CSP is
-unchanged; neither this review nor the no-library decision permits inline handlers,
+unchanged; neither this review nor the htmx direction permits inline handlers,
 evaluated strings or a later silent policy relaxation.
 
-The no-library branch is explicitly permitted by UI-004's acceptance. No library
-was acquired and no library-specific compatibility test ran; no exact pin or
-withdrawal result is fabricated. A later choice requires a reviewed amendment with
-exact version, digest, same-origin vendoring, upgrade and named withdrawal fallback.
-UI-004 and its dependency edges stay intact and still need normal disposition
-review and closure gates.
+The roadmap retains owner-selected htmx 4. The prior no-library proposal has
+not received owner approval and is now a future reviewed alternative only.
+No asset was acquired, no exact version/digest provenance was verified and no
+library compatibility test ran. UI-003 clause (5) remains open pending an exact
+reviewed version AND SHA-256; the conditional pin obligation is not inapplicable
+now that the library direction is retained. UI-004 still owns acquisition,
+digest verification and compatibility gates. ADR 0017 records a reviewed 4.x
+upgrade direction/triggers and the named withdrawal fallback of retaining the
+shipped static UI while suspending rollout; it does not silently select htmx 2,
+a CDN, weaker policy or a no-library replacement.
+
+Library integration must mediate every request and DOM insertion through the
+same explicit credential/context contract and documented public operations.
+Access header, JSON DTO transport, same-origin checks, cookie omission and
+redirect refusal cannot be delegated to unchecked defaults. Refresh has no
+attribute/global/default or second credential path. All inline/evaluated
+features and protected browser-history persistence/restoration must be disabled
+or rejected; required support or specific option names are not claimed without
+verified upstream bytes. If any guard cannot be enforced, refuse acquisition
+and rollout. This source review does not execute or qualify those future gates.
 
 ## Residual risks and proof still owed
 
-The author/source review records a complete decision, **not** a passing runtime.
+The author/source review records the session decision and htmx acquisition
+constraints, **not** a passing runtime or a fulfilled exact library pin clause.
 A same-origin script compromise can steal either credential or make authorized
 requests; memory-only reduces persistence, not the authority of injected script.
 Extensions, developer tools, browser internals and garbage collection prevent a
@@ -103,9 +119,11 @@ cited by TM-055. The independent source reviewer `/root/milestone_m3` examined t
 decision and actual public API on 2026-10-08. V1 findings were the exact ADR
 count mismatch and missing protected-display/late-result context rules. V2
 resolved both; its 2,215 file bytes and modes and all five clauses were checked.
-The reviewer approved V2 records and count maintenance for required checks;
+The reviewer approved the earlier V2 records and count maintenance for required checks;
 no tests, runtime, browser, owner acceptance or closure were credited by that
-source-only review. Final integration/owner review remains pending.
+source-only review. That approval covered the earlier no-library proposal,
+not this htmx 4 fidelity successor. Fresh independent source review and final
+integration/owner review remain pending.
 
 Required eventual machine attribution, after observed normal closure gates:
 
@@ -128,3 +146,21 @@ debt entries; board statuses and the existing Closure attribution were unchanged
 All 2,215 source file bytes and modes were preserved. These are document checks,
 not an executing session, encoding, CSRF, browser or closure result. This final
 review-attribution edit still needs its own candidate checks and review.
+
+## Htmx 4 fidelity successor author review
+
+The original UI-003 child authored this separate successor after Root identified
+that the proposal's selected no-library branch departed from UI-004's recorded
+owner-selected htmx 4 without owner approval. The successor preserves the full
+access/refresh lifecycle, current-client nonconformance, context-generation and
+protected-display rules, CSRF/login/popup/no-script costs, common public DTO and
+authorization boundary, every-field encoding/disclosure denials and exact CSP.
+It restores htmx 4 as the acquisition direction and preserves no-library only as
+a future owner-reviewed alternative. Exact pin/provenance, acquisition, library
+configuration support and compatibility remain unearned; none was checked via
+network, registry, code parsing or executing tools in this authoring task.
+
+Earlier independent and Root document validations above describe their exact
+V2/V3 sources only. They do not validate this changed successor. No new
+independent reviewer, owner risk acceptance, real-team condition, rollout,
+DEFERRED resumption, browser/session proof or closure is asserted.

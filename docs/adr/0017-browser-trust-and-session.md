@@ -1,7 +1,8 @@
 # ADR 0017: Browser trust and bearer session for rendered representations
 
-Status: Proposed decision; V2 independently source-reviewed. Final integration and
-owner review remain pending; no acceptance or deployment is recorded.
+Status: Proposed decision; this htmx 4 fidelity successor awaits independent
+source and owner review. Earlier V2/V3 reviews do not approve this changed
+library direction; no acceptance or deployment is recorded.
 Ticket: UI-003. Recorded 2026-10-08 against source revision
 `7e5de0785a0ac5b1f98bd28dbcf50980806cf871`.
 
@@ -38,7 +39,8 @@ Choose **bearer transport with one tab-local JavaScript credential store**. Both
 OIDC credentials reside only in that store and unavoidable bounded transient
 request/response objects. Resource requests attach access via `Authorization`;
 refresh uses the documented JSON body, not a cookie. Use same-origin external
-script and ordinary browser Fetch/DOM APIs, **no client library**. No credential
+script, the roadmap-selected **htmx 4 acquisition direction**, and explicit
+browser Fetch/DOM integration for the credential lifecycle. No credential
 may be embedded or reflected by the controller into a document or attributes.
 The successor must implement the contract below; this ADR is not evidence that
 the present token field conforms.
@@ -157,7 +159,11 @@ the same still-active captured context and generation**. Authority loss, context
 change, reset or sign-out clears it instead; content from a prior tenant/project
 or session may never survive under a replacement context. UI-006 must state and
 gate these costs per
-view. No-library availability tests use this ordinary behavior, not htmx tests.
+view. If the htmx asset is unavailable or incompatible, do not issue an
+authenticated library request or apply a fragment. Show an explicit limitation;
+retain only an already authorized display in the same still-active context, as
+above. UI-006 must gate absent/refused-library behavior as well as no-script
+behavior. There is no automatically selected no-library replacement interface.
 
 ## Public API and common authorization invariant
 
@@ -212,29 +218,79 @@ default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img
 No inline script, style, handler attribute or evaluated string is permitted;
 external script/styles remain same-origin. No CDN, `eval`, string timer,
 `Function` constructor or inline fallback is allowed. UI-004 and UI-006 keep the
-same policy even with no library. Existing textual CSP/structural contracts and
+same policy for htmx and for any later owner-reviewed alternative. Existing
+textual CSP/structural contracts and
 historical UI-002 browser results do not prove the successor works under it;
 unchanged-header browser, no-handler and no-evaluated-string gates with named
 mutation proofs remain owed. A proposed relaxation requires a **separate explicit
 owner decision and coordinated board revision before implementation**; UI-003
 does not authorize it.
 
-## Library disposition and review attribution
+## Library direction, acquisition gates and review attribution
 
-Choose **no client library**, after considering the owner-selected htmx 4 in
-UI-004. Explicit bearer attachment, paired credential handling and popup
-correlation still need small external script; acquiring a library would not
-remove those costs or settle the threat boundary. Ordinary Fetch/DOM operations
-provide the bounded progressive behavior chosen here. UI-004 explicitly permits
-this decision-only branch, so retain the ticket and dependency edges; do not
-invent a version, digest, acquisition or htmx compatibility result.
+Retain the roadmap's owner-selected **htmx 4** direction. UI-004 explicitly
+records that selection; the earlier proposed no-library branch did not receive
+owner approval and is not the current disposition. The allowed no-library
+branch remains a **future owner-reviewed alternative** requiring a revised
+decision and coordinated UI-004 disposition under its normal closure gates.
+It is not a withdrawal fallback silently chosen by this record.
 
-No library was acquired and no library-specific compatibility test ran. Version,
-digest, upgrade line and withdrawal fallback are therefore inapplicable in this
-decision. A later library choice must reopen this decision through review and
-record **an exact version and SHA-256**, same-origin vendoring, supported upgrade
-line/triggers and a named withdrawal fallback before acquisition. It must preserve
-the same CSP and separately prove every forbidden feature absent.
+The supported-upgrade direction is the 4.x line, with each move separately
+reviewed and pinned by exact version and SHA-256, never a floating registry tag.
+UI-004's filing names 4.0.0 and describes its early-adoption/registry-tag and
+inheritance costs; those are recorded filing facts, not newly verified upstream
+bytes, support promises or exact artifact provenance. No version/digest pair
+has been verified or acquired in this source-only task. **UI-003 acceptance
+clause (5) remains open until the exact version AND digest and provenance are
+recorded and reviewed**; selection of the 4.x direction alone is not a pin.
+UI-004 owns subsequent acquisition and digest verification with the repository's
+other pinned dependencies; it must embed same-origin bytes with no runtime
+toolchain and preserve the existing CSP. Acquisition and compatibility tests
+are unrun, not inapplicable.
+
+Upgrade triggers are a reviewed security advisory, upstream maintenance or
+withdrawal notice, or a required compatibility fix demonstrated against the
+pinned asset and unchanged policy. The named withdrawal fallback is **retain
+the existing shipped static UI and suspend the rendered rollout/acquisition**
+until a reviewed exact replacement pin passes all gates. Do not automatically
+move to htmx 2, a CDN, a weaker CSP or a no-library interface. A pin's withdrawal
+or inability to satisfy the contract keeps the lane open. Any new line or
+no-library fallback requires the separate owner-reviewed decision, not an
+inferred approval or a registry-tag change.
+
+The library confers no independent authority. External same-origin integration
+must mediate **every** request and insertion: capture the active context before
+async work; recheck it and the allowed public route/method/origin immediately
+before dispatch; attach access only as an Authorization header; use the
+documented JSON DTO and Content-Type for JSON operations instead of converting
+them to forms, query credentials or a second transport. Refresh/logout/OIDC
+continue through the one explicit credential store and documented operations;
+refresh is never a library attribute, global default or resource-request token.
+Recheck captured context before any response commit or DOM insertion, including
+late/error responses and cached/history restoration; no library-managed swap
+can bypass protected-DOM clearing or stale-result refusal. Credentials may
+exist only in the store and bounded transient request objects, never DOM
+configuration, library-global defaults, attributes, history snapshots or logs.
+
+Disable or reject **all** inline script/style/handler and evaluated-string
+features, including scripting-prefixed values, event filters and scripting
+extensions; do not rely on CSP blocking them after a partial interaction.
+Disable or reject library browser-history persistence and restoration of
+protected HTML, context or credentials; no local/session storage or history
+cache exception is permitted. The adapter must preserve cookie omission,
+same-origin destination checks, redirect refusal and current-context checks
+for every request. No htmx 4 option name, hook name or claimed configuration
+support is asserted before the exact upstream artifact is verified. If that
+version cannot enforce any required guard or prohibition, refuse acquisition
+and rollout instead of weakening the contract.
+
+UI-004 owes unchanged-header operation, separately named absence of every
+inline/evaluated feature, exact digest validation and mutation proofs. UI-005
+owes common authorization, per-field disclosure/encoding and both-credential
+handling; UI-006 owes migrated-view/library-unavailable/no-script behavior.
+Actual supported integration points and their proofs must be recorded against
+the exact pinned bytes before implementation. This is an acquisition direction
+and contract, not a claim of htmx compatibility or rendered-browser behavior.
 
 The actual records review is in `docs/evidence/UI-003_SECURITY_REVIEW.md`, cited
 by TM-055 and its decision-review attribution. That review is not an independent
